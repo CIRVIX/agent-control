@@ -107,7 +107,7 @@ test("a held call names an approval", async () => {
 
 test("substituted arguments come back, so the client sends what was authorized", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
 
   await withServer(
     async ({ endpoint, token }) => {

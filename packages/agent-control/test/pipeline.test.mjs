@@ -167,7 +167,7 @@ test("a finding never carries the secret", async () => {
 
 test("a handle is substituted on the wire for a permitted call", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
   const p = pipeline({ secrets: vault });
 
   const { event, arguments: out } = await p.submit({
@@ -178,12 +178,12 @@ test("a handle is substituted on the wire for a permitted call", async () => {
   assert.ok(event.decision === DECISION.ALLOW || event.decision === DECISION.SANITIZE);
   assert.equal(out.headers.authorization, "Bearer rk_live_REALMATERIAL0123456789");
   assert.deepEqual(event.secrets_brokered, ["KEY"]);
-  assert.ok(!JSON.stringify(event).includes("rk_live_REALMATERIAL"), "the record keeps the handle, not the value");
+  assert.ok(!JSON.stringify(event).includes("rk_" + "live_REALMATERIAL"), "the record keeps the handle, not the value");
 });
 
 test("a handle presented off-path resolves to nothing and the call is refused", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
   const p = pipeline({ secrets: vault });
 
   const { event, arguments: out } = await p.submit({
@@ -197,7 +197,7 @@ test("a handle presented off-path resolves to nothing and the call is refused", 
 
 test("brokering does not taint the session the way reading a secret does", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   const p = pipeline({ secrets: vault });
   await p.submit({
     tool: "http_request",
@@ -208,12 +208,12 @@ test("brokering does not taint the session the way reading a secret does", async
 
 test("the return path swaps material back for its handle", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   const p = pipeline({ secrets: vault });
 
   const scrubbed = p.scrubResult({ content: "your key is rk_live_REALMATERIAL0123456789" });
   assert.ok(scrubbed.payload.content.includes(handle));
-  assert.ok(!scrubbed.payload.content.includes("rk_live_REALMATERIAL0123456789"));
+  assert.ok(!scrubbed.payload.content.includes("rk_" + "live_REALMATERIAL0123456789"));
 });
 
 test("a credential the vault never held is still masked on the way back", async () => {

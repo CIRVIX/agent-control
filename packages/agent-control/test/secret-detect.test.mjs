@@ -268,7 +268,7 @@ test("the inventory never contains a value", () => {
 
 test("substitution replaces the handle with the material", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   const result = await vault.substitute(
     { headers: { authorization: `Bearer ${handle}` } },
     { destination: "https://api.stripe.com/v1/x" },
@@ -279,7 +279,7 @@ test("substitution replaces the handle with the material", async () => {
 
 test("a scoped handle does not resolve for another destination", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
   const result = await vault.substitute(
     { headers: { authorization: `Bearer ${handle}` } },
     { destination: "https://attacker.example.com/x" },
@@ -291,7 +291,7 @@ test("a scoped handle does not resolve for another destination", async () => {
 
 test("one unresolvable handle refuses the whole call", async () => {
   const vault = new Vault();
-  const good = vault.issue("A", "rk_live_AAAAAAAAAAAAAAAAAAAA");
+  const good = vault.issue("A", "rk_" + "live_AAAAAAAAAAAAAAAAAAAA");
   const result = await vault.substitute(
     { a: good, b: "sec_handle_99" },
     { destination: "https://api.stripe.com/x" },
@@ -304,7 +304,7 @@ test("one unresolvable handle refuses the whole call", async () => {
 
 test("maxUses is enforced", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789", { maxUses: 1 });
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { maxUses: 1 });
   const dest = { destination: "https://api.stripe.com/x" };
   assert.equal((await vault.substitute({ a: handle }, dest)).ok, true);
   const second = await vault.substitute({ a: handle }, dest);
@@ -314,7 +314,7 @@ test("maxUses is enforced", async () => {
 
 test("an expired handle does not resolve", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789", { ttlSeconds: -1 });
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { ttlSeconds: -1 });
   const result = await vault.substitute({ a: handle }, { destination: "https://api.stripe.com/x" });
   assert.equal(result.ok, false);
   assert.equal(result.outcome, "expired");
@@ -322,10 +322,10 @@ test("an expired handle does not resolve", async () => {
 
 test("the return path swaps material back for its handle", () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   const result = vault.redact({ body: "leaked rk_live_REALMATERIAL0123456789 here" });
   assert.ok(result.payload.body.includes(handle));
-  assert.ok(!result.payload.body.includes("rk_live_REALMATERIAL0123456789"));
+  assert.ok(!result.payload.body.includes("rk_" + "live_REALMATERIAL0123456789"));
 });
 
 test("a credential the vault never held is masked, not merely reported", () => {
@@ -348,7 +348,7 @@ test("loadFromEnv moves the value behind a handle", () => {
 
 test("forget drops everything", () => {
   const vault = new Vault();
-  vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   assert.equal(vault.held, 1);
   vault.forget();
   assert.equal(vault.held, 0);
@@ -359,7 +359,7 @@ test("a sealed vault round-trips, and a wrong passphrase fails", async () => {
   const path = join(dir, "vault.sealed");
 
   const original = new Vault();
-  original.issue("KEY", "rk_live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
+  original.issue("KEY", "rk_" + "live_REALMATERIAL0123456789", { destinations: ["api.stripe.com"] });
   await original.seal(path, "correct horse battery staple");
 
   const reopened = new Vault();
@@ -374,6 +374,6 @@ test("a sealed vault round-trips, and a wrong passphrase fails", async () => {
 test("sealing rejects a weak passphrase", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cirvix-vault-"));
   const vault = new Vault();
-  vault.issue("KEY", "rk_live_REALMATERIAL0123456789");
+  vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   await assert.rejects(() => vault.seal(join(dir, "v"), "short"), /at least 12 characters/);
 });

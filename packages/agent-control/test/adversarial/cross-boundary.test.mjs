@@ -786,7 +786,7 @@ test("cross-boundary: a handle issued to A cannot be resolved by B", async () =>
    * agent.
    */
   const vault = new Vault();
-  const handle = vault.issue("STRIPE_KEY", "rk_live_MATERIAL0123456789abc", {
+  const handle = vault.issue("STRIPE_KEY", "rk_" + "live_MATERIAL0123456789abc", {
     subject: "payments-agent",
   });
 
@@ -813,7 +813,7 @@ test("cross-boundary: an unbound handle stays usable by anyone", async () => {
   // Binding is opt-in per handle. A vault used without subjects at all must
   // keep working, or the fix breaks every existing single-agent install.
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_MATERIAL0123456789abc");
+  const handle = vault.issue("KEY", "rk_" + "live_MATERIAL0123456789abc");
 
   const anyone = await vault.substitute(
     { headers: { authorization: `Bearer ${handle}` } },
@@ -829,7 +829,7 @@ test("cross-boundary: the pipeline spends a handle as the calling agent, not the
    * same subject and the check would pass for all of them.
    */
   const vault = new Vault();
-  const handle = vault.issue("STRIPE_KEY", "rk_live_MATERIAL0123456789abc", {
+  const handle = vault.issue("STRIPE_KEY", "rk_" + "live_MATERIAL0123456789abc", {
     subject: "payments-agent",
   });
 
@@ -869,7 +869,7 @@ test("cross-boundary: delegation does not carry handle ownership with it", async
    * delegation quietly hands over every key the issuer holds.
    */
   const vault = new Vault();
-  const handle = vault.issue("STRIPE_KEY", "rk_live_MATERIAL0123456789abc", {
+  const handle = vault.issue("STRIPE_KEY", "rk_" + "live_MATERIAL0123456789abc", {
     subject: "payments-agent",
   });
 

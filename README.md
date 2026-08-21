@@ -148,7 +148,8 @@ Report anything new to the address in
 
 ## Licence
 
-**Apache 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./packages/agent-control/NOTICE).
+**Apache 2.0** — see [LICENSE](./LICENSE), [NOTICE](./packages/agent-control/NOTICE),
+and [LICENSING.md](./LICENSING.md) for which parts of the product this covers.
 
 The engine is the part that decides whether your agent's call runs. A security
 control you are not permitted to read is one you are asked to take on faith,

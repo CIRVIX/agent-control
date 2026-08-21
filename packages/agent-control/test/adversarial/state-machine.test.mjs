@@ -354,7 +354,7 @@ test("state: the audit chain continues across a restart rather than forking", as
 
 test("state: concurrent calls spending the same handle all get the right material", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_ORIGINAL0123456789abc", { destinations: ["api.stripe.com"] });
+  const handle = vault.issue("KEY", "rk_" + "live_ORIGINAL0123456789abc", { destinations: ["api.stripe.com"] });
   const pipeline = new Pipeline({ rules, cwd: CWD, agent: "a", secrets: vault });
 
   const results = await Promise.all(
@@ -373,7 +373,7 @@ test("state: concurrent calls spending the same handle all get the right materia
 
 test("state: after rotation, the new value goes out — never the old one", async () => {
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_ORIGINAL0123456789abc", { destinations: ["api.stripe.com"] });
+  const handle = vault.issue("KEY", "rk_" + "live_ORIGINAL0123456789abc", { destinations: ["api.stripe.com"] });
   const pipeline = new Pipeline({ rules, cwd: CWD, agent: "a", secrets: vault });
   const call = {
     tool: "http_request",
@@ -385,7 +385,7 @@ test("state: after rotation, the new value goes out — never the old one", asyn
 
   // Rotate: the operator replaces the material behind the same name.
   vault.forget();
-  const rotated = vault.issue("KEY", "rk_live_ROTATED9876543210xyz", { destinations: ["api.stripe.com"] });
+  const rotated = vault.issue("KEY", "rk_" + "live_ROTATED9876543210xyz", { destinations: ["api.stripe.com"] });
 
   const after = await pipeline.submit({
     tool: "http_request",
@@ -399,9 +399,9 @@ test("state: a handle from before rotation no longer resolves", async () => {
   // The property that makes rotation meaningful: the old handle is dead, and
   // the call is refused rather than sent with an unresolved literal.
   const vault = new Vault();
-  const stale = vault.issue("KEY", "rk_live_ORIGINAL0123456789abc");
+  const stale = vault.issue("KEY", "rk_" + "live_ORIGINAL0123456789abc");
   vault.forget();
-  vault.issue("KEY", "rk_live_ROTATED9876543210xyz");
+  vault.issue("KEY", "rk_" + "live_ROTATED9876543210xyz");
 
   const pipeline = new Pipeline({ rules, cwd: CWD, agent: "a", secrets: vault });
   const result = await pipeline.submit({

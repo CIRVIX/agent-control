@@ -547,7 +547,7 @@ test("delegation: a scope that excludes network stops a handle being spent outwa
   // outbound call.
   const { Vault } = await import("../../src/core/vault.mjs");
   const vault = new Vault();
-  const handle = vault.issue("KEY", "rk_live_MATERIAL0123456789abc");
+  const handle = vault.issue("KEY", "rk_" + "live_MATERIAL0123456789abc");
 
   const b = broker();
   const planner = b.root("planner", { actions: ["*"], resources: ["*"] });

@@ -1,0 +1,189 @@
+# Cirvix — default policy
+#
+# The baseline. Written for a developer working normally: nothing they do a
+# hundred times a day is interrupted, and the handful of actions that actually
+# cause incidents are stopped or held.
+#
+# Layer the others on top. Later files do not override earlier ones — a `deny`
+# anywhere wins, always — so composing them can only tighten, never loosen.
+#
+#   cirvix policy check --policy policies/default.policy
+#   cirvix policy test  --policy policies/default.policy
+
+# ------------------------------------------------------------------ prohibited
+
+deny:
+  name = deny-workspace-escape-write
+  tool = filesystem.write
+  workspace = false
+  reason = "Writes outside the workspace root are outside what this run was scoped to change."
+
+deny:
+  name = deny-workspace-escape-delete
+  tool = filesystem.delete
+  workspace = false
+  reason = "A delete outside the workspace is not something any task in this workspace needs."
+
+deny:
+  name = deny-destructive-shell
+  tool = shell.exec
+  command = "rm -rf"
+  reason = "Recursive force-delete destroys state rather than changing it."
+
+deny:
+  name = deny-history-rewrite
+  tool = shell.exec
+  command = "git push --force"
+  reason = "Force-push discards commits other people may already have. Recoverable only if somebody still has the objects."
+
+deny:
+  name = deny-hard-reset
+  tool = shell.exec
+  command = "git reset --hard"
+  reason = "Discards uncommitted work with no undo."
+
+deny:
+  name = deny-critical-unnamed
+  tool = shell.exec
+  risk >= CRITICAL
+  reason = "A CRITICAL command must be permitted by a rule that names it, never by a wildcard."
+
+# -------------------------------------------------------------------- approval
+
+require_approval:
+  name = approve-package-install
+  tool = package.install
+  approvers = developer
+  reason = "Installs third-party code that may run install-time scripts with your permissions."
+
+require_approval:
+  name = approve-high-risk-shell
+  tool = shell.exec
+  risk >= HIGH
+  approvers = developer
+  reason = "Arbitrary command execution reaches past every per-tool rule."
+
+require_approval:
+  name = approve-database-write
+  tool = database.write
+  approvers = platform-oncall
+  reason = "Mutates persistent state that other systems read."
+
+require_approval:
+  name = approve-database-migrate
+  tool = database.migrate
+  approvers = platform-oncall
+  reason = "A migration changes the shape of data every other system reads."
+
+require_approval:
+  name = approve-production-deploy
+  tool = deploy.apply
+  env = production
+  approvers = platform-oncall
+  reason = "Changes what is serving live traffic."
+
+# ----------------------------------------------------------------------- allow
+
+allow:
+  name = allow-git-status
+  tool = git.status
+
+allow:
+  name = allow-git-log
+  tool = git.log
+
+allow:
+  name = allow-git-diff
+  tool = git.diff
+
+allow:
+  name = allow-git-branch
+  tool = git.branch
+
+allow:
+  name = allow-git-commit
+  tool = git.commit
+
+allow:
+  name = allow-workspace-read
+  tool = filesystem.read
+  workspace = true
+
+allow:
+  name = allow-workspace-list
+  tool = filesystem.list
+  workspace = true
+
+allow:
+  name = allow-workspace-search
+  tool = filesystem.search
+  workspace = true
+
+allow:
+  name = allow-workspace-stat
+  tool = filesystem.stat
+  workspace = true
+
+allow:
+  name = allow-workspace-write
+  tool = filesystem.write
+  workspace = true
+
+allow:
+  name = allow-workspace-delete
+  tool = filesystem.delete
+  workspace = true
+
+allow:
+  name = allow-safe-shell
+  tool = shell.exec
+  risk <= MEDIUM
+
+allow:
+  name = allow-database-read
+  tool = database.query
+
+# ------------------------------------------------------------------ test cases
+
+test "reading a workspace file":
+  tool = filesystem.read
+  path = ./src/index.ts
+  expect allow
+
+test "writing a workspace file":
+  tool = filesystem.write
+  path = ./src/index.ts
+  expect allow
+
+test "writing outside the workspace":
+  tool = filesystem.write
+  path = /etc/hosts
+  expect deny
+
+test "running the test suite":
+  tool = shell.exec
+  command = npm test
+  expect allow
+
+test "recursive delete":
+  tool = shell.exec
+  command = rm -rf /
+  expect deny
+
+test "force push":
+  tool = shell.exec
+  command = git push --force origin main
+  expect deny
+
+test "an unrecognised shell command waits for a human":
+  tool = shell.exec
+  command = ./scripts/whatever.sh
+  expect require_approval
+
+test "a database write waits for a human":
+  tool = database.write
+  expect require_approval
+
+test "a database read is fine":
+  tool = database.query
+  expect allow

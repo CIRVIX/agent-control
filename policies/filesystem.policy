@@ -1,0 +1,183 @@
+# Cirvix — filesystem
+#
+# The workspace boundary, and the files inside it that still should not move.
+#
+# Traversal and `~` are resolved BEFORE matching, so `./x/../../../etc/passwd`,
+# `~/.ssh/id_rsa`, and an absolute path to the same file are one resource. Rules
+# that match raw strings are bypassed by the first agent that uses a relative
+# path, never mind the first attacker who tries a traversal.
+#
+#   cirvix policy test --policy policies/filesystem.policy
+
+# --------------------------------------------------------- outside the workspace
+
+deny:
+  name = deny-read-outside-workspace
+  tool = filesystem.read
+  workspace = false
+  reason = "The resolved path is outside the workspace root. Traversal and symlinks are resolved before this check."
+
+deny:
+  name = deny-write-outside-workspace
+  tool = filesystem.write
+  workspace = false
+  reason = "A write outside the workspace is outside what this run was scoped to change."
+
+deny:
+  name = deny-delete-outside-workspace
+  tool = filesystem.delete
+  workspace = false
+  reason = "A delete outside the workspace is not something any task in this workspace needs."
+
+# ------------------------------------------------- inside, and still off limits
+
+deny:
+  name = deny-write-git-internals
+  tool = filesystem.write
+  path = ./.git/**
+  reason = "Writing into .git rewrites history without a commit, so nothing in the log reflects the change."
+
+deny:
+  name = deny-write-git-hooks
+  tool = filesystem.write
+  path = ./.git/hooks/**
+  reason = "A git hook is code that runs on the next commit, under your account, with no review."
+
+deny:
+  name = deny-write-ci-config
+  tool = filesystem.write
+  path = ./.github/workflows/**
+  reason = "A workflow file is code that runs in CI with CI's credentials."
+
+deny:
+  name = deny-write-node-modules
+  tool = filesystem.write
+  path = ./node_modules/**
+  reason = "Editing an installed dependency in place produces a build nobody can reproduce."
+
+# --------------------------------------------------------- agent self-modification
+#
+# An agent that can rewrite its own instructions or its own policy is not
+# governed by them. These are held rather than denied because changing them is a
+# legitimate thing to do — with a person watching.
+
+require_approval:
+  name = approve-agent-config-change
+  tool = filesystem.write
+  path = ./.claude/**
+  approvers = developer
+  reason = "This file instructs the agent. Changing it changes what future runs are allowed to do."
+
+require_approval:
+  name = approve-cursorrules-change
+  tool = filesystem.write
+  path = ./.cursorrules
+  approvers = developer
+  reason = "This file instructs the agent."
+
+require_approval:
+  name = approve-agents-md-change
+  tool = filesystem.write
+  path = ./AGENTS.md
+  approvers = developer
+  reason = "This file instructs the agent."
+
+require_approval:
+  name = approve-claude-md-change
+  tool = filesystem.write
+  path = ./CLAUDE.md
+  approvers = developer
+  reason = "This file instructs the agent."
+
+require_approval:
+  name = approve-mcp-config-change
+  tool = filesystem.write
+  path = ./.mcp.json
+  approvers = developer
+  reason = "This file decides which tools the agent can reach at all."
+
+require_approval:
+  name = approve-policy-change
+  tool = filesystem.write
+  path = ./cirvix.policy
+  approvers = platform-oncall
+  reason = "This is the policy governing the agent. An agent that can edit it is not governed by it."
+
+# ----------------------------------------------------------------------- allow
+
+allow:
+  name = allow-read-in-workspace
+  tool = filesystem.read
+  workspace = true
+
+allow:
+  name = allow-list-in-workspace
+  tool = filesystem.list
+  workspace = true
+
+allow:
+  name = allow-search-in-workspace
+  tool = filesystem.search
+  workspace = true
+
+allow:
+  name = allow-stat-in-workspace
+  tool = filesystem.stat
+  workspace = true
+
+allow:
+  name = allow-write-in-workspace
+  tool = filesystem.write
+  workspace = true
+
+allow:
+  name = allow-delete-in-workspace
+  tool = filesystem.delete
+  workspace = true
+
+allow:
+  name = allow-move-in-workspace
+  tool = filesystem.move
+  workspace = true
+
+# ------------------------------------------------------------------ test cases
+
+test "reading source":
+  tool = filesystem.read
+  path = ./src/app.ts
+  expect allow
+
+test "writing source":
+  tool = filesystem.write
+  path = ./src/app.ts
+  expect allow
+
+test "traversal out of the workspace":
+  tool = filesystem.read
+  path = ./src/../../../../etc/passwd
+  expect deny
+
+test "absolute path outside the workspace":
+  tool = filesystem.read
+  path = /etc/shadow
+  expect deny
+
+test "writing a git hook":
+  tool = filesystem.write
+  path = ./.git/hooks/pre-commit
+  expect deny
+
+test "writing a CI workflow":
+  tool = filesystem.write
+  path = ./.github/workflows/release.yml
+  expect deny
+
+test "editing the agent's own instructions":
+  tool = filesystem.write
+  path = ./CLAUDE.md
+  expect require_approval
+
+test "editing the policy that governs it":
+  tool = filesystem.write
+  path = ./cirvix.policy
+  expect require_approval

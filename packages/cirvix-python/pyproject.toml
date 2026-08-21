@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cirvix"
+version = "0.1.0"
+description = "Runtime governance for AI agents — evaluate every tool call against policy before it executes."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "Cirvix" }]
+keywords = ["ai", "agents", "security", "policy", "governance", "llm", "mcp"]
+
+# Zero runtime dependencies, deliberately and permanently. A security package
+# that drags in a transitive dependency tree is asking to become the
+# supply-chain incident it exists to prevent — the same reason the Node package
+# has none.
+dependencies = []
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Security",
+  "Programming Language :: Python :: 3",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://www.cirvix.com"
+Documentation = "https://www.cirvix.com/docs/sdk-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cirvix"]
+
+[tool.hatch.build.targets.sdist]
+# The conformance fixture ships with the source distribution so the suite that
+# proves this engine agrees with the Node one can be run by anyone auditing it,
+# not only by us.
+include = ["cirvix", "tests", "README.md", "../conformance/policy-conformance.json"]

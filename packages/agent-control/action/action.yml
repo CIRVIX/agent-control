@@ -1,0 +1,134 @@
+# Cirvix — scan a repository for ungoverned AI agents.
+#
+# Published as `cirvix/scan`. A composite action rather than a JavaScript one,
+# deliberately: a JS action ships a committed `dist/` bundle that has to be
+# rebuilt on every change and is, in practice, the thing that goes stale. The
+# CLI has zero runtime dependencies, so `npx` is a smaller and more honest
+# supply chain than a vendored bundle nobody re-reads.
+name: Cirvix AgentControl Scan
+description: Find AI agent runtimes, MCP servers, and reachable credentials that nothing is governing.
+author: Cirvix
+
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  fail-on:
+    description: >-
+      Fail the job at this severity or above: high, medium, or low. Set to
+      "never" to report without failing — the right setting for the first run
+      on an existing repository, where the point is to see the baseline rather
+      than to block a merge on it.
+    required: false
+    default: high
+  working-directory:
+    description: Directory to scan. Defaults to the workspace root.
+    required: false
+    default: .
+  sarif-file:
+    description: Where to write SARIF. Set to an empty string to skip.
+    required: false
+    default: cirvix-scan.sarif
+  upload-sarif:
+    description: >-
+      Upload findings to GitHub code scanning, so they appear on the pull
+      request diff and in the Security tab rather than only in this log.
+      Requires `security-events: write`.
+    required: false
+    default: "true"
+  comment-on-pr:
+    description: Write the summary as a pull-request comment as well as a job summary.
+    required: false
+    default: "false"
+  version:
+    description: Version of @cirvix/agent-control to run.
+    required: false
+    default: latest
+
+outputs:
+  high:
+    description: Number of high-severity findings.
+    value: ${{ steps.scan.outputs.high }}
+  medium:
+    description: Number of medium-severity findings.
+    value: ${{ steps.scan.outputs.medium }}
+  low:
+    description: Number of low-severity findings.
+    value: ${{ steps.scan.outputs.low }}
+  findings:
+    description: The full scan result as JSON.
+    value: ${{ steps.scan.outputs.findings }}
+  passed:
+    description: "true when nothing at or above `fail-on` was found."
+    value: ${{ steps.scan.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run Cirvix scan
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CIRVIX_FAIL_ON: ${{ inputs.fail-on }}
+        CIRVIX_SARIF: ${{ inputs.sarif-file }}
+        CIRVIX_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        args=(--json)
+        if [ -n "${CIRVIX_SARIF}" ]; then
+          args+=(--sarif "${CIRVIX_SARIF}")
+        fi
+
+        # The scan's exit code is the signal, and `set -e` would take the job
+        # down before the summary is written. Captured, reported, then
+        # re-raised at the end by the reporter.
+        set +e
+        npx --yes "@cirvix/agent-control@${CIRVIX_VERSION}" scan "${args[@]}" > cirvix-scan.json
+        scan_status=$?
+        set -e
+
+        if [ "${scan_status}" -ne 0 ] && [ ! -s cirvix-scan.json ]; then
+          echo "::error title=Cirvix::The scan did not run. Check that @cirvix/agent-control@${CIRVIX_VERSION} exists."
+          exit 1
+        fi
+
+        node "${GITHUB_ACTION_PATH}/report.mjs" cirvix-scan.json
+
+    - name: Upload SARIF to code scanning
+      # `always()` so a failing scan still uploads. Findings that only appear
+      # when the build passes are findings nobody acts on.
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.sarif-file != '' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.working-directory }}/${{ inputs.sarif-file }}
+        category: cirvix
+
+    - name: Comment on the pull request
+      if: ${{ always() && inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [ -f cirvix-summary.md ]; then
+          # `--edit-last` so a pushed branch updates one comment instead of
+          # accumulating a thread nobody reads to the bottom of.
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file cirvix-summary.md --edit-last --create-if-none
+        fi
+
+    - name: Enforce the severity gate
+      if: ${{ always() && inputs.fail-on != 'never' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ steps.scan.outputs.passed }}" != "true" ]; then
+          echo "::error title=Cirvix::Findings at or above '${{ inputs.fail-on }}'. See the job summary."
+          exit 1
+        fi

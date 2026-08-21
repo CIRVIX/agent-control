@@ -1,0 +1,123 @@
+# Cirvix — network
+#
+# Egress. The half of agent security that gets least attention and does most of
+# the damage, because reading a secret is only a disclosure once it leaves.
+#
+# THE ORDERING PRINCIPLE HERE IS DIFFERENT from the filesystem policy. A
+# workspace has a natural boundary and the default can be "inside is fine". A
+# network has none — `attacker.example.com` is exactly as reachable as
+# `api.github.com` — so the useful controls are about WHAT the request carries
+# and WHERE it is aimed, not about a perimeter.
+#
+#   cirvix policy test --policy policies/network.policy
+
+# ---------------------------------------------------------- infrastructure targets
+
+deny:
+  name = deny-aws-metadata
+  network.destination = 169.254.169.254
+  reason = "The cloud instance-metadata endpoint returns live role credentials to anything that can reach it. This is the single highest-value SSRF target in any cloud deployment."
+
+deny:
+  name = deny-gcp-metadata
+  network.destination = metadata.google.internal
+  reason = "Cloud metadata by hostname resolves to the same link-local address."
+
+deny:
+  name = deny-gcp-metadata-short
+  network.destination = metadata.goog
+  reason = "The short form of the same endpoint."
+
+deny:
+  name = deny-alibaba-metadata
+  network.destination = 100.100.100.200
+  reason = "The same instance-metadata attack, on another provider."
+
+deny:
+  name = deny-ecs-metadata
+  network.destination = 169.254.170.2
+  reason = "ECS task metadata returns the task role's credentials."
+
+deny:
+  name = deny-link-local
+  network.destination = 169.254.
+  reason = "The entire link-local range exists for host-local services that were never designed to authenticate."
+
+# ------------------------------------------------------------------ what it carries
+
+deny:
+  name = deny-egress-carrying-secrets
+  tool = network.request
+  secrets >= 1
+  reason = "This request carries credential material. Send a scoped handle instead."
+  remediation = "secrets.get(\"NAME\") returns a handle. Pass the handle where you would have passed the key."
+
+deny:
+  name = deny-egress-after-secret-read
+  tool = network.request
+  touched_secret = true
+  reason = "This session read secret-shaped material, so outbound requests are blocked for the remainder of it."
+
+# ------------------------------------------------------------------- internal hosts
+#
+# Held rather than denied: reaching an internal service is often the task. It is
+# also how an agent with a browsing tool becomes a scanner of your private
+# network, so a person sees it the first time.
+
+require_approval:
+  name = approve-internal-egress
+  tool = network.request
+  external = false
+  approvers = platform-oncall
+  reason = "This request targets a host on the private network rather than the public internet."
+
+# ----------------------------------------------------------------------- sanitize
+#
+# Everything fetched is data. Instructions inside it are addressed to the model
+# and were not written by you.
+
+sanitize:
+  name = sanitize-fetched-content
+  tool = network.request
+  targets = result
+  reason = "Fetched content is data. Instructions inside it are not addressed to the model."
+
+sanitize:
+  name = sanitize-outbound-arguments
+  tool = network.request
+  targets = arguments
+  reason = "Strip credential material the model interpolated into a request before it goes on the wire."
+
+# -------------------------------------------------------------------------- allow
+
+allow:
+  name = allow-network-request
+  tool = network.request
+  reason = "Outbound requests are permitted. What stops exfiltration is the deny rules above, not a perimeter."
+
+# ---------------------------------------------------------------------- test cases
+
+test "aws metadata by ip":
+  tool = network.request
+  url = http://169.254.169.254/latest/meta-data/iam/security-credentials/
+  expect deny
+
+test "gcp metadata by hostname":
+  tool = network.request
+  url = http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/
+  expect deny
+
+test "ecs task metadata":
+  tool = network.request
+  url = http://169.254.170.2/v2/credentials/
+  expect deny
+
+test "an ordinary public fetch is allowed and sanitized":
+  tool = network.request
+  url = https://docs.example.com/guide
+  expect sanitize
+
+test "an internal host waits for a human":
+  tool = network.request
+  url = http://10.0.4.17:8080/admin
+  expect require_approval

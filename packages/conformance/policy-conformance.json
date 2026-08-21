@@ -1,0 +1,3291 @@
+{
+  "$comment": [
+    "The contract between every implementation of the Cirvix policy engine.",
+    "",
+    "Two engines that can silently disagree about a security decision are worse",
+    "than one engine and an honest gap: an agent denied by the Node gateway and",
+    "permitted by the Python SDK is a bypass nobody would find until it mattered.",
+    "This file is the only thing standing between us and that, so it is the",
+    "single source and both suites load it — neither is allowed a private copy.",
+    "",
+    "Adding an engine means making this file pass. Changing engine behaviour",
+    "means changing this file first, in a commit a reviewer can see.",
+    "",
+    "Paths are POSIX and `cwd` is always explicit, so resolution is deterministic",
+    "on every platform rather than depending on where the tests happen to run."
+  ],
+  "version": 1,
+  "cases": [
+    {
+      "name": "a matching permit permits",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-reads"
+      }
+    },
+    {
+      "name": "no rule matching means denied, not permitted",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-writes",
+          "effect": "permit",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "an empty rule set denies everything",
+      "cwd": "/workspace",
+      "rules": [],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "forbid wins over a permit that comes after it",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-env",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        },
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-env"
+      }
+    },
+    {
+      "name": "forbid wins over a permit that comes before it",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "deny-env",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-env"
+      }
+    },
+    {
+      "name": "forbid short-circuits, so the trace stops at the rule that stopped it",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-env",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        },
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-env",
+        "considered": [
+          {
+            "rule": "deny-env",
+            "effect": "forbid",
+            "matched": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "a permit walks the rules it did not match",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-env",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        },
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-reads",
+        "considered": [
+          {
+            "rule": "deny-env",
+            "effect": "forbid",
+            "matched": false
+          },
+          {
+            "rule": "allow-reads",
+            "effect": "permit",
+            "matched": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "hold outranks a permit, whichever order they are in",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-writes",
+          "effect": "permit",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "hold-writes",
+          "effect": "hold",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "oncall"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.write",
+        "resource": "/workspace/out.txt"
+      },
+      "expect": {
+        "verdict": "hold",
+        "rule": "hold-writes",
+        "approvers": [
+          "oncall"
+        ]
+      }
+    },
+    {
+      "name": "forbid outranks hold",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "hold-writes",
+          "effect": "hold",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "oncall"
+          ]
+        },
+        {
+          "name": "deny-writes",
+          "effect": "forbid",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.write",
+        "resource": "/workspace/out.txt"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-writes"
+      }
+    },
+    {
+      "name": "the first hold is the one reported",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "hold-a",
+          "effect": "hold",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "a"
+          ]
+        },
+        {
+          "name": "hold-b",
+          "effect": "hold",
+          "actions": [
+            "fs.write"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "b"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.write",
+        "resource": "/workspace/out.txt"
+      },
+      "expect": {
+        "verdict": "hold",
+        "rule": "hold-a"
+      }
+    },
+    {
+      "name": "a single star does not cross a path segment",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/nested/deep.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "a double star crosses path segments",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/nested/deep.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a question mark matches one character",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/a?c.ts"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/abc.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a question mark does not match a separator",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/a?c"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/a/c"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "a dot in a pattern is a dot, not any character",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/xenv"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "regex metacharacters in a pattern are literal",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "a+b"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "aab",
+        "resource": "x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "matching is case-insensitive",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "FS.READ"
+          ],
+          "resources": [
+            "**/.ENV"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a hostile pattern still terminates and does not match",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*a*a*a*a*a*a*a*a*a*b"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resource": "x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "an omitted pattern list matches anything",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit"
+        }
+      ],
+      "request": {
+        "agent": "anyone",
+        "action": "anything",
+        "resource": "whatever"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "an empty pattern array matches anything",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [],
+          "resources": []
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "x"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a pattern may be a bare string rather than a list",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": "fs.read",
+          "resources": "*"
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "x"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "traversal is collapsed before matching",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-env",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "./src/../.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-env",
+        "resource": "/workspace/.env"
+      }
+    },
+    {
+      "name": "a relative path resolves against the working directory",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "/workspace/src/app.ts"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "src/app.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r",
+        "resource": "/workspace/src/app.ts"
+      }
+    },
+    {
+      "name": "an absolute path is left where it is",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "/etc/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/etc/passwd"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "r",
+        "resource": "/etc/passwd"
+      }
+    },
+    {
+      "name": "a url is normalised on host and trailing slash",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "https://api.stripe.com/v1"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "HTTPS://API.Stripe.com/v1/"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r",
+        "resource": "https://api.stripe.com/v1"
+      }
+    },
+    {
+      "name": "a url fragment is dropped",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "https://x.test/a"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://x.test/a#fragment"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r",
+        "resource": "https://x.test/a"
+      }
+    },
+    {
+      "name": "a bare token is left alone rather than treated as a path",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "sometoken"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "sometoken"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r",
+        "resource": "sometoken"
+      }
+    },
+    {
+      "name": "an empty resource stays empty",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": ""
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r",
+        "resource": ""
+      }
+    },
+    {
+      "name": "eq compares strictly",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "environment",
+              "op": "eq",
+              "value": "production"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "environment": "production"
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "eq does not coerce",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "count",
+              "op": "eq",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "count": "1"
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "a nested context path is read",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "path.insideWorkspace",
+              "op": "eq",
+              "value": false
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "path": {
+            "insideWorkspace": false
+          }
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a missing context path does not match",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "missing.deeply.nested",
+              "op": "eq",
+              "value": true
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {}
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "every condition must hold",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "forbid",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "a",
+              "op": "eq",
+              "value": 1
+            },
+            {
+              "path": "b",
+              "op": "eq",
+              "value": 2
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "a": 1,
+          "b": 99
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "ne, in, and nin",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "env",
+              "op": "ne",
+              "value": "prod"
+            },
+            {
+              "path": "env",
+              "op": "in",
+              "value": [
+                "dev",
+                "staging"
+              ]
+            },
+            {
+              "path": "env",
+              "op": "nin",
+              "value": [
+                "prod"
+              ]
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "env": "staging"
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "numeric comparators only accept numbers",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "n",
+              "op": "gt",
+              "value": 5
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "n": "10"
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "gt gte lt lte on numbers",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "n",
+              "op": "gt",
+              "value": 5
+            },
+            {
+              "path": "n",
+              "op": "gte",
+              "value": 10
+            },
+            {
+              "path": "n",
+              "op": "lt",
+              "value": 20
+            },
+            {
+              "path": "n",
+              "op": "lte",
+              "value": 10
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "n": 10
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "matches applies glob semantics to a context value",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "host",
+              "op": "matches",
+              "value": "*.stripe.com"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "host": "api.stripe.com"
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "exists true and false",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "present",
+              "op": "exists",
+              "value": true
+            },
+            {
+              "path": "absent",
+              "op": "exists",
+              "value": false
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "present": 0
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "contains and supersetOf work on lists",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "scopes",
+              "op": "contains",
+              "value": "repo:read"
+            },
+            {
+              "path": "scopes",
+              "op": "supersetOf",
+              "value": [
+                "repo:read",
+                "issues:read"
+              ]
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "scopes": [
+            "repo:read",
+            "issues:read",
+            "slack:post"
+          ]
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "an unknown comparator fails closed rather than matching",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "x",
+              "op": "sqlInject",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "x",
+        "resource": "y",
+        "context": {
+          "x": 1
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "agent and action are readable as context",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "agent",
+              "op": "eq",
+              "value": "deploy-bot"
+            }
+          ]
+        }
+      ],
+      "request": {
+        "agent": "deploy-bot",
+        "action": "k8s.apply",
+        "resource": "y",
+        "context": {}
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "r"
+      }
+    },
+    {
+      "name": "a rule scoped to another agent does not apply",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "r",
+          "effect": "permit",
+          "agents": [
+            "deploy-bot"
+          ],
+          "actions": [
+            "*"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "pr-triage",
+        "action": "x",
+        "resource": "y"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null
+      }
+    },
+    {
+      "name": "the egress-after-secret rule, end to end",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-egress-after-secret",
+          "effect": "forbid",
+          "actions": [
+            "http.request",
+            "net.*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "egress.external",
+              "op": "eq",
+              "value": true
+            },
+            {
+              "path": "session.touchedSecret",
+              "op": "eq",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://evil.example/collect",
+        "context": {
+          "egress": {
+            "external": true
+          },
+          "session": {
+            "touchedSecret": true
+          }
+        }
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-egress-after-secret"
+      }
+    },
+    {
+      "name": "the same rule does not fire before the session touched a secret",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-egress-after-secret",
+          "effect": "forbid",
+          "actions": [
+            "http.request",
+            "net.*"
+          ],
+          "resources": [
+            "*"
+          ],
+          "when": [
+            {
+              "path": "egress.external",
+              "op": "eq",
+              "value": true
+            },
+            {
+              "path": "session.touchedSecret",
+              "op": "eq",
+              "value": true
+            }
+          ]
+        },
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://evil.example/collect",
+        "context": {
+          "egress": {
+            "external": true
+          },
+          "session": {
+            "touchedSecret": false
+          }
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-http"
+      }
+    },
+    {
+      "name": "a tilde path resolves to the home directory, not into the workspace",
+      "$why": "Left unexpanded, ~/.aws/credentials canonicalized to <cwd>/~/.aws/credentials and therefore matched a workspace-scoped permit. This case is machine-independent: it asserts the tilde path is NOT inside /workspace, without naming any real home directory.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-workspace",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "~/.aws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "a bare tilde is a home reference, not a workspace file",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-workspace",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "~"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "sanitize outranks a plain permit",
+      "$why": "A rule saying the payload must be cleaned must not be skipped because some other rule also said the call was fine.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "clean-results",
+          "effect": "sanitize",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ],
+          "sanitize": {
+            "targets": [
+              "result"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://example.com/x"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "clean-results",
+        "decision": "sanitize"
+      }
+    },
+    {
+      "name": "sanitize ordered before permit gives the same answer",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "clean-results",
+          "effect": "sanitize",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ],
+          "sanitize": {
+            "targets": [
+              "result"
+            ]
+          }
+        },
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://example.com/x"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "clean-results",
+        "decision": "sanitize"
+      }
+    },
+    {
+      "name": "a sanitizer alone does not authorize",
+      "$why": "Cleaning an authorized call is not the same as authorizing one. Without a permit, default-deny still applies.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "clean-results",
+          "effect": "sanitize",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ],
+          "sanitize": {
+            "targets": [
+              "result"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://example.com/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "a hold outranks a sanitize",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "clean-results",
+          "effect": "sanitize",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "review-http",
+          "effect": "hold",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "oncall"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://example.com/x"
+      },
+      "expect": {
+        "verdict": "hold",
+        "rule": "review-http",
+        "decision": "require_approval",
+        "approvers": [
+          "oncall"
+        ]
+      }
+    },
+    {
+      "name": "a forbid outranks a sanitize",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "clean-results",
+          "effect": "sanitize",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "block-http",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "https://example.com/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "block-http",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "audit_only authorizes nothing",
+      "$why": "If an observation could authorize, anyone who can add a rule has a bypass for every prohibition in the file.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "watch-reads",
+          "effect": "audit_only",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "audit_only cannot punch through a forbid",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "block-env",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        },
+        {
+          "name": "watch-env",
+          "effect": "audit_only",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        },
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "block-env",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "audit_only does not suppress a permit that would have applied anyway",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "watch-reads",
+          "effect": "audit_only",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "name": "allow-reads",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-reads",
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "risk conditions compile to membership and match",
+      "$why": "`risk >= HIGH` in the DSL becomes an `in` over the matching tail of the four levels, so neither engine needs ordinal knowledge of risk.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "hold-risky-shell",
+          "effect": "hold",
+          "actions": [
+            "shell.exec"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "oncall"
+          ],
+          "when": [
+            {
+              "path": "risk",
+              "op": "in",
+              "value": [
+                "high",
+                "critical"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "allow-shell",
+          "effect": "permit",
+          "actions": [
+            "shell.exec"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "shell.exec",
+        "resource": "",
+        "context": {
+          "risk": "high"
+        }
+      },
+      "expect": {
+        "verdict": "hold",
+        "rule": "hold-risky-shell",
+        "decision": "require_approval"
+      }
+    },
+    {
+      "name": "a risk below the floor does not match the membership set",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "hold-risky-shell",
+          "effect": "hold",
+          "actions": [
+            "shell.exec"
+          ],
+          "resources": [
+            "*"
+          ],
+          "approvers": [
+            "oncall"
+          ],
+          "when": [
+            {
+              "path": "risk",
+              "op": "in",
+              "value": [
+                "high",
+                "critical"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "allow-shell",
+          "effect": "permit",
+          "actions": [
+            "shell.exec"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "shell.exec",
+        "resource": "",
+        "context": {
+          "risk": "low"
+        }
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-shell",
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "an alternate IPv4 spelling matches a rule naming the dotted address",
+      "$why": "http://2852039166/ is 169.254.169.254 in decimal and every HTTP client dials it. Matching the raw string let it past a rule naming the dotted form.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-metadata",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://2852039166/latest/meta-data/"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-metadata",
+        "decision": "deny",
+        "resource": "http://169.254.169.254/latest/meta-data"
+      }
+    },
+    {
+      "name": "an octal IPv4 spelling canonicalizes to the same address",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-metadata",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://0251.0376.0251.0376/latest/"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-metadata",
+        "decision": "deny",
+        "resource": "http://169.254.169.254/latest"
+      }
+    },
+    {
+      "name": "a hex IPv4 spelling canonicalizes to the same address",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-metadata",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://0xA9FEA9FE/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-metadata",
+        "decision": "deny",
+        "resource": "http://169.254.169.254/x"
+      }
+    },
+    {
+      "name": "userinfo is dropped rather than matched on",
+      "$why": "Keeping it lets a destination rule be defeated by prefixing an innocuous-looking host.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-metadata",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://docs.example.com@169.254.169.254/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-metadata",
+        "decision": "deny",
+        "resource": "http://169.254.169.254/x"
+      }
+    },
+    {
+      "name": "a hostname with a trailing root label is the same hostname",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-gcp",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**metadata.google.internal**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://metadata.google.internal./computeMetadata/v1"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-gcp",
+        "decision": "deny",
+        "resource": "http://metadata.google.internal/computeMetadata/v1"
+      }
+    },
+    {
+      "name": "a public address is not mistaken for link-local",
+      "$why": "The canonicalizer must not over-match: 169.53.x is an ordinary public address.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-metadata",
+          "effect": "forbid",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        },
+        {
+          "name": "allow-http",
+          "effect": "permit",
+          "actions": [
+            "http.request"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "http.request",
+        "resource": "http://169.53.1.1/api"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-http",
+        "decision": "allow",
+        "resource": "http://169.53.1.1/api"
+      }
+    },
+    {
+      "name": "a percent-encoded separator is decoded before matching",
+      "$why": "A path with no literal separator was judged a bare filename inside the workspace, so a workspace-read rule permitted a credential read.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/x%2F.aws%2Fcredentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/x/.aws/credentials"
+      }
+    },
+    {
+      "name": "double percent-encoding is decoded too",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/x%252F.aws%252Fcredentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/x/.aws/credentials"
+      }
+    },
+    {
+      "name": "a fullwidth full stop is folded to an ASCII dot",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/．aws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/.aws/credentials"
+      }
+    },
+    {
+      "name": "a one dot leader is folded to an ASCII dot",
+      "$why": "U+2024 survives NFKC, so it needs an explicit fold, and it is the one an attacker reaches for.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/․aws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/.aws/credentials"
+      }
+    },
+    {
+      "name": "a zero-width space inside a directory name is removed",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.a​ws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/.aws/credentials"
+      }
+    },
+    {
+      "name": "a soft hyphen inside a directory name is removed",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.a­ws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/.aws/credentials"
+      }
+    },
+    {
+      "name": "a trailing space is stripped, because the filesystem strips it",
+      "$why": "NTFS opens a name with a trailing space as the name without one, so the two are one file and were two strings.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-dotenv",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env "
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-dotenv",
+        "decision": "deny",
+        "resource": "/workspace/.env"
+      }
+    },
+    {
+      "name": "a trailing dot is stripped for the same reason",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-dotenv",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.env"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/.env."
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-dotenv",
+        "decision": "deny",
+        "resource": "/workspace/.env"
+      }
+    },
+    {
+      "name": "traversal segments are still collapsed after folding",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-aws",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/a/b/../../.aws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-aws",
+        "decision": "deny",
+        "resource": "/workspace/.aws/credentials"
+      }
+    },
+    {
+      "name": "a filename containing a percent sign is not mangled",
+      "$why": "A canonicalizer that fixes every bypass by breaking every ordinary path is not a fix.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "allow-workspace",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/workspace/**"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/docs/100%-done.md"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-workspace",
+        "decision": "allow",
+        "resource": "/workspace/docs/100%-done.md"
+      }
+    },
+    {
+      "name": "an empty rule set denies rather than throwing",
+      "$why": "A policy that failed to load must default-deny. The Node engine threw a TypeError here, which is a crash inside the decision path.",
+      "cwd": "/workspace",
+      "rules": [],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": null,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a nested star after a crossing star matches",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/*"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/src/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a nested star with a suffix matches",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/*.ts"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/workspace/src/app.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a crossing star reaches a deep file",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/.aws/**"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/home/u/.aws/credentials"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a crossing star matches a leading segment",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/x"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/a/b/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a single star does not cross a separator",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/w/*"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/w/a/b.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-rest",
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "glob: a crossing star does cross separators",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/w/**"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/w/a/b.ts"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a suffix pattern does not match a different suffix",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**/*.ts"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/w/src/app.js"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-rest",
+        "decision": "allow"
+      }
+    },
+    {
+      "name": "glob: a substring pattern matches inside a url",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "**169.254.169.254**"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "http://169.254.169.254/x"
+      },
+      "expect": {
+        "verdict": "deny",
+        "rule": "deny-match",
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "glob: a literal pattern still requires the literal",
+      "$why": "Pins the glob matcher in both engines. The previous two-pointer implementation could not backtrack past a nested star and returned false for the crossing-star shapes.",
+      "cwd": "/workspace",
+      "rules": [
+        {
+          "name": "deny-match",
+          "effect": "forbid",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "/w/src/app.ts"
+          ]
+        },
+        {
+          "name": "allow-rest",
+          "effect": "permit",
+          "actions": [
+            "fs.read"
+          ],
+          "resources": [
+            "*"
+          ]
+        }
+      ],
+      "request": {
+        "agent": "a",
+        "action": "fs.read",
+        "resource": "/w/src/other.ts"
+      },
+      "expect": {
+        "verdict": "permit",
+        "rule": "allow-rest",
+        "decision": "allow"
+      }
+    }
+  ],
+  "capabilities": {
+    "$comment": [
+      "What each engine implements, declared rather than inferred.",
+      "",
+      "The policy core is mandatory: every engine must pass `cases`. Layers above",
+      "it are optional, because an engine may legitimately ship without them — the",
+      "Python SDK has no delegation and says so here. What is NOT acceptable is an",
+      "engine that implements a layer and quietly skips its cases, so an engine",
+      "listed as supporting a capability MUST run that capability's section, and",
+      "each suite asserts its own declaration against reality."
+    ],
+    "policy": [
+      "node",
+      "python",
+      "browser"
+    ],
+    "delegation": [
+      "node"
+    ]
+  },
+  "delegationCases": [
+    {
+      "name": "scope: an absent axis is unconstrained",
+      "$why": "`undefined` means 'not constrained on this axis'. Only absence becomes `*`.",
+      "op": "permits",
+      "scope": {
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/app.ts"
+      },
+      "expect": true
+    },
+    {
+      "name": "scope: an empty axis permits nothing",
+      "$why": "The escalation this pins: `[]` normalized to `['*']` turned the intersection of two disjoint authorities into universal authority. Two agents with nothing in common, delegating through each other, could do anything.",
+      "op": "permits",
+      "scope": {
+        "actions": [],
+        "resources": [
+          "**"
+        ]
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/app.ts"
+      },
+      "expect": false
+    },
+    {
+      "name": "scope: an empty resource axis permits nothing",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": []
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/app.ts"
+      },
+      "expect": false
+    },
+    {
+      "name": "scope: a wildcard action permits any action",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "*"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "request": {
+        "action": "db.write",
+        "resource": "salaries"
+      },
+      "expect": true
+    },
+    {
+      "name": "scope: a double-star resource matches a nested path",
+      "$why": "`matchGlob('**/*', x)` once returned FALSE, which is fail-open for a scope: the delegation appeared to permit nothing and the caller fell through to policy alone.",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "**/*"
+        ]
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/src/deep/app.ts"
+      },
+      "expect": true
+    },
+    {
+      "name": "scope: a single star does not cross a separator",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/*"
+        ]
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/src/app.ts"
+      },
+      "expect": false
+    },
+    {
+      "name": "scope: an action outside the list is refused",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "request": {
+        "action": "fs.write",
+        "resource": "/w/app.ts"
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: a subpath of the parent narrows",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "child": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/lib/**"
+        ]
+      },
+      "expect": true
+    },
+    {
+      "name": "narrowing: adding a sibling action widens",
+      "$why": "One extra action is still widening, and is refused rather than clamped.",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "child": {
+        "actions": [
+          "fs.read",
+          "fs.write"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: a wildcard action widens a concrete one",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "child": {
+        "actions": [
+          "*"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: a wildcard resource widens a scoped one",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "child": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: wildcard to wildcard is not a widening",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "*"
+        ],
+        "resources": [
+          "*"
+        ]
+      },
+      "child": {
+        "actions": [
+          "**"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "expect": true
+    },
+    {
+      "name": "narrowing: a child crossing separators the parent did not is widening",
+      "$why": "`/w/*` to `/w/**` reaches deeper than the parent could. Depth is authority.",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/*"
+        ]
+      },
+      "child": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: an unrelated prefix is not a narrowing",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/src/**"
+        ]
+      },
+      "child": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/etc/**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "narrowing: an empty child narrows anything",
+      "$why": "Delegating nothing is always legal. It is the one scope that can never escalate.",
+      "op": "narrows",
+      "parent": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "child": {
+        "actions": [],
+        "resources": []
+      },
+      "expect": true
+    },
+    {
+      "name": "narrowing: a child cannot widen an empty parent",
+      "op": "narrows",
+      "parent": {
+        "actions": [],
+        "resources": []
+      },
+      "child": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "expect": false
+    },
+    {
+      "name": "intersection: keeps only what both permit",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "fs.read",
+          "fs.write"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "b": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/app.ts",
+          "expect": true
+        },
+        {
+          "action": "fs.write",
+          "resource": "/w/app.ts",
+          "expect": false
+        },
+        {
+          "action": "fs.read",
+          "resource": "/etc/passwd",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "intersection: disjoint authorities permit nothing",
+      "$why": "The one that must never become `*`. Two agents with nothing in common must end up with nothing, not with everything.",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "b": {
+        "actions": [
+          "db.write"
+        ],
+        "resources": [
+          "salaries"
+        ]
+      },
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/app.ts",
+          "expect": false
+        },
+        {
+          "action": "db.write",
+          "resource": "salaries",
+          "expect": false
+        },
+        {
+          "action": "shell.exec",
+          "resource": "anything",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "intersection: the narrower resource wins",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "b": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/public/**"
+        ]
+      },
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/public/readme.md",
+          "expect": true
+        },
+        {
+          "action": "fs.read",
+          "resource": "/w/private/keys.txt",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "intersection: a wildcard side does not widen the other",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "*"
+        ],
+        "resources": [
+          "*"
+        ]
+      },
+      "b": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/app.ts",
+          "expect": true
+        },
+        {
+          "action": "db.write",
+          "resource": "salaries",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "intersection: is order independent",
+      "$why": "A ∩ B and B ∩ A must describe the same authority, or chain order becomes authority.",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "/w/public/**"
+        ]
+      },
+      "b": {
+        "actions": [
+          "fs.read",
+          "fs.write"
+        ],
+        "resources": [
+          "/w/**"
+        ]
+      },
+      "symmetric": true,
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/public/a.md",
+          "expect": true
+        },
+        {
+          "action": "fs.write",
+          "resource": "/w/public/a.md",
+          "expect": false
+        },
+        {
+          "action": "fs.read",
+          "resource": "/w/private/a.md",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "intersection: with an empty scope is empty",
+      "op": "intersect",
+      "a": {
+        "actions": [
+          "*"
+        ],
+        "resources": [
+          "*"
+        ]
+      },
+      "b": {
+        "actions": [],
+        "resources": []
+      },
+      "probes": [
+        {
+          "action": "fs.read",
+          "resource": "/w/app.ts",
+          "expect": false
+        }
+      ]
+    },
+    {
+      "name": "scope: action aliases canonicalize before matching",
+      "$why": "`filesystem.read` and `fs.read` are the same authority. An engine that treats them as different strings lets a scope be bypassed by spelling.",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "filesystem.read"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "request": {
+        "action": "fs.read",
+        "resource": "/w/app.ts"
+      },
+      "expect": true
+    },
+    {
+      "name": "scope: a namespaced action is not folded into a taxonomy bucket",
+      "$why": "An unrecognised action keeps its own identity; guessing would inherit a rule's permission.",
+      "op": "permits",
+      "scope": {
+        "actions": [
+          "fs.read"
+        ],
+        "resources": [
+          "**"
+        ]
+      },
+      "request": {
+        "action": "mcp.acme.getRid",
+        "resource": "/w/app.ts"
+      },
+      "expect": false
+    }
+  ]
+}

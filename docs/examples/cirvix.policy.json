@@ -1,0 +1,103 @@
+{
+  "rules": [
+    {
+      "name": "deny-dotenv-read",
+      "effect": "forbid",
+      "actions": ["fs.read", "fs.*"],
+      "resources": ["**/.env", "**/.env.*"],
+      "reason": "Reading .env files is denied outside an approved secrets flow. This is the single most common path from a prompt injection to a live credential.",
+      "remediation": "Request the value as a handle: secrets.get(\"STRIPE_KEY\")"
+    },
+    {
+      "name": "deny-credential-files",
+      "effect": "forbid",
+      "actions": ["fs.read", "fs.*"],
+      "resources": [
+        "**/.aws/**",
+        "**/.ssh/**",
+        "**/.kube/config",
+        "**/.npmrc",
+        "**/.netrc",
+        "**/.docker/config.json"
+      ],
+      "reason": "Cloud, SSH, and registry credentials are never readable by an agent.",
+      "remediation": "Use a scoped secret handle instead of the credential file."
+    },
+    {
+      "name": "deny-workspace-escape",
+      "effect": "forbid",
+      "actions": ["fs.*"],
+      "resources": ["*"],
+      "when": [{ "path": "path.insideWorkspace", "op": "eq", "value": false }],
+      "reason": "The resolved path is outside the workspace root. Traversal is collapsed before this check."
+    },
+    {
+      "name": "deny-prod-database",
+      "effect": "forbid",
+      "actions": ["db.*", "shell.exec"],
+      "resources": ["**/prod*", "postgres://prod*", "mysql://prod*"],
+      "reason": "Production database access does not go through an agent.",
+      "remediation": "Use the staging replica, or open a change request."
+    },
+    {
+      "name": "deny-external-egress-after-secret",
+      "effect": "forbid",
+      "actions": ["http.request", "net.*"],
+      "resources": ["*"],
+      "when": [
+        { "path": "egress.external", "op": "eq", "value": true },
+        { "path": "session.touchedSecret", "op": "eq", "value": true }
+      ],
+      "reason": "This session read secret material, so outbound requests to external destinations are blocked for the remainder of it."
+    },
+    {
+      "name": "hold-production-changes",
+      "effect": "hold",
+      "actions": ["k8s.apply", "fs.delete", "db.migrate"],
+      "resources": ["*"],
+      "when": [{ "path": "environment", "op": "in", "value": ["production", "prod"] }],
+      "approvers": ["platform-oncall"],
+      "reason": "Destructive or state-changing action in production. Held for a named human; the call waits rather than failing."
+    },
+    {
+      "name": "hold-untrusted-agents",
+      "effect": "hold",
+      "actions": ["*"],
+      "resources": ["*"],
+      "agents": ["experimental-*", "*-sandbox"],
+      "approvers": ["platform-oncall"],
+      "reason": "Agents not yet promoted out of the experimental namespace have every call reviewed."
+    },
+    {
+      "name": "allow-workspace-read",
+      "effect": "permit",
+      "actions": ["fs.read", "fs.list", "fs.stat"],
+      "resources": ["*"],
+      "when": [{ "path": "path.insideWorkspace", "op": "eq", "value": true }],
+      "reason": "Read inside the workspace root."
+    },
+    {
+      "name": "allow-workspace-write",
+      "effect": "permit",
+      "actions": ["fs.write"],
+      "resources": ["*"],
+      "when": [{ "path": "path.insideWorkspace", "op": "eq", "value": true }],
+      "reason": "Write inside the workspace root."
+    },
+    {
+      "name": "allow-allowlisted-egress",
+      "effect": "permit",
+      "actions": ["http.request", "net.*"],
+      "resources": ["*"],
+      "when": [{ "path": "egress.allowlisted", "op": "eq", "value": true }],
+      "reason": "Destination is on the egress allowlist."
+    },
+    {
+      "name": "allow-read-only-tools",
+      "effect": "permit",
+      "actions": ["*.read", "*.list", "*.search", "*.get", "*.query"],
+      "resources": ["*"],
+      "reason": "Read-only tool call."
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+# Scanning for ungoverned agent surface, and gating a policy change.
+#
+# Two independent jobs:
+#
+#   scan     what could an agent on this repo reach with nothing in the way
+#   policy   does this pull request's rule set permit more than main's
+#
+# Copy into .github/workflows/cirvix.yml.
+
+name: Cirvix
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # New credentials and new MCP servers arrive between pull requests.
+    - cron: "0 6 * * 1"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for the SARIF upload. Without it the upload step warns and
+      # continues rather than failing the job.
+      security-events: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cirvix/scan@v1
+        with:
+          # FIRST RUN ON AN EXISTING REPOSITORY: leave this as `never`.
+          # The point of a first run is to see the baseline, not to block a
+          # merge on it. Switch to `high` once the baseline is clean.
+          fail-on: never
+          upload-sarif: true
+          comment-on-pr: true
+
+  # Rules are code. A change to them gets the same scrutiny as a change to the
+  # code they govern — and the failure mode of an untested policy is not a
+  # broken build, it is a permission nobody meant to grant.
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # expectNoLoosening compares this branch against the base, so the
+          # base has to be in the checkout.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unit-test the rule set
+        run: node --test policy.test.mjs
+
+      - name: Refuse a change that permits more than main
+        run: |
+          git show origin/${{ github.base_ref || 'main' }}:cirvix.policy.json > /tmp/base.policy.json
+          node --input-type=module -e '
+            import { expectNoLoosening } from "@cirvix/agent-control/testing";
+
+            // The calls that must never become permitted. Add to this list
+            // whenever an incident teaches you a new one.
+            const CALLS = [
+              { action: "fs.read",    resource: ".env.production" },
+              { action: "fs.read",    resource: "~/.aws/credentials",
+                context: { path: { insideWorkspace: false } } },
+              { action: "shell.exec", resource: "postgres://prod-db/orders" },
+              { action: "k8s.apply",  resource: "production/checkout",
+                context: { environment: "production" } },
+              { action: "http.request", resource: "https://paste.example.net/",
+                context: { egress: { external: true }, session: { touchedSecret: true } } },
+            ];
+
+            const { ok, loosened } = await expectNoLoosening({
+              before: { policyFile: "/tmp/base.policy.json" },
+              after:  { policyFile: "cirvix.policy.json" },
+              calls: CALLS,
+            });
+
+            if (!ok) {
+              console.error("This change newly permits:");
+              for (const c of loosened) {
+                console.error(`  ${c.action} ${c.resource}  ${c.was} -> ${c.now}`);
+              }
+              process.exit(1);
+            }
+            console.log("No call became more permissive.");
+          '
+        env:
+          NODE_PATH: node_modules
+
+# Replaying a recorded run against the candidate rule set is the stronger check,
+# because it uses traffic that actually happened rather than a list somebody
+# remembered to write. It needs a control plane:
+#
+#   - name: Replay a known-bad run against this policy
+#     run: |
+#       npx @cirvix/agent-control replay run_01JQ8F2K7M \
+#         --policy cirvix.policy.json --diff
+#     env:
+#       CIRVIX_API_URL: ${{ secrets.CIRVIX_API_URL }}
+#       CIRVIX_API_KEY: ${{ secrets.CIRVIX_API_KEY }}
+#
+# `replay` exits 1 when any decision would change, which is what makes it a
+# gate. It re-decides and executes nothing.

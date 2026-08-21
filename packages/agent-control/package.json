@@ -1,0 +1,48 @@
+{
+  "name": "@cirvix/agent-control",
+  "version": "0.1.0",
+  "description": "Cirvix AgentControl — runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "cirvix": "./bin/cirvix.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "action",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs test/adversarial/*.test.mjs",
+    "corpus": "node test/corpus/report.mjs",
+    "bench": "node ../../benchmarks/decision.mjs",
+    "scan": "node bin/cirvix.mjs scan",
+    "demo": "node bin/cirvix.mjs demo",
+    "verify:adversarial": "node test/adversarial/verify.mjs"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "security",
+    "mcp",
+    "policy",
+    "governance"
+  ],
+  "exports": {
+    ".": "./src/index.mjs",
+    "./entitlements": "./src/core/entitlements.mjs",
+    "./policy": "./src/core/policy.mjs",
+    "./gateway": "./src/core/gateway.mjs",
+    "./daemon": "./src/core/daemon.mjs",
+    "./audit": "./src/core/audit.mjs",
+    "./secrets": "./src/core/secrets.mjs",
+    "./guard": "./src/core/guard.mjs",
+    "./testing": "./src/testing.mjs"
+  }
+}

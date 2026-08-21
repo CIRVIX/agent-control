@@ -1,0 +1,95 @@
+{
+  "$comment": [
+    "Putting the gateway between an MCP client and its servers.",
+    "",
+    "TWO FILES ARE INVOLVED, and confusing them is the usual mistake.",
+    "",
+    "  upstream.json   the servers you already had. The gateway reads this.",
+    "  client.json     what your editor reads. It names exactly one server:",
+    "                  cirvix, which proxies everything in upstream.json.",
+    "",
+    "Both shapes below are shown in this one file for convenience. Split them",
+    "into two files on disk.",
+    "",
+    "The gateway accepts an editor's config verbatim — `mcpServers` (Claude",
+    "Code, Cursor, Windsurf) or `servers` (VS Code) — so upstream.json is",
+    "usually the file you already have, unchanged. An entry named `cirvix` is",
+    "skipped, so pointing the gateway at a config that already includes it does",
+    "not make it proxy itself.",
+    "",
+    "stdio transport only. An entry with no `command` is ignored."
+  ],
+
+  "upstream.json": {
+    "mcpServers": {
+      "github": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..." }
+      },
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/you/work"]
+      }
+    }
+  },
+
+  "client.json": {
+    "mcpServers": {
+      "cirvix": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@cirvix/agent-control",
+          "gateway",
+          "--servers",
+          "/absolute/path/to/upstream.json",
+          "--policy",
+          "/absolute/path/to/cirvix.policy.json",
+          "--agent",
+          "pr-triage",
+          "--env",
+          "local"
+        ]
+      }
+    }
+  },
+
+  "client.json with a control plane": {
+    "mcpServers": {
+      "cirvix": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@cirvix/agent-control",
+          "gateway",
+          "--servers",
+          "/absolute/path/to/upstream.json"
+        ],
+        "env": {
+          "CIRVIX_API_URL": "https://api.example.com",
+          "CIRVIX_API_KEY": "cvx_..."
+        }
+      }
+    }
+  },
+
+  "$notes": [
+    "Paths must be absolute. The editor launches the gateway from a working",
+    "directory you do not control, and a relative --servers path resolves",
+    "somewhere you did not mean.",
+    "",
+    "With CIRVIX_API_URL and CIRVIX_API_KEY the gateway attaches a daemon: it",
+    "pulls policy, registers the agent in the fleet inventory, opens a run that",
+    "every decision belongs to, and ships telemetry. --policy then becomes the",
+    "fallback used only until the first sync.",
+    "",
+    "Without them the gateway still enforces, from the local rule set, and",
+    "writes decisions to ./.cirvix/audit.jsonl. Verify that chain with:",
+    "  cirvix audit verify --file .cirvix/audit.jsonl",
+    "",
+    "Give the endpoint a `member`-scoped API key. It needs decision:write and",
+    "agent:write and nothing more; an admin key on a laptop is an admin",
+    "credential on a laptop."
+  ]
+}

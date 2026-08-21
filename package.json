@@ -1,0 +1,27 @@
+{
+  "name": "cirvix",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runtime policy enforcement for AI agent tool calls. Apache 2.0 engine, zero runtime dependencies.",
+  "license": "Apache-2.0",
+  "homepage": "https://www.cirvix.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cirvix/agent-control.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cirvix/agent-control/issues"
+  },
+  "workspaces": [
+    "packages/agent-control"
+  ],
+  "scripts": {
+    "test": "npm test --workspace @cirvix/agent-control",
+    "verify:adversarial": "npm run verify:adversarial --workspace @cirvix/agent-control",
+    "bench": "node benchmarks/decision.mjs",
+    "example": "node docs/examples/pr-title-injection.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

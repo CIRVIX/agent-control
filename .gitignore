@@ -1,0 +1,14 @@
+node_modules/
+*.tgz
+.cirvix/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store

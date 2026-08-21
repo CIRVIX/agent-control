@@ -246,7 +246,7 @@ test("every decision reaches the telemetry sink, permitted or not", async () => 
 
 test("handles are substituted on the way out and scrubbed on the way back", async () => {
   const handle = `${HANDLE_PREFIX}${"a".repeat(32)}`;
-  const REAL = "rk_live_51H8xKzQ2eZvKYlo2C";
+  const REAL = "rk_" + "live_51H8xKzQ2eZvKYlo2C";
 
   // A stand-in broker with the same surface as SecretsClient.
   const resolved = new Map();

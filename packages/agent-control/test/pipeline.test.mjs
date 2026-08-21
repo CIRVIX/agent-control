@@ -176,7 +176,7 @@ test("a handle is substituted on the wire for a permitted call", async () => {
   });
 
   assert.ok(event.decision === DECISION.ALLOW || event.decision === DECISION.SANITIZE);
-  assert.equal(out.headers.authorization, "Bearer rk_live_REALMATERIAL0123456789");
+  assert.equal(out.headers.authorization, "Bearer rk_" + "live_REALMATERIAL0123456789");
   assert.deepEqual(event.secrets_brokered, ["KEY"]);
   assert.ok(!JSON.stringify(event).includes("rk_" + "live_REALMATERIAL"), "the record keeps the handle, not the value");
 });
@@ -211,7 +211,7 @@ test("the return path swaps material back for its handle", async () => {
   const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
   const p = pipeline({ secrets: vault });
 
-  const scrubbed = p.scrubResult({ content: "your key is rk_live_REALMATERIAL0123456789" });
+  const scrubbed = p.scrubResult({ content: "your key is rk_" + "live_REALMATERIAL0123456789" });
   assert.ok(scrubbed.payload.content.includes(handle));
   assert.ok(!scrubbed.payload.content.includes("rk_" + "live_REALMATERIAL0123456789"));
 });

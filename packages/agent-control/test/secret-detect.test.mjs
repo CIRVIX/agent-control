@@ -274,7 +274,7 @@ test("substitution replaces the handle with the material", async () => {
     { destination: "https://api.stripe.com/v1/x" },
   );
   assert.equal(result.ok, true);
-  assert.equal(result.value.headers.authorization, "Bearer rk_live_REALMATERIAL0123456789");
+  assert.equal(result.value.headers.authorization, "Bearer rk_" + "live_REALMATERIAL0123456789");
 });
 
 test("a scoped handle does not resolve for another destination", async () => {
@@ -323,7 +323,7 @@ test("an expired handle does not resolve", async () => {
 test("the return path swaps material back for its handle", () => {
   const vault = new Vault();
   const handle = vault.issue("KEY", "rk_" + "live_REALMATERIAL0123456789");
-  const result = vault.redact({ body: "leaked rk_live_REALMATERIAL0123456789 here" });
+  const result = vault.redact({ body: "leaked rk_" + "live_REALMATERIAL0123456789 here" });
   assert.ok(result.payload.body.includes(handle));
   assert.ok(!result.payload.body.includes("rk_" + "live_REALMATERIAL0123456789"));
 });

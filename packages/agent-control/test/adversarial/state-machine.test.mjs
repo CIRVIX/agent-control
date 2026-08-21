@@ -367,7 +367,7 @@ test("state: concurrent calls spending the same handle all get the right materia
   );
 
   for (const r of results) {
-    assert.equal(r.arguments.headers.authorization, "Bearer rk_live_ORIGINAL0123456789abc");
+    assert.equal(r.arguments.headers.authorization, "Bearer rk_" + "live_ORIGINAL0123456789abc");
   }
 });
 

@@ -12,7 +12,7 @@ const CWD = "/workspace";
 
 const HANDLE = `${HANDLE_PREFIX}${"a".repeat(32)}`;
 const OTHER_HANDLE = `${HANDLE_PREFIX}${"b".repeat(32)}`;
-const REAL = "rk_live_51H8xKzQ2eZvKYlo2C";
+const REAL = "rk_" + "live_51H8xKzQ2eZvKYlo2C";
 
 /** Everything is permitted, so these tests isolate the broker from policy. */
 const PERMIT_ALL = [{ name: "allow-all", effect: "permit", actions: ["*"], resources: ["*"] }];

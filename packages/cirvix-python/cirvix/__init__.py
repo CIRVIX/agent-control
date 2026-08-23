@@ -22,6 +22,8 @@ claim resting on care: all three run the shared conformance suite in
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as package_version
+
 from .guard import (
     CirvixDenied,
     CirvixHeld,
@@ -42,7 +44,12 @@ from .policy import (
     parse_rules,
 )
 
-__version__ = "0.1.0"
+try:
+    __version__ = package_version("cirvix")
+except PackageNotFoundError:
+    # Source checkouts are not installed distributions. The package metadata
+    # and VERSION file are checked together by tools/check-version.mjs.
+    __version__ = "0.1.0"
 
 __all__ = [
     "CirvixDenied",

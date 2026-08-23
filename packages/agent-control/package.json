@@ -4,6 +4,18 @@
   "description": "Cirvix AgentControl — runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
   "license": "Apache-2.0",
   "type": "module",
+  "homepage": "https://www.cirvix.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CIRVIX/agent-control.git",
+    "directory": "packages/agent-control"
+  },
+  "bugs": {
+    "url": "https://github.com/CIRVIX/agent-control/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "cirvix": "./bin/cirvix.mjs"
   },

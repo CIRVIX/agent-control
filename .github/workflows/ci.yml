@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build tooling
+        run: python -m pip install --upgrade build hatchling
+      - name: Install Node workspace
+        run: npm ci
+      - name: Canonical version check
+        run: npm run verify:version
+      - name: Node tests
+        run: npm test
+      - name: Python tests
+        working-directory: packages/cirvix-python
+        run: python -m unittest discover -s tests -v
+      - name: Adversarial fixtures
+        run: npm run verify:adversarial
+      - name: Package build and clean-install smoke test
+        run: npm run verify:package
+      - name: Python artifacts
+        run: python -m build packages/cirvix-python --outdir .artifacts/python
+      - name: Package integrity and provenance checks
+        run: |
+          npm run verify:license
+          npm run verify:public
+          python - <<'PY'
+          import pathlib, zipfile, tarfile
+          root = pathlib.Path('.artifacts/python')
+          artifacts = list(root.iterdir())
+          assert any(p.suffix == '.whl' for p in artifacts), artifacts
+          assert any(p.name.endswith('.tar.gz') for p in artifacts), artifacts
+          for p in artifacts:
+              if p.suffix == '.whl': names = zipfile.ZipFile(p).namelist()
+              elif p.name.endswith('.tar.gz'): names = tarfile.open(p).getnames()
+              else: continue
+              assert all('control-plane' not in n.lower() for n in names), (p, names)
+          print('Python artifact integrity passed')
+          PY
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

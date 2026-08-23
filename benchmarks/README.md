@@ -1,5 +1,16 @@
 # Benchmarks
 
+The complementary system benchmark measures process startup, steady-state
+decision latency, decisions per second, RSS memory, and separate audit append
+overhead:
+
+```bash
+node benchmarks/system.mjs --json
+```
+
+Do not combine its audit and non-audit numbers into one latency claim; the
+audit path is durable filesystem I/O and depends on the disk.
+
 ```bash
 node benchmarks/decision.mjs
 ```

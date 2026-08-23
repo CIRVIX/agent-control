@@ -126,11 +126,28 @@ class Upstream {
 
   start() {
     const { command, args = [], env = {} } = this.spec;
-    this.proc = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...env },
-      shell: false,
-    });
+    // Windows: Node >= 18.20 throws EINVAL when spawning .cmd/.bat shims
+    // (npm, npx, pnpm) without a shell (CVE-2024-27980 mitigation). MCP configs
+    // name such shims constantly. Going through the shell only for shims keeps
+    // POSIX behaviour unchanged; with shell:true Node joins argv verbatim, so
+    // every argument is quoted here to survive spaces and metacharacters.
+    const isWindowsShim =
+      process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+    const quoted = args.map((a) =>
+      /[\s"^&|<>]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a,
+    );
+    this.proc = isWindowsShim
+      ? spawn([command, ...quoted].join(" "), {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, ...env },
+          shell: true,
+          windowsHide: true,
+        })
+      : spawn(command, args, {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env, ...env },
+          shell: false,
+        });
 
     this.alive = true;
 

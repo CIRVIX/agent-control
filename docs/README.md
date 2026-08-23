@@ -10,6 +10,10 @@ these files are reviewed in the same pull request as the change they describe.
 
 ## Start here
 
+Developer install guides: [Claude Code](./guides/claude-code.md),
+[Cursor](./guides/cursor.md), [generic local agents](./guides/local-agent.md),
+and [MCP](./guides/mcp.md).
+
 | If you want to | Read |
 |---|---|
 | See it work in five minutes | [Quickstart](./quickstart.md) |

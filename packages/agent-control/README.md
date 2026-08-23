@@ -60,9 +60,9 @@ conformance fixture that both must pass.
 
 ## Licence
 
-Proprietary. Not open source — see [LICENSE](./LICENSE), and the full terms at
-[cirvix.com/terms.html](https://www.cirvix.com/terms.html). The free local
-runtime carries no fee and no support, availability or fitness commitment.
+Apache-2.0. The local enforcement engine is open source and ships with the
+Apache-2.0 licence and attribution notice in this package. The hosted Cirvix
+control plane is a separate product and is not included here.
 
 ## `cirvix scan`
 

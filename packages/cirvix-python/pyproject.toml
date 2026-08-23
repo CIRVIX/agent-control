@@ -28,7 +28,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://www.cirvix.com"
-Documentation = "https://www.cirvix.com/docs/sdk-python"
+Documentation = "https://www.cirvix.com/sdks.html"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cirvix"]

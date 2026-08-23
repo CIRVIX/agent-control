@@ -86,10 +86,11 @@ function liftsOver(fromId, toId) {
   if (to.attestation && !from.attestation) out.push("Attestation headers");
   if (to.sharedPolicy !== false && from.sharedPolicy === false) out.push("Shared policy + RBAC");
 
-  if (to.auditRetentionHours === null) out.push("Unlimited audit retention");
-  else if (from.auditRetentionHours !== null && to.auditRetentionHours > from.auditRetentionHours) {
-    const days = Math.round(to.auditRetentionHours / 24);
-    out.push(`${days === 1 ? "24 hours" : `${days} days`} of audit history`);
+  if (to.auditRetentionHours === null && from.auditRetentionHours !== null) {
+    // Hosted retention is a control-plane capability; the local chain itself
+    // is never pruned on any tier ("life of deployment" everywhere). Say what
+    // the tier actually adds rather than implying local history expires.
+    out.push("Hosted audit retention + export");
   }
   return out;
 }

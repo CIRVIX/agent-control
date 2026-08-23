@@ -37,13 +37,21 @@ jobs:
         with:
           name: packages
           path: dist
+      - name: Report credential availability
+        id: creds
+        run: |
+          # The secrets context cannot be read from a job-level `if:`, so the
+          # build job reports what exists and the publish jobs gate on that.
+          if [ -n "$NPM_TOKEN" ]; then echo "npm=available" >> "$GITHUB_OUTPUT"; else echo "npm=missing" >> "$GITHUB_OUTPUT"; fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-npm:
-    # Credential gate: runs only when the NPM_TOKEN secret exists. A tag push
+    # Credential gate: runs only when NPM_TOKEN is configured. A tag push
     # without credentials still produces a green build + artifacts, never a
     # half-published release or a falsely "live" publish job.
     needs: build
-    if: ${{ secrets.NPM_TOKEN != '' }}
+    if: needs.build.outputs.creds == 'available'
     runs-on: ubuntu-latest
     environment: npm
     steps:

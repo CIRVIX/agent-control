@@ -29,8 +29,9 @@ jobs:
       - run: npm run verify:license
       - run: npm run verify:public
       - name: Build Node package
-        working-directory: packages/agent-control
-        run: npm pack --pack-destination ../../dist/node
+        run: |
+          mkdir -p dist/node
+          (cd packages/agent-control && npm pack --pack-destination "$GITHUB_WORKSPACE/dist/node")
       - name: Build Python package
         run: python -m build packages/cirvix-python --outdir dist/python
       - uses: actions/upload-artifact@v4

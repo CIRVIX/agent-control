@@ -48,11 +48,11 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-npm:
-    # Credential gate: runs only when NPM_TOKEN is configured. A tag push
-    # without credentials still produces a green build + artifacts, never a
-    # half-published release or a falsely "live" publish job.
+    # Credential gate: runs only when NPM_TOKEN is configured AND this is a
+    # tag push. A manual dispatch is a dry run of build; a tag without
+    # credentials produces green build + artifacts but no false "publish".
     needs: build
-    if: needs.build.outputs.creds == 'available'
+    if: github.ref_type == 'tag' && needs.build.outputs.creds == 'available'
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -72,7 +72,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-pypi:
-    needs: build
+    needs: [build, wait-for-npm]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -89,6 +90,7 @@ jobs:
 
   release:
     needs: build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

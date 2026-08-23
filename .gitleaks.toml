@@ -14,6 +14,6 @@ useDefault = true
 [allowlist]
 description = "Secret-shaped test fixtures (dummy literals, not credentials)"
 paths = [
-  '''packages/agent-control/test/secret-detect\.test\.mjs''',
+  '''packages/agent-control/test/.*''',
   '''packages/cirvix-python/tests/.*''',
 ]

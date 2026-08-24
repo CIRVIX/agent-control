@@ -24,9 +24,12 @@ import {
   agentLimitReached,
   ephemeralSecret,
   softNudge,
+  domainSignal,
+  EGRESS_DENY_RULES,
   NUDGE_AT,
 } from "../src/core/prompts.mjs";
 import { Meter } from "../src/core/meter.mjs";
+import { commercialNotices } from "../src/core/notices.mjs";
 
 const scratch = () => mkdtempSync(join(tmpdir(), "cirvix-prompt-"));
 const ALL = ["free", "starter", "pro", "team"];
@@ -153,5 +156,80 @@ describe("the soft nudge stays soft", () => {
     // A new process, same day, same state directory.
     const second = new Meter({ cwd, now: () => day });
     assert.equal(second.shouldNudge(), false, "restarting must not buy another nudge");
+  });
+});
+
+describe("the domain-signal prompt", () => {
+  test("it speaks on the egress-class denials and stays quiet otherwise", () => {
+    for (const rule of EGRESS_DENY_RULES) {
+      const text = domainSignal({ tier: "free" }, { rule, destination: "api.example.com" });
+      assert.ok(text, `${rule} is exactly the moment this prompt exists for`);
+    }
+    assert.equal(
+      domainSignal({ tier: "free" }, { rule: "deny-workspace-escape" }),
+      null,
+      "a workspace write denial is housekeeping, not a Team signal",
+    );
+    assert.equal(domainSignal({ tier: "free" }), null, "no rule, nothing to say");
+  });
+
+  test("it names the rule it saw, never a secret value", () => {
+    const text = domainSignal(
+      { tier: "free" },
+      { rule: "deny-external-egress-after-secret", destination: "collector.stripe.example" },
+    );
+    assert.match(text, /deny-external-egress-after-secret/);
+    assert.match(text, /collector\.stripe\.example/, "the destination is the story, so it is named");
+    // The prompt is built from the rule name and the canonical destination —
+    // both of which are already in the audit chain. It has no channel to a
+    // secret value; this asserts the shape rather than trusting the call site.
+    assert.doesNotMatch(text, /(sk|pk|api[_-]?key|token)[_-]?[:=]/i);
+  });
+
+  test("it ends with somewhere real to go, and that place is the share flow", () => {
+    const text = domainSignal(
+      { tier: "starter" },
+      { rule: "deny-unlisted-egress", destination: "webhook.acme.dev" },
+    );
+    assert.match(text, /share\.html$/, "the offer must land on the page that can receive it");
+    assert.match(text, /^→ /m, "a prompt with no next step is a complaint");
+  });
+
+  test("the numbers it quotes come from the entitlement table", () => {
+    const text = domainSignal({ tier: "free" }, { rule: "deny-dotenv-production" });
+    assert.match(
+      text,
+      new RegExp(`\\b${TIERS.team.seatsIncluded}\\b`),
+      "Team's seat minimum, not a rounded one",
+    );
+    assert.match(text, /Team/, "the upgrade path is Team, because the signal is org-shaped");
+  });
+
+  test("an uncapped-agent tier does not pretend to watch one agent", () => {
+    const text = domainSignal({ tier: "team" }, { rule: "deny-credential-files" });
+    assert.ok(!text.includes("watches"), "Team has no agent ceiling, so there is none to name");
+  });
+
+  test("notices.mjs fires it once per process, on denials only", () => {
+    const out = [];
+    const notice = commercialNotices({
+      licence: { tier: "free" },
+      meter: new Meter({ cwd: scratch() }),
+      write: (s) => out.push(s),
+    });
+
+    // A permitted egress-class decision must not trigger it — the verdict
+    // gate matters as much as the rule gate.
+    notice({ rule: "deny-credential-files", verdict: "permit" });
+    assert.equal(out.length, 0, "a permit is not a signal");
+
+    notice({ policy: "deny-credential-files", verdict: "deny", destination: "~/.ssh" });
+    assert.equal(out.length, 1, "first denial speaks");
+    assert.match(out[0], /share\.html/);
+
+    for (let i = 0; i < 5; i++) {
+      notice({ policy: "deny-dotenv-production", verdict: "deny", destination: ".env.production" });
+    }
+    assert.equal(out.length, 1, "a prompt that repeats every denial is nagging");
   });
 });

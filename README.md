@@ -13,6 +13,18 @@ Read-only. No account, no signup, no telemetry. It reports which agent runtimes
 on this machine are ungoverned, which MCP servers they can reach, and which
 credential files are readable from agent context right now.
 
+**Try it in the browser first** — no account there either:
+the [sandbox](https://www.cirvix.com/sandbox.html),
+the [flagship demo](https://www.cirvix.com/flagship-demo.html), and the
+[MCP demo](https://www.cirvix.com/mcp-demo.html) run the same decisions client-side.
+
+Prefer to watch before running anything?
+
+<!-- EMBED-SLOT: 90s hero demo video — drop the URL here at launch (script: launch-assets/video-scripts.md) -->
+
+[DEMO VIDEO — 90 seconds, agent reads .env, gets denied, remediation shown] ·
+shot list and script: `launch-assets/video-scripts.md` in the site repo.
+
 ---
 
 ## Install in 30 seconds
@@ -59,6 +71,16 @@ try {
 
 Requires Node 20+ or Python 3.9+.
 
+## Free forever
+
+The free tier is the whole engine, running locally: **100 policy decisions a
+day, one governed agent, ephemeral secrets that clear on restart, and an audit
+log that stays on your machine for the life of the deployment.** No account, no
+card, no expiring trial. When you outgrow single-agent use — shared policy
+distribution, team vault, SSO, hosted retention — that is the
+[hosted control plane](https://www.cirvix.com/pricing.html)
+(Starter / Pro / Team / Enterprise; annual billing is two months free).
+
 ## See it stop a real attack
 
 In April 2026, researchers hijacked Claude Code, Gemini CLI and GitHub Copilot
@@ -83,6 +105,36 @@ node docs/examples/pr-title-injection.mjs
 The poisoned title is visible in the *allowed* output of step 1. The injection
 worked — the agent read it and tried to comply. It failed anyway, because
 reading a credential was never something that agent was permitted to do.
+
+## How it sits in your stack
+
+```
+ your agent (Claude Code · Cursor · any MCP client)
+        │
+        ▼
+ ┌───────────────────────────────────────────────┐
+ │  cirvix engine  (this repo · Apache-2.0)      │
+ │                                               │
+ │  guard.wrap / MCP gateway / control socket    │
+ │        │  every tool call, decided            │
+ │        ▼                                      │
+ │  policy evaluation   default-deny rule set    │
+ │        │              + your rules/packs      │
+ │        ├─▶ PERMIT ──▶ call executes           │
+ │        ├─▶ DENY  ──▶ blocked + remediation    │
+ │        └─▶ HOLD  ──▶ waits for named approver │
+ │        │                                      │
+ │        ▼                                      │
+ │  tamper-evident audit chain      secret broker│
+ │  (local file, exportable)     (handles, never │
+ │                                plaintext)     │
+ └───────────────────────────────────────────────┘
+        │  optional, Team+ : shared policy distribution,
+        ▼  team vault, SSO/SCIM, hosted retention
+ ┌───────────────────────────────────────────────┐
+ │  hosted control plane (separate, proprietary) │
+ └───────────────────────────────────────────────┘
+```
 
 ## What is here
 

@@ -12,6 +12,15 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # publish-npm gates on `needs.build.outputs.creds`. A job's step outputs are
+    # NOT visible to dependent jobs unless the job republishes them here, so
+    # without this mapping that expression is the empty string, the gate can
+    # never be true, and publish-npm skips on every tag while the run stays
+    # green — which is exactly what happened to v0.1.0: PyPI published, npm did
+    # not, and nothing failed. Note the key below is `npm`, which is what the
+    # step actually writes.
+    outputs:
+      creds: ${{ steps.creds.outputs.npm }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

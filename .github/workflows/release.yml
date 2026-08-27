@@ -96,6 +96,15 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/python
+          # PyPI versions are immutable, so re-running a tag that already
+          # published fails with "file already exists" and takes the whole run
+          # red — even when the other publish jobs succeeded. That is not
+          # hypothetical here: 0.1.0 is already on PyPI while npm never
+          # published, so the very re-run that fixes npm would fail on Python.
+          # Skipping an already-present file makes the release re-runnable,
+          # which is what a release pipeline has to be when one half of it
+          # fails.
+          skip-existing: true
 
   release:
     needs: build

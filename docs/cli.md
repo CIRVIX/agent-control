@@ -1,12 +1,12 @@
 # CLI reference
 
-`cirvix` ships in `@cirvix/agent-control`. Zero runtime dependencies, by
+`cirvix` ships in `@cirvix_ai/agent-control`. Zero runtime dependencies, by
 design: this binary runs on developer machines and in CI, and a security tool
 that drags in a transitive dependency tree is asking to become the supply-chain
 incident it exists to prevent.
 
 ```bash
-npx @cirvix/agent-control scan
+npx @cirvix_ai/agent-control scan
 ```
 
 Requires Node 20 or later.

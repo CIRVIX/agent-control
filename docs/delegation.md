@@ -35,7 +35,7 @@ what it says. Names are attacker-controlled strings and are treated as such.
 ## Issuing
 
 ```js
-import { DelegationBroker } from "@cirvix/agent-control/delegation";
+import { DelegationBroker } from "@cirvix_ai/agent-control/delegation";
 
 const broker = new DelegationBroker();
 

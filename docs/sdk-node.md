@@ -1,7 +1,7 @@
 # Node SDK
 
 ```bash
-npm install @cirvix/agent-control
+npm install @cirvix_ai/agent-control
 ```
 
 Zero runtime dependencies. Node 20 or later. ESM only.
@@ -25,7 +25,7 @@ reached directly was never evaluated.
 ## Quick start
 
 ```js
-import { guard, CirvixDenied, CirvixHeld, STARTER_RULES } from "@cirvix/agent-control";
+import { guard, CirvixDenied, CirvixHeld, STARTER_RULES } from "@cirvix_ai/agent-control";
 
 const tools = guard.wrap(myTools, {
   agent: "pr-triage",
@@ -57,7 +57,7 @@ Loading a rule set from a file:
 
 ```js
 import { readFile } from "node:fs/promises";
-import { guard, parseRules } from "@cirvix/agent-control";
+import { guard, parseRules } from "@cirvix_ai/agent-control";
 
 const rules = parseRules(JSON.parse(await readFile("cirvix.policy.json", "utf8")));
 const tools = guard.wrap(myTools, { agent: "pr-triage", rules });
@@ -89,7 +89,7 @@ tool registry, and an anonymous arrow would silently rename every governed tool.
 ## `Guard`
 
 ```js
-import { Guard } from "@cirvix/agent-control";
+import { Guard } from "@cirvix_ai/agent-control";
 
 const g = new Guard({
   rules,                      // rule array. Default [] — which denies everything
@@ -163,7 +163,7 @@ yes. Collapsing them teaches agents to treat both as failure.
 Rules are code. Test them in CI next to everything else.
 
 ```js
-import { evaluate } from "@cirvix/agent-control/testing";
+import { evaluate } from "@cirvix_ai/agent-control/testing";
 
 test("production writes are held for a human", async () => {
   const decision = await evaluate({
@@ -195,7 +195,7 @@ The pull-request counterpart to `cirvix replay`, for a policy diff where there
 is no recorded run to replay against.
 
 ```js
-import { expectNoLoosening } from "@cirvix/agent-control/testing";
+import { expectNoLoosening } from "@cirvix_ai/agent-control/testing";
 
 const { ok, loosened } = await expectNoLoosening({
   before: { policyFile: "policies/main.json" },
@@ -215,7 +215,7 @@ policy is allowed to move without a reviewer being surprised.
 ## Secret handles
 
 ```js
-import { SecretsClient } from "@cirvix/agent-control/secrets";
+import { SecretsClient } from "@cirvix_ai/agent-control/secrets";
 
 const secrets = new SecretsClient({
   apiUrl: process.env.CIRVIX_API_URL,
@@ -261,7 +261,7 @@ From the package root:
 
 Subpath exports, for importing one thing without the rest:
 
-`@cirvix/agent-control/policy` · `/guard` · `/gateway` · `/daemon` · `/audit` ·
+`@cirvix_ai/agent-control/policy` · `/guard` · `/gateway` · `/daemon` · `/audit` ·
 `/secrets` · `/testing`
 
 ## Parity with Python

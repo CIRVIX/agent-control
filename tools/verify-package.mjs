@@ -60,7 +60,7 @@ try {
   await run(cli, ["check", "--action", "fs.read", "--resource", ".env.production", "--cwd", temp], temp, 1);
   await run(cli, ["check", "--action", "fs.read", "--resource", "src/index.mjs", "--cwd", temp], temp, 0);
   const smoke = join(temp, "smoke.mjs");
-  await writeFile(smoke, "import { guard, STARTER_RULES } from '@cirvix/agent-control';\nconst t = guard.wrap({ read_file: async () => 'ok' }, { rules: STARTER_RULES });\nawait t.read_file({ path: 'src/index.mjs' });\nconsole.log('first decision ok');\n", "utf8");
+  await writeFile(smoke, "import { guard, STARTER_RULES } from '@cirvix_ai/agent-control';\nconst t = guard.wrap({ read_file: async () => 'ok' }, { rules: STARTER_RULES });\nawait t.read_file({ path: 'src/index.mjs' });\nconsole.log('first decision ok');\n", "utf8");
   await run(process.execPath, [smoke], temp);
   console.log(`package verification passed: ${tarball}, version ${version}`);
 } finally {

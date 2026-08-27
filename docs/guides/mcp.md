@@ -6,7 +6,7 @@ deployment automatically. Put it between a client and the upstream server map.
 ## Install → init
 
 ```bash
-npm install -g @cirvix/agent-control
+npm install -g @cirvix_ai/agent-control
 cirvix init
 ```
 

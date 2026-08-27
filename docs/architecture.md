@@ -217,9 +217,9 @@ plane beyond telemetry ingest.
 
 | Package | Runtime dependencies |
 |---|---|
-| `@cirvix/agent-control` | none |
+| `@cirvix_ai/agent-control` | none |
 | `cirvix` (PyPI) | none |
-| `@cirvix/control-plane` | `@cirvix/agent-control` only |
+| `@cirvix/control-plane` | `@cirvix_ai/agent-control` only |
 
 The console is a Next.js app and does have dependencies. Nothing on the
 enforcement path does.

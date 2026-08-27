@@ -1,4 +1,4 @@
-# @cirvix/agent-control
+# @cirvix_ai/agent-control
 
 Runtime governance for AI agents. Scan what is ungoverned, evaluate tool calls
 against policy, and keep a tamper-evident record of every decision.
@@ -12,14 +12,14 @@ prevent.
 No account, no signup, no config file, no daemon to leave running.
 
 ```bash
-npx @cirvix/agent-control scan
+npx @cirvix_ai/agent-control scan
 ```
 
 That reads your machine and tells you which agent runtimes are ungoverned. It
 writes nothing and sends nothing anywhere. Then decide one call:
 
 ```bash
-npx @cirvix/agent-control check --action fs.read --resource .env.production
+npx @cirvix_ai/agent-control check --action fs.read --resource .env.production
 ```
 
 ```
@@ -34,11 +34,11 @@ To govern an agent rather than a single call, wrap its tools — the call cannot
 leave without being decided, so there is no verdict to forget to check:
 
 ```bash
-npm install @cirvix/agent-control
+npm install @cirvix_ai/agent-control
 ```
 
 ```js
-import { guard, CirvixDenied, STARTER_RULES } from "@cirvix/agent-control";
+import { guard, CirvixDenied, STARTER_RULES } from "@cirvix_ai/agent-control";
 
 const tools = guard.wrap(myTools, { agent: "pr-triage", rules: STARTER_RULES });
 
@@ -158,7 +158,7 @@ for when it does not — a LangChain executor, a crew, a hand-rolled loop over
 some functions:
 
 ```js
-import { guard, CirvixDenied, CirvixHeld } from "@cirvix/agent-control";
+import { guard, CirvixDenied, CirvixHeld } from "@cirvix_ai/agent-control";
 
 const tools = guard.wrap(myTools, {
   agent: "pr-triage",
@@ -203,7 +203,7 @@ as failure.
 ### Testing a policy like code
 
 ```js
-import { evaluate, expectNoLoosening } from "@cirvix/agent-control/testing";
+import { evaluate, expectNoLoosening } from "@cirvix_ai/agent-control/testing";
 
 test("production writes are held for a human", async () => {
   const decision = await evaluate({
@@ -259,7 +259,7 @@ real value is substituted into the outbound request at the gateway — after
 policy has authorized that specific destination.
 
 ```js
-import { SecretsClient } from "@cirvix/agent-control/secrets";
+import { SecretsClient } from "@cirvix_ai/agent-control/secrets";
 
 const secrets = new SecretsClient({ apiUrl, apiKey, agent: "pr-triage" });
 

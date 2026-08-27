@@ -42,7 +42,7 @@ inputs:
     required: false
     default: "false"
   version:
-    description: Version of @cirvix/agent-control to run.
+    description: Version of @cirvix_ai/agent-control to run.
     required: false
     default: latest
 
@@ -86,12 +86,12 @@ runs:
         # down before the summary is written. Captured, reported, then
         # re-raised at the end by the reporter.
         set +e
-        npx --yes "@cirvix/agent-control@${CIRVIX_VERSION}" scan "${args[@]}" > cirvix-scan.json
+        npx --yes "@cirvix_ai/agent-control@${CIRVIX_VERSION}" scan "${args[@]}" > cirvix-scan.json
         scan_status=$?
         set -e
 
         if [ "${scan_status}" -ne 0 ] && [ ! -s cirvix-scan.json ]; then
-          echo "::error title=Cirvix::The scan did not run. Check that @cirvix/agent-control@${CIRVIX_VERSION} exists."
+          echo "::error title=Cirvix::The scan did not run. Check that @cirvix_ai/agent-control@${CIRVIX_VERSION} exists."
           exit 1
         fi
 

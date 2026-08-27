@@ -40,7 +40,7 @@
         "command": "npx",
         "args": [
           "-y",
-          "@cirvix/agent-control",
+          "@cirvix_ai/agent-control",
           "gateway",
           "--servers",
           "/absolute/path/to/upstream.json",
@@ -61,7 +61,7 @@
         "command": "npx",
         "args": [
           "-y",
-          "@cirvix/agent-control",
+          "@cirvix_ai/agent-control",
           "gateway",
           "--servers",
           "/absolute/path/to/upstream.json"

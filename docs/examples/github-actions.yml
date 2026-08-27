@@ -61,7 +61,7 @@ jobs:
         run: |
           git show origin/${{ github.base_ref || 'main' }}:cirvix.policy.json > /tmp/base.policy.json
           node --input-type=module -e '
-            import { expectNoLoosening } from "@cirvix/agent-control/testing";
+            import { expectNoLoosening } from "@cirvix_ai/agent-control/testing";
 
             // The calls that must never become permitted. Add to this list
             // whenever an incident teaches you a new one.
@@ -100,7 +100,7 @@ jobs:
 #
 #   - name: Replay a known-bad run against this policy
 #     run: |
-#       npx @cirvix/agent-control replay run_01JQ8F2K7M \
+#       npx @cirvix_ai/agent-control replay run_01JQ8F2K7M \
 #         --policy cirvix.policy.json --diff
 #     env:
 #       CIRVIX_API_URL: ${{ secrets.CIRVIX_API_URL }}

@@ -6,7 +6,7 @@ minutes. Nothing else is blocked on people.
 
 ---
 
-## 1. npm trusted publishing → `@cirvix/agent-control`
+## 1. npm trusted publishing → `@cirvix_ai/agent-control`
 
 **Where you must be logged in:** npm as a member of the `cirvix` npm
 organization (or its owner).
@@ -31,7 +31,7 @@ organization (or its owner).
 watch <https://github.com/CIRVIX/agent-control/actions>, then run:
 
 ```
-npm view @cirvix/agent-control version   # should print 0.1.0, not 404
+npm view @cirvix_ai/agent-control version   # should print 0.1.0, not 404
 ```
 
 ## 2. PyPI trusted publishing → `cirvix`

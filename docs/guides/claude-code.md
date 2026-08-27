@@ -7,7 +7,7 @@ inspect or classify prompt-injection text.
 ## Install → init
 
 ```bash
-npm install -g @cirvix/agent-control
+npm install -g @cirvix_ai/agent-control
 cirvix --version
 cd /path/to/your/project
 cirvix init

@@ -38,7 +38,7 @@ and [MCP](./guides/mcp.md).
 
 Three components, deployable independently:
 
-- **`@cirvix/agent-control`** — a zero-dependency Node package containing the
+- **`@cirvix_ai/agent-control`** — a zero-dependency Node package containing the
   policy engine, the MCP gateway, the endpoint daemon, the audit chain, the
   secret client, the scanner, and the `cirvix` CLI.
 - **`cirvix`** (PyPI) — a zero-dependency Python package containing a second

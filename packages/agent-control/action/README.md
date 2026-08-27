@@ -63,7 +63,7 @@ summary.
 | `sarif-file` | `cirvix-scan.sarif` | Empty string to skip SARIF |
 | `upload-sarif` | `true` | Send findings to code scanning |
 | `comment-on-pr` | `false` | One comment, edited in place on each push |
-| `version` | `latest` | Version of `@cirvix/agent-control` to run |
+| `version` | `latest` | Version of `@cirvix_ai/agent-control` to run |
 
 ## Outputs
 
@@ -94,7 +94,7 @@ workflow can branch without re-running the scan:
 
 There is no committed `dist/` bundle. A JavaScript action ships one, it has to
 be rebuilt on every change, and in practice it is the thing that goes stale.
-The CLI has zero runtime dependencies, so `npx @cirvix/agent-control` is a
+The CLI has zero runtime dependencies, so `npx @cirvix_ai/agent-control` is a
 smaller and more honest supply chain than a vendored bundle nobody re-reads.
 
 Pin `version` if you would rather not track `latest`.

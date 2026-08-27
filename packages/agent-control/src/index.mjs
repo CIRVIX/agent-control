@@ -1,4 +1,4 @@
-/** Public entry point for @cirvix/agent-control. */
+/** Public entry point for @cirvix_ai/agent-control. */
 
 /* Policy engine ----------------------------------------------------------- */
 export {

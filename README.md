@@ -6,7 +6,7 @@ and the decision is recorded either way.**
 Apache 2.0. Zero runtime dependencies. Node and Python.
 
 ```bash
-npx @cirvix/agent-control scan
+npx @cirvix_ai/agent-control scan
 ```
 
 Read-only. No account, no signup, no telemetry. It reports which agent runtimes
@@ -18,13 +18,13 @@ credential files are readable from agent context right now.
 ## Install in 30 seconds
 
 ```bash
-npx @cirvix/agent-control scan
+npx @cirvix_ai/agent-control scan
 ```
 
 Then decide a single call and read the reasoning:
 
 ```bash
-npx @cirvix/agent-control check --action fs.read --resource .env.production
+npx @cirvix_ai/agent-control check --action fs.read --resource .env.production
 ```
 
 ```
@@ -39,11 +39,11 @@ To govern an agent rather than one call, wrap its tools. The call cannot leave
 without being decided, so there is no verdict to forget to check:
 
 ```bash
-npm install @cirvix/agent-control     # or:  pip install cirvix
+npm install @cirvix_ai/agent-control     # or:  pip install cirvix
 ```
 
 ```js
-import { guard, CirvixDenied, STARTER_RULES } from "@cirvix/agent-control";
+import { guard, CirvixDenied, STARTER_RULES } from "@cirvix_ai/agent-control";
 
 const tools = guard.wrap(myTools, { agent: "pr-triage", rules: STARTER_RULES });
 

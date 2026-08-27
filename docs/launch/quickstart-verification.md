@@ -15,7 +15,7 @@ python -m build packages/cirvix-python --outdir .artifacts/python
 python -m unittest discover -s packages/cirvix-python/tests -v
 ```
 
-`verify:package` packs `@cirvix/agent-control`, installs that tarball into a
+`verify:package` packs `@cirvix_ai/agent-control`, installs that tarball into a
 brand-new temporary npm project, checks the CLI version, runs `init`, validates
 a policy, expects a credential-file read to be denied, and imports the package
 through a one-decision smoke test.
@@ -27,7 +27,7 @@ Run from a clean temporary directory after publication:
 ```bash
 mkdir cirvix-clean && cd cirvix-clean
 npm init -y
-npm install @cirvix/agent-control
+npm install @cirvix_ai/agent-control
 npx --no-install cirvix --version
 npx --no-install cirvix init
 npx --no-install cirvix check --action fs.read --resource .env.production

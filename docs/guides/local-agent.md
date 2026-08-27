@@ -7,12 +7,12 @@ calls outside the wrapped object are outside this integration's coverage.
 ## Install → init → connect
 
 ```bash
-npm install @cirvix/agent-control
+npm install @cirvix_ai/agent-control
 cirvix init
 ```
 
 ```js
-import { guard, STARTER_RULES, CirvixDenied } from "@cirvix/agent-control";
+import { guard, STARTER_RULES, CirvixDenied } from "@cirvix_ai/agent-control";
 
 const tools = guard.wrap(myTools, { agent: "local-agent", rules: STARTER_RULES });
 try {

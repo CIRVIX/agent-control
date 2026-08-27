@@ -19,8 +19,8 @@
     "packages/agent-control"
   ],
   "scripts": {
-    "test": "npm test --workspace @cirvix/agent-control",
-    "verify:adversarial": "npm run verify:adversarial --workspace @cirvix/agent-control",
+    "test": "npm test --workspace @cirvix_ai/agent-control",
+    "verify:adversarial": "npm run verify:adversarial --workspace @cirvix_ai/agent-control",
     "verify:version": "node tools/check-version.mjs",
     "verify:public": "node tools/audit-public-repo.mjs",
     "verify:license": "node tools/check-license.mjs",

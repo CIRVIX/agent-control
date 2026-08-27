@@ -1,5 +1,5 @@
 {
-  "name": "@cirvix/agent-control",
+  "name": "@cirvix_ai/agent-control",
   "version": "0.1.0",
   "description": "Cirvix AgentControl — runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
   "license": "Apache-2.0",

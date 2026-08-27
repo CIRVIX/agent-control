@@ -39,7 +39,7 @@ const HELP = {
   "runtime-ungoverned":
     "This agent runtime routes tool calls directly to MCP servers. Point it at `cirvix gateway` so every call is evaluated against policy first.",
   "framework-unguarded":
-    "This framework's tool boundary has no guard on it. Wrap the executor with `guard.wrap()` from `@cirvix/agent-control`.",
+    "This framework's tool boundary has no guard on it. Wrap the executor with `guard.wrap()` from `@cirvix_ai/agent-control`.",
   "server-broad-scope":
     "This MCP server is configured with a scope far wider than a workspace. Narrow it, or add a policy rule bounding what an agent may reach through it.",
   "server-inline-secrets":

@@ -8,7 +8,7 @@ Requires Node 20 or later.
 ## 1. See what is ungoverned
 
 ```bash
-npx @cirvix/agent-control scan
+npx @cirvix_ai/agent-control scan
 ```
 
 Read-only. Nothing is changed and nothing leaves the machine.
@@ -38,7 +38,7 @@ reach right now", and for most machines the answer is uncomfortable.
 ## 2. Ask whether a call would be allowed
 
 ```bash
-npx @cirvix/agent-control check --action fs.read --resource .env.production
+npx @cirvix_ai/agent-control check --action fs.read --resource .env.production
 ```
 
 ```
@@ -58,7 +58,7 @@ hypothetical.
 Try one that passes:
 
 ```bash
-npx @cirvix/agent-control check --action fs.read --resource src/index.ts
+npx @cirvix_ai/agent-control check --action fs.read --resource src/index.ts
 ```
 
 ```
@@ -70,7 +70,7 @@ You are running against the [nine starter rules](./policy.md#the-starter-rule-se
 See them:
 
 ```bash
-npx @cirvix/agent-control policy
+npx @cirvix_ai/agent-control policy
 ```
 
 ## 3. Write your own rules
@@ -111,7 +111,7 @@ Rules are JSON. Create `cirvix.policy.json`:
 Check it:
 
 ```bash
-npx @cirvix/agent-control check --policy cirvix.policy.json \
+npx @cirvix_ai/agent-control check --policy cirvix.policy.json \
   --action k8s.apply --resource production/checkout --env production
 ```
 
@@ -139,7 +139,7 @@ Put Cirvix between the agent and its servers. Point it at the config you already
 have:
 
 ```bash
-npx @cirvix/agent-control gateway \
+npx @cirvix_ai/agent-control gateway \
   --servers ~/.cursor/mcp.json \
   --policy cirvix.policy.json
 ```
@@ -151,7 +151,7 @@ Then register the gateway itself as the one MCP server your client talks to:
   "mcpServers": {
     "cirvix": {
       "command": "npx",
-      "args": ["-y", "@cirvix/agent-control", "gateway",
+      "args": ["-y", "@cirvix_ai/agent-control", "gateway",
                "--servers", "/absolute/path/to/mcp.json",
                "--policy", "/absolute/path/to/cirvix.policy.json"]
     }
@@ -166,7 +166,7 @@ in `.cirvix/audit.jsonl`.
 
 ```js
 import { readFile } from "node:fs/promises";
-import { guard, parseRules, CirvixDenied } from "@cirvix/agent-control";
+import { guard, parseRules, CirvixDenied } from "@cirvix_ai/agent-control";
 
 const rules = parseRules(JSON.parse(await readFile("cirvix.policy.json", "utf8")));
 const tools = guard.wrap(myTools, { agent: "pr-triage", rules });
@@ -203,7 +203,7 @@ except CirvixDenied as err:
 ## 5. Verify the record
 
 ```bash
-npx @cirvix/agent-control audit verify
+npx @cirvix_ai/agent-control audit verify
 ```
 
 ```
@@ -230,7 +230,7 @@ Findings appear on the pull-request diff and in the Security tab. Switch
 Test your rules like code:
 
 ```js
-import { evaluate } from "@cirvix/agent-control/testing";
+import { evaluate } from "@cirvix_ai/agent-control/testing";
 
 test("production deploys are held", async () => {
   const d = await evaluate({

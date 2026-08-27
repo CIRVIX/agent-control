@@ -56,9 +56,9 @@ dependencies — just on a different day.
 
 | Package | Runtime dependencies | Enforced by |
 |---|---|---|
-| `@cirvix/agent-control` | **none** | no `dependencies` key in `package.json` |
+| `@cirvix_ai/agent-control` | **none** | no `dependencies` key in `package.json` |
 | `cirvix` (PyPI) | **none** | `dependencies = []` in `pyproject.toml` |
-| `@cirvix/control-plane` | `@cirvix/agent-control` only | `package.json` |
+| `@cirvix/control-plane` | `@cirvix_ai/agent-control` only | `package.json` |
 
 This is permanent, not aspirational. A security tool that drags in a transitive
 dependency tree is asking to become the supply-chain incident it exists to

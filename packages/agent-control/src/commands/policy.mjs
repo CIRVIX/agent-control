@@ -183,7 +183,7 @@ export async function test({ path, cwd = process.cwd(), json = false, filter = n
 
   if (json) return { result, code: failed ? 1 : 0, output: JSON.stringify(result, null, 2) };
 
-  const lines = ["", `  ${bold(path)}`, ""];
+  const lines = ["", `  ${bold("CIRVIX POLICY VALIDATION")}`, "", `  ${dim(`◌ Running ${cases.length} policy tests...`)}`, "", `  ${dim(path)}`, ""];
   for (const c of cases) {
     if (c.passed) {
       lines.push(`  ${green("✓")} ${c.name}  ${dim(`→ ${c.actual}${c.rule ? ` (${c.rule})` : ""}`)}`);
@@ -197,11 +197,15 @@ export async function test({ path, cwd = process.cwd(), json = false, filter = n
     }
   }
   lines.push("");
-  lines.push(
-    failed === 0
-      ? `  ${green(bold(`${passed} passed`))}`
-      : `  ${red(bold(`${failed} failed`))}  ${dim(`${passed} passed`)}`,
-  );
+  lines.push(`  ${dim("─".repeat(40))}`);
+  lines.push("");
+  if (failed === 0) {
+    lines.push(`  ${green(bold(`${passed}/${cases.length} PASSED`))}`);
+    lines.push(`  ${dim("Policy is internally consistent.")}`);
+  } else {
+    lines.push(`  ${red(bold(`${failed} failed`))}  ${dim(`${passed} passed`)}  ${red(`✕ ${passed}/${cases.length} PASSED`)}`);
+    lines.push(`  ${dim("Fix the failing tests above — they describe the intended enforcement.")}`);
+  }
   lines.push("");
 
   return { result, code: failed ? 1 : 0, output: lines.join("\n") };

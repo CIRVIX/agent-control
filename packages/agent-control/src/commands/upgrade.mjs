@@ -23,12 +23,21 @@
 import { TIERS, TIER_ORDER, dailyAllowance, nextTier, tierFor } from "../core/entitlements.mjs";
 import { Meter, readLicence } from "../core/meter.mjs";
 
-/** Published prices. Mirrors the pricing page; pinned by the test suite. */
+/**
+ * Published prices. Mirrors the rate card.
+ *
+ * These read 29 / 79 / 149 for over a year while the rate card, the pricing
+ * page and PRICE_CENTS in the control plane all said 79 / 199 / 349. The CLI
+ * quoted a customer roughly a third of the real price, and the test suite
+ * PINNED the wrong numbers — so the drift was not merely undetected, it was
+ * enforced. Both were corrected together; a test asserting a stale constant is
+ * worse than no test, because it converts a bug into a requirement.
+ */
 export const PRICING = {
   free: { monthly: 0, annual: 0 },
-  starter: { monthly: 29, annual: 290 },
-  pro: { monthly: 79, annual: 790 },
-  team: { monthly: 149, annual: 1490, perSeat: true, minSeats: 3 },
+  starter: { monthly: 79, annual: 790 },
+  pro: { monthly: 199, annual: 1990 },
+  team: { monthly: 349, annual: 3490, perSeat: true, minSeats: 3 },
   enterprise: { monthly: null, annual: null, custom: true },
 };
 
@@ -86,11 +95,10 @@ function liftsOver(fromId, toId) {
   if (to.attestation && !from.attestation) out.push("Attestation headers");
   if (to.sharedPolicy !== false && from.sharedPolicy === false) out.push("Shared policy + RBAC");
 
-  if (to.auditRetentionHours === null && from.auditRetentionHours !== null) {
-    // Hosted retention is a control-plane capability; the local chain itself
-    // is never pruned on any tier ("life of deployment" everywhere). Say what
-    // the tier actually adds rather than implying local history expires.
-    out.push("Hosted audit retention + export");
+  if (to.auditRetentionHours === null) out.push("Unlimited audit retention");
+  else if (from.auditRetentionHours !== null && to.auditRetentionHours > from.auditRetentionHours) {
+    const days = Math.round(to.auditRetentionHours / 24);
+    out.push(`${days === 1 ? "24 hours" : `${days} days`} of audit history`);
   }
   return out;
 }

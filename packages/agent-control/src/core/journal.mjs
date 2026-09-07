@@ -198,23 +198,55 @@ function clock(ts) {
   return m ? m[1] : s.slice(0, 8).padEnd(8);
 }
 
-/** One record, one line. The shape `cirvix logs` prints. */
+/** One record, compact or expanded per risk/decision (spec: ALLOW compact, DENY expanded). */
 export function renderLine(record) {
   if (record.malformed) {
     return `  ${dim(String(record.line).padStart(4))}  ${red("malformed record")} ${dim(record.raw.slice(0, 60))}`;
   }
   const decision = record.decision ?? toDecision(record.verdict);
   const tone = toneFor(record);
-  const risk = RISK_TONE[record.risk] ?? dim;
+  const riskTone = RISK_TONE[record.risk] ?? dim;
+  const isCritical = String(record.risk ?? "").toLowerCase() === "critical" || String(record.risk ?? "").toLowerCase() === "high";
+  const isDenied = decision === DECISION.DENY;
+  const isHeld = decision === DECISION.REQUIRE_APPROVAL;
+  const clockStr = dim(clock(record.ts ?? record.timestamp));
+  const icon = decision === DECISION.ALLOW ? "✓" : decision === DECISION.SANITIZE ? "◈" : isDenied ? "✕" : isHeld ? "⏸" : "·";
+  const label = String(decision).toUpperCase().replace(/_/g, " ");
+  const tool = String(record.tool ?? record.action ?? "—");
+  const resource = truncate(record.resource ?? record.command ?? "", 44);
+  const policy = String(record.policy ?? record.rule ?? "default-deny");
+  const latency = `${record.latency_ms ?? "—"}ms`;
 
+  // Expanded for DENY/CRITICAL/HOLD/HIGH — high visibility, spec layout:
+  // 22:38:53  ◇ SANITIZE  HIGH      network.request
+  //            https://docs.example.com/deploy
+  //            Policy: sanitize-fetched-content       16.82ms
+  if (isDenied || isHeld || isCritical) {
+    const iconLabel = isHeld ? "APPROVAL" : label; // REQUIRE_APPROVAL displays as APPROVAL per spec
+    const iconChar = isHeld ? "●" : icon;
+    const lines = [];
+    // First line: time + icon/verdict + risk + tool — columns aligned, decision strongest
+    lines.push(
+      `  ${clockStr}  ${tone(`${iconChar} ${iconLabel.padEnd(12)}`)} ${riskTone(String(record.risk ?? "—").toUpperCase().padEnd(9))} ${tool.padEnd(20)} ${dim(latency)}`,
+    );
+    if (resource) lines.push(`           ${dim(resource)}`);
+    // Policy line — indented, secondary
+    lines.push(`           ${dim(`Policy: ${policy}`)}`);
+    if (isHeld) {
+      lines.push(`           ${amber("→ AWAITING APPROVAL")}`);
+    }
+    return lines.join("\n");
+  }
+
+  // Compact for ordinary ALLOW.
   return [
-    `  ${dim(clock(record.ts ?? record.timestamp))}`,
-    tone(String(decision).toUpperCase().padEnd(16)),
-    risk(String(record.risk ?? "—").toUpperCase().padEnd(8)),
-    String(record.tool ?? record.action ?? "—").padEnd(20),
-    dim(truncate(record.resource ?? record.command ?? "", 44).padEnd(44)),
-    dim(String(record.policy ?? record.rule ?? "default-deny").padEnd(24)),
-    dim(`${record.latency_ms ?? "—"}ms`),
+    `  ${clockStr}`,
+    tone(`${icon} ${label.padEnd(12)}`),
+    riskTone(String(record.risk ?? "—").toUpperCase().padEnd(8)),
+    tool.padEnd(20),
+    dim(resource.padEnd(44)),
+    dim(latency.padEnd(8)),
+    dim(policy),
   ].join(" ");
 }
 
@@ -237,44 +269,103 @@ export function renderLine(record) {
 export function renderTree(record, { indent = "  " } = {}) {
   const decision = record.decision ?? toDecision(record.verdict);
   const tone = toneFor(record);
-  const risk = RISK_TONE[record.risk] ?? dim;
+  const riskTone = RISK_TONE[record.risk] ?? dim;
+  const isDeny = decision === DECISION.DENY;
+  const isHold = decision === DECISION.REQUIRE_APPROVAL;
+  const isSanitize = decision === DECISION.SANITIZE;
 
-  const rows = [
-    ["input", truncate(record.resource || record.command || "(no resource)", 70)],
-    ["risk", risk(String(record.risk ?? "unknown").toUpperCase()) + (record.risk_signals?.length ? dim(`  ${record.risk_signals.join(", ")}`) : "")],
-    ["policy", record.policy ?? record.rule ?? dim("— no rule matched (default deny)")],
-    ["decision", tone(String(decision).toUpperCase()) + (record.enforced === false ? dim("  (not enforced — audit mode)") : "")],
-    ["latency", `${record.latency_ms ?? "—"}ms`],
-  ];
+  // Header — spec: CIRVIX DECISION ANALYSIS
+  const lines = [];
+  lines.push(`${indent}${bold("CIRVIX DECISION ANALYSIS")}`);
+  lines.push("");
 
-  if (record.would_have) {
-    rows.push(["would have", red(String(record.would_have.decision).toUpperCase()) + dim(` by ${record.would_have.rule ?? "default-deny"}`)]);
+  // Top: Decision + Risk — strongest visual
+  const decisionLabel = isDeny ? "✕ BLOCKED" : isHold ? "● AWAITING APPROVAL" : isSanitize ? "◇ SANITIZED" : "✓ " + String(decision).toUpperCase();
+  const decisionTone = isDeny ? red : isHold ? amber : isSanitize ? blue : green;
+  lines.push(`${indent}${dim("Decision".padEnd(12))} ${decisionTone(bold(decisionLabel))}${record.enforced === false ? dim("  (not enforced — audit mode)") : ""}`);
+  lines.push(`${indent}${dim("Risk".padEnd(12))} ${riskTone(bold(String(record.risk ?? "unknown").toUpperCase()))}${record.risk_signals?.length ? dim(`  ${record.risk_signals.join(", ")}`) : ""}`);
+  lines.push("");
+
+  // Tool / Target / Policy / Latency / Request
+  lines.push(`${indent}${dim("Tool".padEnd(12))} ${bold(String(record.tool ?? record.action ?? "—"))}`);
+  if (record.resource || record.command) {
+    lines.push(`${indent}${dim("Target".padEnd(12))} ${truncate(record.resource || record.command || "", 70)}`);
   }
-  if (record.approval_id) rows.push(["approval", blue(record.approval_id)]);
-  if (record.secrets_brokered?.length) rows.push(["secrets", `${record.secrets_brokered.join(", ")} ${dim("(brokered — the agent never held the value)")}`]);
-  if (record.secrets_detected?.length) {
-    rows.push(["detected", record.secrets_detected.map((s) => `${s.detector} ${dim(s.masked)}`).join(", ")]);
+  if (record.destination) {
+    lines.push(`${indent}${dim("Destination".padEnd(12))} ${record.destination}`);
   }
-  if (record.sanitized?.arguments?.length) {
-    rows.push(["sanitized", `${record.sanitized.arguments.length} value(s) stripped from arguments`]);
+  lines.push(`${indent}${dim("Policy".padEnd(12))} ${record.policy ?? record.rule ?? dim("— no rule matched (default deny)")}`);
+  lines.push(`${indent}${dim("Latency".padEnd(12))} ${record.latency_ms ?? "—"}ms`);
+  lines.push(`${indent}${dim("Request".padEnd(12))} ${dim(record.request_id ?? record.decision_id ?? "—")}  ${dim(`agent ${record.agent ?? "—"}`)}`);
+  if (record.approval_id) {
+    lines.push(`${indent}${dim("Approval".padEnd(12))} ${blue(record.approval_id)}`);
   }
-  if (record.observed_by?.length) rows.push(["observed", dim(record.observed_by.join(", "))]);
-  rows.push(["result", decision === DECISION.DENY ? red("not forwarded") : decision === DECISION.REQUIRE_APPROVAL ? amber("held") : green("forwarded")]);
+  lines.push("");
 
-  const width = Math.max(...rows.map(([k]) => k.length));
-  const lines = [
-    `${indent}${bold(record.agent ?? "agent")}  ${dim(record.request_id ?? "")}`,
-    `${indent} └── ${bold(record.tool ?? record.action ?? "tool")}`,
-  ];
-  rows.forEach(([key, value], i) => {
-    const branch = i === rows.length - 1 ? "└──" : "├──";
-    lines.push(`${indent}      ${branch} ${dim(key.padEnd(width))}  ${value}`);
-  });
-
-  if (record.reason) {
+  // Matched policy + Reason — if present
+  if (record.policy ?? record.rule) {
+    lines.push(`${indent}${dim("Matched policy")}`);
+    lines.push(`${indent}  ${record.policy ?? record.rule}`);
     lines.push("");
-    lines.push(`${indent}      ${dim(wrap(record.reason, 84, `${indent}      `))}`);
   }
+  if (record.reason) {
+    lines.push(`${indent}${dim("Reason")}`);
+    lines.push(`${indent}  ${wrap(record.reason, 70, `${indent}  `)}`);
+    lines.push("");
+  }
+
+  // Approval panel — for REQUIRE_APPROVAL, spec: HUMAN APPROVAL REQUIRED
+  if (isHold) {
+    const W = 48;
+    const top = `${indent}${dim(`╭─ HUMAN APPROVAL REQUIRED ${"─".repeat(Math.max(0, W - 26))}╮`)}`;
+    const bottom = `${indent}${dim(`╰${"─".repeat(W)}╯`)}`;
+    lines.push(top);
+    lines.push(`${indent}${dim("│")} ${dim("Agent".padEnd(10))} ${record.agent ?? "—"}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${dim("Action".padEnd(10))} ${record.action ?? record.tool ?? "—"}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${dim("Target".padEnd(10))} ${truncate(record.resource ?? "", 30)}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${"".padEnd(42)} ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${dim("Risk".padEnd(10))} ${amber(String(record.risk ?? "").toUpperCase())}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${dim("Policy".padEnd(10))} ${record.policy ?? record.rule ?? "—"}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${"".padEnd(42)} ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${dim("Reason")}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${wrap(record.reason ?? "Production database mutation requires human authorization.", 42, `${indent}${dim("│")} `)}  ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${"".padEnd(42)} ${dim("│")}`);
+    lines.push(`${indent}${dim("│")} ${blue("[A] Approve")}  ${dim("  ")} ${red("[R] Reject")}  ${dim("│")}`);
+    lines.push(bottom);
+    lines.push("");
+  }
+
+  // Decision path — spec: secret detection → risk classification → policy evaluation → BLOCK
+  lines.push(`${indent}${dim("Decision path")}`);
+  lines.push(`${indent}  ${dim("secret detection")}`);
+  lines.push(`${indent}    ${dim("↓")}`);
+  lines.push(`${indent}  ${dim("risk classification")}`);
+  lines.push(`${indent}    ${dim("↓")}`);
+  lines.push(`${indent}  ${dim("policy evaluation")}`);
+  lines.push(`${indent}    ${dim("↓")}`);
+  lines.push(`${indent}  ${decisionTone(isDeny ? "BLOCK" : isHold ? "HOLD" : isSanitize ? "SANITIZE" : "ALLOW")}`);
+
+  // Low-level details — keep for debugging, muted
+  const extra = [];
+  if (record.secrets_brokered?.length) extra.push(`secrets brokered: ${record.secrets_brokered.join(", ")}`);
+  if (record.secrets_detected?.length) extra.push(`detected: ${record.secrets_detected.map((s) => `${s.detector} ${s.masked}`).join(", ")}`);
+  if (record.sanitized?.arguments?.length) extra.push(`sanitized: ${record.sanitized.arguments.length} value(s) stripped`);
+  if (record.would_have) extra.push(`would have: ${String(record.would_have.decision).toUpperCase()} by ${record.would_have.rule ?? "default-deny"}`);
+  if (extra.length) {
+    lines.push("");
+    lines.push(`${indent}${dim(extra.join("  ·  "))}`);
+  }
+
+  // Considered tree — compact, for dead-rule discovery (keep, muted)
+  if (record.considered?.length) {
+    lines.push("");
+    lines.push(`${indent}${dim("considered")}  ${dim(`${record.considered.filter((c) => c.matched).length} of ${record.considered.length} matched`)}`);
+    for (const c of record.considered.slice(0, 12)) {
+      const marker = c.matched ? bold("→") : dim(" ");
+      lines.push(`${indent}  ${marker} ${dim(String(c.effect).padEnd(11))} ${c.matched ? c.rule : dim(c.rule)}`);
+    }
+  }
+
   return lines.join("\n");
 }
 

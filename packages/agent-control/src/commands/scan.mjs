@@ -15,7 +15,7 @@ import {
   detectFrameworks,
   detectRuntimes,
 } from "../core/detect.mjs";
-import { bold, dim, green, red, amber, blue, plural } from "../core/format.mjs";
+import { bold, dim, green, red, amber, blue, cyan, plural } from "../core/format.mjs";
 
 export async function scan({ cwd = process.cwd(), json = false, deep = false } = {}) {
   const runtimes = await detectRuntimes();
@@ -53,7 +53,7 @@ function buildFindings({ runtimes, frameworks, servers, credentials }) {
         code: "runtime-ungoverned",
         subject: r.label,
         detail: `Tool calls from ${r.label} are not routed through a control plane. Anything it can reach, it can reach unchecked.`,
-        fix: `cirvix gateway --servers ${r.path}`,
+        fix: `cirvix init --apply (or: cirvix gateway --servers ${r.path})`,
       });
     }
   }
@@ -135,10 +135,12 @@ function render(r, { deep }) {
   L.push("");
 
   // Runtimes
-  L.push(`  ${bold("runtimes")}${dim(pad("", 12))}${r.runtimes.length ? plural(r.runtimes.length, "found") : dim("none detected")}`);
+  L.push(`  ${bold("runtimes")}${dim(pad("", 12))}${r.runtimes.length ? plural(r.runtimes.length, "runtime") : dim("none detected")}`);
   for (const rt of r.runtimes) {
     const state = rt.governed ? green("governed") : red("ungoverned");
-    L.push(`    ${pad(rt.label, 18)}${dim(shorten(rt.path))}`);
+    const level = rt.compatibilityLevel ?? (rt.governed ? "INTEGRATED" : "DISCOVERED");
+    const levelBadge = rt.governed ? cyan(`[${level}]`) : amber(`[${level}]`);
+    L.push(`    ${pad(rt.label, 18)}${levelBadge} ${dim(shorten(rt.path))}`);
     L.push(`    ${pad("", 18)}${state}${dim(` · ${plural(rt.serverCount, "MCP server")}`)}`);
   }
   if (r.frameworks.length) {

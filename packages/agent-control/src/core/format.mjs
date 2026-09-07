@@ -26,6 +26,33 @@ export const red = wrap(31, 39);
 export const green = wrap(32, 39);
 export const amber = wrap(33, 39);
 export const blue = wrap(34, 39);
+export const cyan = wrap(36, 39);
+export const gray = wrap(90, 39);
+export const white = wrap(97, 39);
+
+/** Strip ANSI escape sequences for width calculation and secret checks. */
+export function stripAnsi(s) {
+  return String(s).replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+/** Visible character width, ignoring ANSI. */
+export function visibleWidth(s) {
+  return stripAnsi(String(s)).length;
+}
+
+/** True when output should be decorated (TTY, not NO_COLOR, not dumb, not CI unless forced). */
+export function isInteractive() {
+  if (disabled) return false;
+  if (process.env.CI !== undefined && !forced) return false;
+  return Boolean(process.stdout.isTTY);
+}
+
+/** Whether unicode box-drawing is safe. ASCII fallback when TERM=dumb or CIRVIX_ASCII=1. */
+export function supportsUnicode() {
+  if (process.env.CIRVIX_ASCII === "1") return false;
+  if (process.env.TERM === "dumb") return false;
+  return true;
+}
 
 /** "1 server" / "3 servers" — avoids the "1 servers" that reads as a bug. */
 export function plural(n, noun, pluralForm) {

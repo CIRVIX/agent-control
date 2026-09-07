@@ -1,26 +1,22 @@
 {
-  "name": "@cirvix_ai/agent-control",
+  "name": "@cirvix/agent-control",
   "version": "0.1.0",
-  "description": "Cirvix AgentControl — runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
+  "description": "Cirvix AgentControl \u2014 runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
   "license": "Apache-2.0",
   "type": "module",
-  "homepage": "https://www.cirvix.com",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/CIRVIX/agent-control.git",
-    "directory": "packages/agent-control"
-  },
-  "bugs": {
-    "url": "https://github.com/CIRVIX/agent-control/issues"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
   "bin": {
     "cirvix": "./bin/cirvix.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CIRVIX/agent-control"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "files": [
     "bin",
@@ -36,7 +32,8 @@
     "bench": "node ../../benchmarks/decision.mjs",
     "scan": "node bin/cirvix.mjs scan",
     "demo": "node bin/cirvix.mjs demo",
-    "verify:adversarial": "node test/adversarial/verify.mjs"
+    "verify:adversarial": "node test/adversarial/verify.mjs",
+    "benchmark:escape": "node bin/escape-benchmark.mjs"
   },
   "keywords": [
     "ai",
@@ -55,6 +52,28 @@
     "./audit": "./src/core/audit.mjs",
     "./secrets": "./src/core/secrets.mjs",
     "./guard": "./src/core/guard.mjs",
-    "./testing": "./src/testing.mjs"
+    "./testing": "./src/testing.mjs",
+    "./passport": "./src/core/passport.mjs",
+    "./cost": "./src/core/cost.mjs",
+    "./proof": "./src/core/proof.mjs",
+    "./trifecta": "./src/core/trifecta.mjs",
+    "./packs": "./src/core/packs.mjs",
+    "./graph": "./src/core/graph.mjs",
+    "./evidence": "./src/core/evidence.mjs",
+    "./referral": "./src/core/referral.mjs",
+    "./authority": "./src/core/authority.mjs",
+    "./delegation": "./src/core/delegation.mjs",
+    "./escape-benchmark": "./src/core/escape-benchmark.mjs",
+    "./adapters": "./src/adapters/index.mjs",
+    "./windows": "./src/core/windows.mjs",
+    "./config-store": "./src/core/config-store.mjs",
+    "./intent": "./src/core/intent.mjs",
+    "./session": "./src/core/session.mjs",
+    "./baseline": "./src/core/baseline.mjs",
+    "./kill-switch": "./src/core/kill-switch.mjs",
+    "./sandbox": "./src/core/sandbox.mjs",
+    "./shadow": "./src/core/shadow.mjs",
+    "./redteam": "./src/core/redteam/index.mjs",
+    "./verified": "./src/core/verified.mjs"
   }
 }

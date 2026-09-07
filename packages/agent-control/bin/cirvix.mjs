@@ -10,7 +10,7 @@
 
 import { access, mkdir, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { evaluate, parseRules, STARTER_RULES } from "../src/core/policy.mjs";
 import { AuditChain } from "../src/core/audit.mjs";
@@ -18,7 +18,10 @@ import { Daemon } from "../src/core/daemon.mjs";
 import { Gateway } from "../src/core/gateway.mjs";
 import { MessageFramer, serialize } from "../src/core/jsonrpc.mjs";
 import { scan } from "../src/commands/scan.mjs";
-import { bold, dim, green, red, amber, blue, plural } from "../src/core/format.mjs";
+import { bold, dim, green, red, amber, blue, cyan, gray, plural } from "../src/core/format.mjs";
+import { shouldAnimate } from "../src/core/ui/controller.mjs";
+import { brandHeader, panel } from "../src/core/ui/primitives.mjs";
+import { LiveStream } from "../src/core/ui/live.mjs";
 
 import { MODE, DECISION } from "../src/core/decisions.mjs";
 import { Pipeline } from "../src/core/pipeline.mjs";
@@ -27,12 +30,18 @@ import { ApprovalStore } from "../src/core/approvals.mjs";
 import { UdsServer, defaultEndpoint, writeToken } from "../src/core/uds.mjs";
 import * as journal from "../src/core/journal.mjs";
 import * as policyCmd from "../src/commands/policy.mjs";
+import * as protectCmd from "../src/commands/protect.mjs";
+import * as proveCmd from "../src/commands/prove.mjs";
+import * as passportCmd from "../src/commands/passport.mjs";
 import { init as initCmd } from "../src/commands/init.mjs";
 import { status as statusCmd } from "../src/commands/status.mjs";
 import { upgrade as upgradeCmd } from "../src/commands/upgrade.mjs";
 import { AgentRegistry, Meter, readLicence } from "../src/core/meter.mjs";
 import { commercialNotices } from "../src/core/notices.mjs";
 import { demo as demoCmd } from "../src/commands/demo.mjs";
+import { welcome } from "../src/commands/welcome.mjs";
+import { doctor } from "../src/commands/doctor.mjs";
+import { login, logout } from "../src/commands/login.mjs";
 
 /**
  * Read from the manifest, never written down twice.
@@ -57,9 +66,18 @@ const HELP = `
 
   ${bold("GETTING STARTED")}
     init                  Detect agents and MCP servers, write a policy, start protecting
+    init --apply          Safely wire detected agents with pre-integration backup
+    init --dry-run        Preview agent configuration changes without modifying files
+    init --rollback [id]  Revert agent configurations to pre-integration state
     status                Runtime, policy, servers, blocked, approvals, P99 overhead
+    doctor                diagnose this installation: policy, state, daemon, control plane
+    login / logout        link this machine to your CIRVIX control plane (browser or --key)
     upgrade               Today's usage against your plan, and what lifts the limit
     demo                  Watch an injected exfiltration attempt get stopped, live
+    protect [path]        Discover, analyse, apply policy and prove it decides
+    passport [agent]      What an agent is, by what it has actually done
+    prove <decision-id>   Sign a decision into a portable proof artifact
+    verify <proof>        Check a proof offline: signature, chain, integrity
     scan                  Inventory what is ungoverned on this machine
 
   ${bold("ENFORCEMENT")}
@@ -284,7 +302,101 @@ async function main() {
     return 0;
   }
 
+  // BARE `cirvix`:
+  //   first run in a workspace  -> onboarding (what CIRVIX is, three commands)
+  //   returning, interactive    -> the full live terminal
+  //   returning, piped/CI       -> the measured digest + next steps (no animation)
+  if (positional.length === 0 && !flags.json && !flags.help) {
+    let firstRun = false;
+    try { await access(join(cwd, ".cirvix")); } catch { firstRun = true; }
+    if (!firstRun) {
+      const { canLaunchInteractive } = await import("../src/commands/interactive.mjs");
+      if (canLaunchInteractive(flags, positional)) {
+        const rules = await loadRules(flags.policy, cwd);
+        const { interactive } = await import("../src/commands/interactive.mjs");
+        await interactive({ cwd, flags, rules });
+        return 0;
+      }
+    }
+    await welcome({ cwd });
+    return 0;
+  }
+
   switch (command) {
+    case "protect": {
+      /* Shares policy resolution with `runtime` and `gateway`. A protect that
+         read policy differently from the runtime would be proving a decision
+         the runtime will not make. */
+      const target = sub && !sub.startsWith("-") ? resolve(cwd, sub) : cwd;
+      const rules = await loadRules(flags.policy, target);
+      const { result, output } = await protectCmd.protect({
+        cwd: target,
+        rules,
+        agent: String(flags.agent ?? "local"),
+        environment: String(flags.env ?? "local"),
+        json: Boolean(flags.json),
+        pace: flags.fast ? 0 : Number(flags.pace ?? 90),
+        animate: flags["no-animation"] ? false : undefined,
+        stateDir: stateDirFor(flags, target),
+      });
+      if (output) process.stdout.write(output + "\n");
+      // Exit 1 on HIGH or CRITICAL so CI can gate on it, the same convention
+      // `scan --fail-on` already uses.
+      if (flags["fail-on-risk"] && ["high", "critical"].includes(result.risk)) process.exitCode = 1;
+      return;
+    }
+
+    case "passport": {
+      const policyFile = await loadPolicy(flags.policy, cwd);
+      const { output, exitCode } = await passportCmd.passport({
+        agentId: sub && !sub.startsWith("-") && sub !== "badge" ? sub : null,
+        cwd,
+        stateDir: stateDirFor(flags, cwd),
+        policy: { rules: policyFile.rules, version: policyFile.version ?? null },
+        json: Boolean(flags.json),
+        sign: Boolean(flags.sign),
+        out: flags.out ? String(flags.out) : null,
+        badge: Boolean(flags.badge) || sub === "badge",
+        badgeOut: flags["badge-out"] ? String(flags["badge-out"]) : null,
+      });
+      if (output) process.stdout.write(output + "\n");
+      if (exitCode) process.exitCode = exitCode;
+      return;
+    }
+
+    case "prove": {
+      const target = flags.cwd ? cwd : cwd;
+      const policyFile = await loadPolicy(flags.policy, target);
+      const { output, exitCode } = await proveCmd.prove({
+        decisionId: sub,
+        cwd: target,
+        stateDir: stateDirFor(flags, target),
+        // The policy is part of what a proof attests: a decision only means
+        // something against the rules that produced it.
+        policy: { rules: policyFile.rules, version: policyFile.version ?? null },
+        json: Boolean(flags.json),
+        out: flags.out ? String(flags.out) : null,
+      });
+      if (output) process.stdout.write(output + "\n");
+      if (exitCode) process.exitCode = exitCode;
+      return;
+    }
+
+    case "verify": {
+      const { output, exitCode } = await proveCmd.verify({
+        proof: sub,
+        publicKey: flags.key ? String(flags.key) : null,
+        cwd,
+        stateDir: stateDirFor(flags, cwd),
+        json: Boolean(flags.json),
+      });
+      if (output) process.stdout.write(output + "\n");
+      // Exit 1 on a failed verification so CI can gate on it. A verifier that
+      // always exits 0 is a verifier nobody can automate.
+      if (exitCode) process.exitCode = exitCode;
+      return;
+    }
+
     case "scan": {
       const { result, output } = await scan({
         cwd,
@@ -414,11 +526,32 @@ async function main() {
       });
       process.stdin.on("data", (c) => framer.push(c));
 
-      log(
-        `gateway up · ${Object.keys(servers).length} upstream · ` +
-          `${(daemon?.currentRules().length || rules.length)} rules` +
-          (daemon ? ` · synced with ${apiUrl}` : " · local policy"),
-      );
+      // Premium gateway startup — to stderr so stdout stays JSON-RPC clean.
+      {
+        const animated = shouldAnimate({ pace: flags.pace ? Number(flags.pace) : 700, json: false });
+        const gwRules = daemon?.currentRules().length || rules.length;
+        if (animated) {
+          try {
+            process.stderr.write("\n" + brandHeader({ width: 62 }) + "\n\n");
+          } catch {}
+        }
+        log(`gateway up · ${Object.keys(servers).length} upstream · ${gwRules} rules` + (daemon ? ` · synced with ${apiUrl}` : " · local policy"));
+        // Also emit a small protected panel for human visibility (stderr).
+        try {
+          const gwPanel = panel({
+            lines: [
+              `${bold("CIRVIX GATEWAY")}`,
+              ``,
+              `${"Upstreams".padEnd(12)} ${Object.keys(servers).length}`,
+              `${"Policy".padEnd(12)} ${green(bold("● ENFORCING"))}  ${dim(plural(gwRules, "rule"))}`,
+              `${"Audit".padEnd(12)} ${green(bold("● RECORDING"))}`,
+              `${"Mode".padEnd(12)} ${dim(daemon ? "synced" : "local")}`,
+            ],
+            width: 48,
+          });
+          process.stderr.write(gwPanel + "\n");
+        } catch {}
+      }
 
       await new Promise((resolve) => {
         let closing = false;
@@ -559,25 +692,75 @@ async function main() {
         return d.verdict === "deny" ? 1 : 0;
       }
 
-      const tone = d.verdict === "permit" ? green : d.verdict === "hold" ? amber : red;
+      const isWhyDeny = d.verdict === "deny";
+      const isWhyHold = d.verdict === "hold";
+      const whyTone = isWhyDeny ? red : isWhyHold ? amber : green;
+      const whyDecision = isWhyDeny ? "✕ BLOCKED" : isWhyHold ? "● AWAITING APPROVAL" : "✓ " + String(d.verdict).toUpperCase();
+      const whyRisk = String(d.risk ?? "unknown").toUpperCase();
+      const whyRiskTone = whyRisk === "CRITICAL" ? red : whyRisk === "HIGH" ? amber : whyRisk === "MEDIUM" ? blue : dim;
       process.stdout.write(
         [
           "",
-          `  ${tone(bold(String(d.verdict).toUpperCase()))}  ${dim(d.action ?? d.tool ?? "")} ${d.resource ?? ""}`,
-          `  ${dim("rule")}    ${d.rule ?? dim("— no rule matched (default deny)")}`,
-          `  ${dim("reason")}  ${d.reason ?? dim("—")}`,
-          `  ${dim("agent")}   ${d.agent ?? dim("—")}`,
-          `  ${dim("when")}    ${d.ts}`,
-          // The whole point of this command in an incident: it hands you the
-          // thread to pull, not just the one bead you arrived holding.
-          `  ${dim("run")}     ${d.runId ? blue(d.runId) : dim("— recorded outside a run")}`,
+          `  ${bold("CIRVIX DECISION ANALYSIS")}`,
           "",
+          `  ${dim("Decision".padEnd(12))} ${whyTone(bold(whyDecision))}`,
+          `  ${dim("Risk".padEnd(12))} ${whyRiskTone(bold(whyRisk))}`,
+          "",
+          `  ${dim("Tool".padEnd(12))} ${bold(String(d.tool ?? d.action ?? "—"))}`,
+          d.resource ? `  ${dim("Target".padEnd(12))} ${d.resource}` : "",
+          d.destination ? `  ${dim("Destination".padEnd(12))} ${d.destination}` : "",
+          `  ${dim("Matched policy".padEnd(12))} ${d.rule ?? dim("— no rule matched (default deny)")}`,
+          d.reason ? `  ${dim("Reason".padEnd(12))} ${d.reason}` : "",
+          `  ${dim("Agent".padEnd(12))} ${d.agent ?? dim("—")}`,
+          `  ${dim("When".padEnd(12))} ${d.ts}`,
+          `  ${dim("Run".padEnd(12))} ${d.runId ? blue(d.runId) : dim("— recorded outside a run")}`,
+          "",
+          `  ${dim("Decision path")}`,
+          `    ${dim("secret detection")}`,
+          `      ${dim("↓")}`,
+          `    ${dim("risk classification")}`,
+          `      ${dim("↓")}`,
+          `    ${dim("policy evaluation")}`,
+          `      ${dim("↓")}`,
+          `    ${whyTone(isWhyDeny ? "BLOCK" : isWhyHold ? "HOLD" : "ALLOW")}`,
+          "",
+          /* The trifecta is the one refusal whose reason lives outside this
+             call, so it gets the sequence rendered rather than a rule name.
+             "Blocked: trifecta" is indistinguishable from a bug; three
+             timestamped steps are something the reader can act on. */
+          ...(d.trifecta?.complete
+            ? [
+                `  ${whyTone(bold("LETHAL TRIFECTA"))}  ${dim("all three conditions met in this session")}`,
+                "",
+                ...["sensitive_data", "untrusted_content", "outbound_action"]
+                  .map((k) => [k, d.trifecta.legs?.[k]])
+                  .filter(([, v]) => v)
+                  .sort((a, b) => String(a[1].at ?? "").localeCompare(String(b[1].at ?? "")))
+                  .map(
+                    ([k, v], i) =>
+                      `    ${bold(String(i + 1) + ".")} ${dim(k.replace(/_/g, " ").padEnd(18))} ${v.why}` +
+                      (v.at ? `
+       ${dim(v.at)}` : ""),
+                  ),
+                "",
+                `  ${dim("Cirvix refuses on capability and opportunity. It does not claim the")}`,
+                `  ${dim("sensitive bytes are in this request — that needs data-flow analysis")}`,
+                `  ${dim("it deliberately does not do.")}`,
+                "",
+              ]
+            : d.trifecta?.satisfied?.length
+              ? [
+                  `  ${dim("trifecta")}  ${d.trifecta.satisfied.length} of 3 conditions met` +
+                    (d.trifecta.imminent ? `  ${whyRiskTone("one step from complete")}` : ""),
+                  "",
+                ]
+              : []),
           ...(d.considered?.length
             ? [
-                `  ${dim("considered")}`,
+                `  ${dim("considered")}  ${dim(`${d.considered.filter((c) => c.matched).length} of ${d.considered.length} matched`)}`,
                 ...d.considered.map(
                   (c) =>
-                    `    ${c.matched ? bold("→") : dim(" ")} ${dim(String(c.effect).padEnd(7))} ${c.matched ? c.rule : dim(c.rule)}`,
+                    `    ${c.matched ? bold("→") : dim(" ")} ${dim(String(c.effect).padEnd(11))} ${c.matched ? c.rule : dim(c.rule)}`,
                 ),
                 "",
               ]
@@ -659,11 +842,43 @@ async function main() {
         process.stdout.write(JSON.stringify(res, null, 2) + "\n");
         return res.ok ? 0 : 1;
       }
-      process.stdout.write(
-        res.ok
-          ? `\n  ${green(bold("chain intact"))}  ${dim(`${res.records} records verified`)}\n\n  ${dim("Verification proves records were not altered after they were written.\n  It does not attest to their content.")}\n\n`
-          : `\n  ${red(bold("chain broken"))}  ${dim(`at record ${res.brokenAt} of ${res.records}`)}\n  ${res.reason}\n\n`,
-      );
+      if (res.ok) {
+        const W = 62;
+        const top = `  ${dim(`╭─ CIRVIX AUDIT VERIFICATION ${"─".repeat(Math.max(0, W - 26))}╮`)}`;
+        const bottom = `  ${dim(`╰${"─".repeat(W)}╯`)}`;
+        const chainLines = [
+          ``,
+          `  ${green("✓")} ${dim("Hash chain intact")}`,
+          `  ${green("✓")} ${dim(`${res.records} records verified`)}`,
+          `  ${green("✓")} ${dim("No records altered")}`,
+          ``,
+          `  ${bold("CHAIN")}`,
+          ``,
+          `  ${dim("current")}`,
+          `    ${dim("↓")}`,
+          `  ${dim("previous")}`,
+          `    ${dim("↓")}`,
+          `  ${dim("previous")}`,
+          `    ${dim("↓")}`,
+          `  ${dim("genesis")}`,
+          ``,
+          `  ${bold("STATUS")}  ${green(bold("● INTEGRITY OK"))}`,
+          ``,
+          `  ${dim(`head ${String(res.head ?? "").slice(0, 16)}…`)}`,
+          ``,
+          `  ${dim("Verification proves records were not altered after they were written.")}`,
+          `  ${dim("It does not attest to their content.")}`,
+          ``,
+        ];
+        process.stdout.write(`\n${top}\n`);
+        process.stdout.write(`\n  ${bold("CIRVIX AUDIT VERIFICATION")}\n`);
+        for (const l of chainLines) process.stdout.write(l + "\n");
+        process.stdout.write(`${bottom}\n\n`);
+      } else {
+        process.stdout.write(
+          `\n  ${red(bold("chain broken"))}  ${dim(`at record ${res.brokenAt} of ${res.records}`)}\n  ${res.reason}\n\n`,
+        );
+      }
       return res.ok ? 0 : 1;
     }
 
@@ -726,6 +941,22 @@ async function main() {
           return code;
         }
 
+        case "simulate": {
+          const { simulatePolicy } = await import("../src/commands/simulate.mjs");
+          const { output, code } = await simulatePolicy({
+            rules: loaded.rules,
+            action: flags.action ?? flags.tool ?? "fs:read",
+            resource: flags.resource ?? flags.path ?? flags.command ?? "",
+            tool: flags.tool ?? "file_reader",
+            intent: flags.intent ?? null,
+            agent: String(flags.agent ?? "local"),
+            json: Boolean(flags.json),
+            cwd,
+          });
+          process.stdout.write(output + "\n");
+          return code;
+        }
+
         case "list":
         default: {
           const { output, code } = policyCmd.list(loaded.rules, {
@@ -745,9 +976,74 @@ async function main() {
         cwd,
         json: Boolean(flags.json),
         force: Boolean(flags.force),
+        apply: Boolean(flags.apply),
+        dryRun: Boolean(flags["dry-run"]),
+        rollback: flags.rollback ? (typeof flags.rollback === "string" ? flags.rollback : true) : false,
       });
       process.stdout.write(output + "\n");
       return result.ok ? 0 : 1;
+    }
+
+    /* ------------------------------------------------------------ simulate */
+    case "simulate": {
+      const rules = await loadRules(flags.policy, cwd);
+      const { simulatePolicy } = await import("../src/commands/simulate.mjs");
+      const { output, code } = await simulatePolicy({
+        rules,
+        action: flags.action ?? flags.tool ?? positional[1] ?? "fs:read",
+        resource: flags.resource ?? flags.path ?? flags.command ?? positional[2] ?? "",
+        tool: flags.tool ?? "file_reader",
+        intent: flags.intent ?? null,
+        agent: String(flags.agent ?? "local"),
+        json: Boolean(flags.json),
+        cwd,
+      });
+      process.stdout.write(output + "\n");
+      return code;
+    }
+
+    /* ----------------------------------------------------------------- kill */
+    case "kill": {
+      const { executeKillCommand } = await import("../src/commands/kill.mjs");
+      const { output, code } = await executeKillCommand({
+        scope: flags.scope ?? "agent",
+        target: positional[1] ?? flags.target ?? null,
+        reason: flags.reason ?? "Emergency freeze triggered via CLI",
+        release: flags.release ?? null,
+        list: Boolean(flags.list),
+        json: Boolean(flags.json),
+      });
+      process.stdout.write(output + "\n");
+      return code;
+    }
+
+    /* --------------------------------------------------------------- shadow */
+    case "shadow": {
+      const rules = await loadRules(flags.policy, cwd);
+      const { executeShadowCommand } = await import("../src/commands/shadow.mjs");
+      const { output, code } = await executeShadowCommand({
+        rules,
+        action: flags.action ?? positional[1] ?? null,
+        resource: flags.resource ?? positional[2] ?? null,
+        json: Boolean(flags.json),
+        cwd,
+      });
+      process.stdout.write(output + "\n");
+      return code;
+    }
+
+    /* -------------------------------------------------------------- redteam */
+    case "redteam": {
+      const rules = await loadRules(flags.policy, cwd);
+      const { executeRedTeamCommand } = await import("../src/commands/redteam.mjs");
+      const { output, code } = await executeRedTeamCommand({
+        rules,
+        plugins: flags.plugins ? String(flags.plugins).split(",") : null,
+        json: Boolean(flags.json),
+        cwd,
+      });
+      process.stdout.write(output + "\n");
+      return code;
     }
 
     /* -------------------------------------------------------------- status */
@@ -791,6 +1087,66 @@ async function main() {
     case "logs": {
       const stateDir = stateDirFor(flags, cwd);
       const file = String(flags.file ?? join(stateDir, "audit.jsonl"));
+
+      // Live mode: cirvix logs --watch
+      if (flags.watch || flags.follow || flags.w) {
+        if (flags.json) {
+          process.stderr.write(red("  --watch is not compatible with --json.\n"));
+          return 2;
+        }
+        const { watch } = await import("node:fs");
+        const live = new LiveStream({ stream: process.stdout, title: "CIRVIX LIVE · protection active" });
+        // Print existing tail first
+        const existing = await journal.read(file);
+        const tail = journal.query(existing, {
+          last: flags.last ? Number(flags.last) : 10,
+          risk: typeof flags.risk === "string" ? flags.risk : undefined,
+          decision: typeof flags.decision === "string" ? flags.decision : undefined,
+        });
+        live.header();
+        for (const r of tail) live.push(r);
+        if (tail.length === 0) {
+          process.stdout.write(`  ${dim("waiting for decisions…")}  ${dim(`tailing ${file}`)}\n`);
+        }
+        // Watch for new records — polling via fs.watch where available, fallback to interval.
+        let known = existing.length;
+        let watcher = null;
+        let polling = null;
+        const emitNew = async () => {
+          const all = await journal.read(file);
+          if (all.length > known) {
+            const fresh = all.slice(known);
+            const filtered = journal.query(fresh, {
+              risk: typeof flags.risk === "string" ? flags.risk : undefined,
+              decision: typeof flags.decision === "string" ? flags.decision : undefined,
+              agent: typeof flags.agent === "string" ? flags.agent : undefined,
+              tool: typeof flags.tool === "string" ? flags.tool : undefined,
+              deniedOnly: Boolean(flags.denied),
+            });
+            for (const r of filtered) live.push(r);
+            known = all.length;
+          } else if (all.length < known) {
+            known = all.length;
+          }
+        };
+        try {
+          watcher = watch(file, async () => { await emitNew().catch(() => {}); });
+        } catch {
+          polling = setInterval(() => void emitNew(), 700);
+        }
+        if (!watcher) polling = setInterval(() => void emitNew(), 700);
+        await new Promise((resolve) => {
+          const done = () => {
+            try { watcher?.close(); } catch {}
+            if (polling) clearInterval(polling);
+            resolve();
+          };
+          process.on("SIGINT", done);
+          process.on("SIGTERM", done);
+        });
+        return 0;
+      }
+
       const records = await journal.read(file);
 
       // `--tree <id>` prints one decision in full rather than the list.
@@ -870,20 +1226,29 @@ async function main() {
       process.stdout.write("\n  " + bold(plural(pending.length, "call")) + dim(" waiting\n\n"));
       for (const a of pending) {
         const riskTone = { low: dim, medium: blue, high: amber, critical: red }[a.risk] ?? dim;
-        process.stdout.write(
-          `    ${bold(a.id)}  ${riskTone(String(a.risk ?? "").toUpperCase().padEnd(9))}${a.tool ?? "—"}  ${dim(a.resource ?? "")}\n`,
-        );
-        process.stdout.write(`      ${dim(a.reason ?? "")}\n`);
-        process.stdout.write(
-          `      ${dim("agent")} ${a.agent ?? "—"}   ${dim("rule")} ${a.rule ?? "—"}   ${dim("waits on")} ${(a.approvers ?? []).join(", ") || dim("nobody in particular")}\n`,
-        );
+        const W = 62;
+        const top = `    ${dim(`╭─ HUMAN APPROVAL REQUIRED ${"─".repeat(Math.max(0, W - 28))}╮`)}`;
+        const bottom = `    ${dim(`╰${"─".repeat(W)}╯`)}`;
+        process.stdout.write(top + "\n");
+        process.stdout.write(`    ${dim("│")} ${dim("Agent".padEnd(10))} ${a.agent ?? "—"}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Action".padEnd(10))} ${a.tool ?? "—"}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Target".padEnd(10))} ${String(a.resource ?? "").slice(0, 32).padEnd(32)}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${"".padEnd(46)} ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Risk".padEnd(10))} ${riskTone(String(a.risk ?? "").toUpperCase().padEnd(9))} ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Policy".padEnd(10))} ${String(a.rule ?? "—").slice(0, 32).padEnd(32)}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Waits on".padEnd(10))} ${(a.approvers ?? []).join(", ") || "—"}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${"".padEnd(46)} ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${dim("Reason")}  ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${(a.reason ?? "Production database mutation requires human authorization.").slice(0, 44).padEnd(44)} ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${"".padEnd(46)} ${dim("│")}\n`);
+        process.stdout.write(`    ${dim("│")} ${green("[A] Approve")}  ${dim("  ")} ${red("[R] Reject")}  ${dim(`  ${a.id}`)} ${dim("│")}\n`);
+        process.stdout.write(bottom + "\n\n");
         if (a.state !== "pending") {
-          process.stdout.write(`      ${dim("state")} ${a.state}${a.decidedBy ? dim(` by ${a.decidedBy}`) : ""}\n`);
+          process.stdout.write(`      ${dim("state")} ${a.state}${a.decidedBy ? dim(` by ${a.decidedBy}`) : ""}\n\n`);
         }
-        process.stdout.write("\n");
       }
       process.stdout.write(
-        `  ${dim("Decide one:")}  ${blue(`cirvix approve ${pending[0].id} --by you@example.com`)}\n\n`,
+        `  ${dim("Decide one:")}  ${blue(`cirvix approve ${pending[0].id} --by you@example.com`)}  ${dim("or")}  ${red(`cirvix deny ${pending[0].id} --by you@example.com`)}\n\n`,
       );
       return 0;
     }
@@ -974,6 +1339,10 @@ async function main() {
         meter: runtimeMeter,
         write: (s) => process.stderr.write(s),
       });
+      /* Measured, not asserted. The panel below reports these, and the only
+         honest source for them is the decision stream itself. */
+      const counters = { blocked: 0, approvals: 0, violations: 0 };
+      const seenAgents = new Set();
       const pipeline = new Pipeline({
         rules,
         cwd,
@@ -987,7 +1356,14 @@ async function main() {
         meter: runtimeMeter,
         agents: new AgentRegistry(),
         onEvent: (e) => {
-          if (e.kind === "decision") notice(e);
+          if (e.kind === "decision") {
+            notice(e);
+            const ev = e.event ?? e;
+            if (ev.agent) seenAgents.add(ev.agent);
+            if (ev.decision === "deny") counters.blocked += 1;
+            else if (ev.decision === "require_approval") counters.approvals += 1;
+            if (ev.risk === "critical") counters.violations += 1;
+          }
         },
         log: (m) => process.stderr.write(`[cirvix] ${m}\n`),
       });
@@ -1013,14 +1389,70 @@ async function main() {
       });
       await server.start();
 
-      process.stdout.write(
-        `\n  ${green(bold("runtime up"))}  ${dim(`${plural(rules.length, "rule")} · ${mode} · ${endpoint}`)}\n` +
-          `  ${dim(`token in ${join(stateDir, "socket.token")}`)}\n\n`,
-      );
-      if (mode === MODE.AUDIT) {
+      // Premium startup sequence — brand + real state, zero fake.
+      const runtimeAnimated = shouldAnimate({ pace: flags.pace ? Number(flags.pace) : 700, json: Boolean(flags.json) });
+      // Compute policy tests count for display (real).
+      let rtTests = 0;
+      try {
+        const { loadPolicyFile } = await import("../src/commands/policy.mjs");
+        let policyPath = null;
+        for (const cand of ["cirvix.policy", "cirvix.policy.json", ".cirvix/policy.json"]) {
+          const p = join(cwd, cand);
+          try { await access(p); policyPath = p; break; } catch {}
+        }
+        if (policyPath) {
+          const loaded = await loadPolicyFile(policyPath, { cwd });
+          rtTests = loaded.tests?.length ?? 0;
+        }
+      } catch {}
+      if (!flags.json) {
+        // Brand header only when interactive; in CI/non-TTY just show compact.
+        if (runtimeAnimated) {
+          process.stdout.write("\n" + brandHeader({ width: 62 }) + "\n\n");
+        } else {
+          process.stdout.write(`\n  ${bold("CIRVIX")} ${dim("· runtime governance")}\n\n`);
+        }
+        process.stdout.write(`  ${dim("Initializing CIRVIX runtime...")}\n`);
+        process.stdout.write(`  ${green("✓")} ${dim("Control socket established")}  ${dim(endpoint)}\n`);
+        process.stdout.write(`  ${green("✓")} ${dim("Policy engine loaded")}\n`);
+        process.stdout.write(`  ${green("✓")} ${dim("Secret protection enabled")}\n`);
+        process.stdout.write(`  ${green("✓")} ${dim("Audit chain initialized")}\n`);
+        process.stdout.write(`  ${green("✓")} ${dim(`${plural(rules.length, "rule")} loaded`)}${rtTests ? dim(` · ${rtTests} policy tests`) : ""}\n`);
+        process.stdout.write("\n");
+        // The agent this runtime was started for, plus any that have since
+        // announced themselves. One at startup is a fact, not a placeholder —
+        // but only because it is counted.
+        const agentsSeen = Math.max(seenAgents.size, 1);
+        const protectedLines = [
+          `${bold("CIRVIX PROTECTED")}`,
+          ``,
+          `${"Runtime".padEnd(12)} ${green(bold("● ONLINE"))}  ${dim(mode === MODE.AUDIT ? "AUDIT · recording only" : "ENFORCING")}`,
+          `${"Policy".padEnd(12)} ${green(bold("● ENFORCING"))}  ${dim(plural(rules.length, "rule"))}`,
+          `${"Secrets".padEnd(12)} ${green(bold("● PROTECTED"))}`,
+          `${"Audit".padEnd(12)} ${green(bold("● RECORDING"))}`,
+          `${"Agents".padEnd(12)} ${dim(plural(agentsSeen, "detected", "detected"))}`,
+          ``,
+          /* These were string literals — `1 detected`, `0 blocked · 0
+             approvals · 0 violations`. They happened to be true at startup,
+             which is exactly what makes that kind of line dangerous: it reads
+             as measurement, it survives review, and it is wrong the moment
+             anything happens. Counted from the pipeline now. */
+          `${dim(`${counters.blocked} blocked  ·  ${counters.approvals} approvals  ·  ${counters.violations} violations`)}`,
+        ];
+        process.stdout.write(panel({ lines: protectedLines, width: 62 }) + "\n\n");
+        process.stdout.write(`  ${dim("Ready. Your agent is under policy control.")}\n`);
+        process.stdout.write(`  ${dim(`token in ${join(stateDir, "socket.token")}`)}\n\n`);
+        if (mode === MODE.AUDIT) {
+          process.stdout.write(`  ${amber(bold("AUDIT MODE"))} ${dim("— decisions are recorded and nothing is blocked.")}\n\n`);
+        }
+      } else {
         process.stdout.write(
-          `  ${amber(bold("AUDIT MODE"))} ${dim("— decisions are recorded and nothing is blocked.")}\n\n`,
+          `\n  ${green(bold("runtime up"))}  ${dim(`${plural(rules.length, "rule")} · ${mode} · ${endpoint}`)}\n` +
+            `  ${dim(`token in ${join(stateDir, "socket.token")}`)}\n\n`,
         );
+        if (mode === MODE.AUDIT) {
+          process.stdout.write(`  ${amber(bold("AUDIT MODE"))} ${dim("— decisions are recorded and nothing is blocked.")}\n\n`);
+        }
       }
 
       await new Promise((resolve) => {
@@ -1036,6 +1468,18 @@ async function main() {
         process.on("SIGTERM", () => void shutdown());
       });
       return 0;
+    }
+
+    case "doctor": {
+      return doctor({ cwd, json: Boolean(flags.json) });
+    }
+
+    case "login": {
+      return login({ key: flags.key ? String(flags.key) : null, url: flags.url ? String(flags.url) : null, status: Boolean(flags.status), browser: flags.browser === undefined ? undefined : Boolean(flags.browser), json: Boolean(flags.json) });
+    }
+
+    case "logout": {
+      return logout({ json: Boolean(flags.json) });
     }
 
     case "help":

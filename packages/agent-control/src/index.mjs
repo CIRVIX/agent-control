@@ -1,4 +1,4 @@
-/** Public entry point for @cirvix_ai/agent-control. */
+/** Public entry point for @cirvix/agent-control. */
 
 /* Policy engine ----------------------------------------------------------- */
 export {
@@ -141,3 +141,28 @@ export { init, STARTER_POLICY } from "./commands/init.mjs";
 export { status } from "./commands/status.mjs";
 export { demo } from "./commands/demo.mjs";
 export { check as policyCheck, explain as policyExplain, list as policyList, loadPolicyFile, test as policyTest } from "./commands/policy.mjs";
+
+/* Adapters & Platform ---------------------------------------------------- */
+export * as adapters from "./adapters/index.mjs";
+export * as windows from "./core/windows.mjs";
+export { ConfigBackupManager, SafeConfigPatcher, parseConfigJson, stripJsonComments } from "./core/config-store.mjs";
+
+/* Platform Transformation Primitives ------------------------------------- */
+export { evaluateIntent, classifyIntent, INTENT_CATEGORIES } from "./core/intent.mjs";
+export { SessionTracker, CHAIN_TYPES } from "./core/session.mjs";
+export { BehavioralBaseline } from "./core/baseline.mjs";
+export { KillSwitchEngine, globalKillSwitch, KILL_SCOPES } from "./core/kill-switch.mjs";
+export { AgentSandbox, SANDBOX_ADAPTERS } from "./core/sandbox.mjs";
+export { ShadowEngine } from "./core/shadow.mjs";
+export { runRedTeamSuite, BUILTIN_ATTACK_PLUGINS, ATTACK_VECTORS } from "./core/redteam/index.mjs";
+export { inspectMcpServer, VERIFICATION_STATUS } from "./core/verified.mjs";
+export {
+  generateAgentKeypair,
+  issueCryptographicPassport,
+  verifyPassportSignature,
+  rotatePassportKeys,
+} from "./core/passport.mjs";
+export {
+  issueActionReceipt,
+  verifyActionReceipt,
+} from "./core/proof.mjs";

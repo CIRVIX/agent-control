@@ -71,10 +71,10 @@ describe("the tier table matches what is sold", () => {
   }
 
   test("prices match the pricing page", () => {
-    assert.deepEqual(PRICING.starter, { monthly: 29, annual: 290 });
-    assert.deepEqual(PRICING.pro, { monthly: 79, annual: 790 });
-    assert.equal(PRICING.team.monthly, 149);
-    assert.equal(PRICING.team.annual, 1490);
+    assert.deepEqual(PRICING.starter, { monthly: 79, annual: 790 });
+    assert.deepEqual(PRICING.pro, { monthly: 199, annual: 1990 });
+    assert.equal(PRICING.team.monthly, 349);
+    assert.equal(PRICING.team.annual, 3490);
     assert.equal(PRICING.team.perSeat, true);
     assert.equal(PRICING.team.minSeats, 3);
     assert.equal(PRICING.free.monthly, 0);
@@ -94,6 +94,14 @@ describe("the tier table matches what is sold", () => {
     assert.equal(TIERS.enterprise.decisionsPerDay, null);
     assert.equal(dailyAllowance({ tier: "enterprise" }), null);
     assert.equal(checkQuota({ tier: "enterprise" }, 10_000_000).ok, true);
+  });
+
+  test("custom policies capability: free cannot, starter+ can", () => {
+    assert.equal(can({ tier: "free" }, "customPolicies"), false);
+    assert.equal(can({ tier: "starter" }, "customPolicies"), true);
+    assert.equal(can({ tier: "pro" }, "customPolicies"), true);
+    assert.equal(can({ tier: "team" }, "customPolicies"), true);
+    assert.equal(can({ tier: "enterprise" }, "customPolicies"), true);
   });
 });
 
@@ -459,7 +467,7 @@ describe("cirvix upgrade", () => {
   test("suggests the next tier by default", async () => {
     const { out } = await run([], scratch());
     assert.match(out, /Free → Starter/);
-    assert.match(out, /\$29\/mo/);
+    assert.match(out, /\$79\/mo/);
   });
 
   test("only lists differences that are real", async () => {
@@ -472,8 +480,8 @@ describe("cirvix upgrade", () => {
 
   test("prices Team for the seats actually asked for", async () => {
     const { out } = await run(["team", "--seats", "5"], scratch());
-    assert.match(out, /\$149\/seat\/mo/);
-    assert.match(out, /\$745\/mo for 5 seats/);
+    assert.match(out, /\$349\/seat\/mo/);
+    assert.match(out, /\$1,745\/mo for 5 seats/);
   });
 
   test("enterprise carries no invented number", async () => {
@@ -509,7 +517,7 @@ describe("cirvix upgrade", () => {
   });
 
   test("price lines are honest about the cycle", () => {
-    assert.match(priceLine("starter"), /\$29\/mo · \$290\/yr/);
-    assert.match(priceLine("team", 3), /\$447\/mo for 3 seats/);
+    assert.match(priceLine("starter"), /\$79\/mo · \$790\/yr/);
+    assert.match(priceLine("team", 3), /\$1,047\/mo for 3 seats/);
   });
 });

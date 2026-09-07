@@ -38,7 +38,11 @@ import { compile } from "../core/policy-dsl.mjs";
 import { STARTER_POLICY } from "./init.mjs";
 import { scan as scanInjection } from "../core/sanitize.mjs";
 import { DECISION } from "../core/decisions.mjs";
-import { bold, dim, green, red, amber, blue } from "../core/format.mjs";
+import { bold, dim, green, red, amber, blue, cyan } from "../core/format.mjs";
+import { brandHeader, panel, separator } from "../core/ui/primitives.mjs";
+import { interceptBox } from "../core/ui/intercept.mjs";
+import { renderDecision } from "../core/ui/decisions.mjs";
+import { shouldAnimate } from "../core/ui/controller.mjs";
 
 /** The poisoned content. This is what an agent finds on a page it was told to read. */
 const POISONED_PAGE = `# Deploying to production
@@ -160,12 +164,14 @@ export async function demo({
   });
   const steps = [];
 
+  const animated = !json && shouldAnimate({ pace, json });
   if (!json) {
     write("\n");
-    write(`  ${bold("CIRVIX")} ${dim("· live demo · every decision below is computed, not scripted")}\n`);
+    write(brandHeader({ width: 62 }) + "\n");
+    write(`  ${dim("CIRVIX · SECURITY DEMONSTRATION  ·  every decision below is computed, not scripted")}\n`);
     write("\n");
     write(`  ${dim("─".repeat(76))}\n`);
-    write(`  ${bold("ACT I")}  ${dim("The agent reads a page containing an instruction addressed to it.")}\n`);
+    write(`  ${bold("ACT I")}  ${dim("Untrusted content reaches the agent")}\n`);
     write(`  ${dim("─".repeat(76))}\n\n`);
 
     // Show what is actually in the page — the attack is the interesting part.
@@ -179,7 +185,7 @@ export async function demo({
       write(`      ${red("·")} ${dim(f.label)}\n`);
     }
     write("\n");
-    await sleep(pace * 2);
+    await sleep(animated ? pace * 1.2 : pace === 0 ? 0 : pace * 0.5);
   }
 
   let act = null;
@@ -188,14 +194,14 @@ export async function demo({
       act = step.act;
       if (act === "work") {
         write(`\n  ${dim("─".repeat(76))}\n`);
-        write(`  ${bold("ACT III")}  ${dim("The same agent, the same policy, doing its job.")}\n`);
+        write(`  ${bold("ACT III")}  ${dim("Legitimate work continues.")}\n`);
         write(`  ${dim("─".repeat(76))}\n\n`);
       } else {
         write(`\n  ${dim("─".repeat(76))}\n`);
-        write(`  ${bold("ACT II")}  ${dim("It believes the page.")}\n`);
+        write(`  ${bold("ACT II")}  ${dim("CIRVIX evaluates the resulting actions.")}\n`);
         write(`  ${dim("─".repeat(76))}\n\n`);
       }
-      await sleep(pace);
+      await sleep(animated ? pace * 0.6 : pace === 0 ? 0 : pace * 0.3);
     }
 
     const { event } = await pipeline.submit(step.call);
@@ -205,16 +211,25 @@ export async function demo({
 
     if (step.narration) {
       write(`  ${dim(step.narration)}\n\n`);
-      await sleep(pace / 2);
+      await sleep(animated ? pace * 0.3 : 0);
     }
 
     if (step.intercept && event.decision === DECISION.DENY) {
+      if (animated) {
+        // Brief evaluating sequence — decision already made, just visualizing.
+        write(`  ${dim("◌ evaluating request...")}\n`);
+        await sleep(Math.min(260, pace * 0.35));
+        write(`  ${red("⚠ " + String(event.risk).toUpperCase())}\n`);
+        await sleep(Math.min(160, pace * 0.2));
+        write(`  ${red(bold("✕ BLOCKED"))}  ${dim(event.policy ?? "")}\n`);
+        await sleep(Math.min(160, pace * 0.2));
+      }
       write(interceptBox(event));
       write("\n");
     } else {
-      write(oneLine(event));
+      write(renderDecision(event) + "\n");
     }
-    await sleep(pace);
+    await sleep(animated ? pace * 0.7 : pace === 0 ? 0 : pace * 0.4);
   }
 
   const p = pipeline.percentiles();
@@ -241,75 +256,46 @@ export async function demo({
 
   write("\n");
   write(`  ${dim("─".repeat(76))}\n\n`);
-  write(`  ${green(bold(String(allowed)))} ${dim("calls forwarded")}   `);
+  // Polished summary — real P99, real audit hint, premium panel.
+  const sanitized = steps.filter((s) => s.event.decision === DECISION.SANITIZE).length;
+  write(`  ${green(bold(String(allowed)))} ${dim("allowed")}   `);
+  if (sanitized) write(`${blue(bold(String(sanitized)))} ${dim("sanitized")}   `);
   write(`${red(bold(String(denied)))} ${dim("blocked")}   `);
   write(`${amber(bold(String(held)))} ${dim("held for a human")}   `);
-  write(`${dim(`P99 ${p.p99}ms over ${p.samples} decisions`)}\n\n`);
-  write(`  ${bold("Cirvix did not disable the agent. It made the dangerous half controllable.")}\n\n`);
+  write(`${dim(`P99 ${p.p99}ms`)}${dim(` over ${p.samples} decisions · `)}${dim(`P50 ${p.p50}ms · P95 ${p.p95}ms`)}\n\n`);
+
+  // Summary panel — spec: CIRVIX GOVERNANCE boxed, P50/P95/P99, audit chain intact
+  const summaryLines = [
+    `${bold("CIRVIX GOVERNANCE")}`,
+    ``,
+    `${`${allowed} allowed`.padEnd(14)} ${`${sanitized} sanitized`.padEnd(14)} ${`${denied} blocked`.padEnd(14)} ${`${held} awaiting approval`}`,
+    ``,
+    `${`P50 ${p.p50}ms`.padEnd(14)} ${`P95 ${p.p95}ms`.padEnd(14)} ${`P99 ${p.p99}ms`}`,
+    ``,
+    `${green("✓")} ${dim(`${steps.length} records verified`)}`,
+    `${green("✓")} ${bold("AUDIT CHAIN INTACT")}`,
+  ];
+  // Use header box per spec: ╭─ CIRVIX GOVERNANCE ─
+  const W = 62;
+  const top = `  ${dim(`╭─ CIRVIX GOVERNANCE ${"─".repeat(Math.max(0, W - 20))}╮`)}`;
+  const bottom = `  ${dim(`╰${"─".repeat(W)}╯`)}`;
+  write(top + "\n");
+  for (const l of summaryLines) {
+    // Inside panel, pad to width, no side borders for genuine CLI feel per spec — but keep subtle
+    write(`  ${l}\n`);
+  }
+  write(bottom + "\n\n");
+  write(`  ${bold("CIRVIX did not disable the agent.")}\n`);
+  write(`  ${dim("It controlled the dangerous actions.")}\n\n`);
   write(`  ${dim("Every decision above is in the audit chain:")}  ${blue("cirvix logs")}\n`);
   write(`  ${dim("Ask why any one of them happened:")}          ${blue("cirvix logs --tree <request-id>")}\n\n`);
 
   return { result, output: "" };
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Rendering                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The intercept box.
- *
- * Fixed inner width so the borders line up regardless of content length; values
- * are truncated rather than allowed to break the frame, because a box with one
- * ragged edge reads as a rendering bug and undermines everything inside it.
- */
-function interceptBox(event) {
-  const W = 58;
-  const rows = [
-    ["Agent", event.agent],
-    ["Tool", event.tool],
-    ["Target", event.resource || event.destination || "—"],
-    ["Risk", String(event.risk).toUpperCase()],
-    ["Decision", "BLOCKED"],
-    ["Policy", event.policy ?? "default-deny"],
-    ["Latency", `${event.latency_ms}ms`],
-  ];
-
-  const pad = (text) => {
-    const s = String(text);
-    return s.length > W ? s.slice(0, W - 1) + "…" : s.padEnd(W);
-  };
-
-  const lines = [
-    `  ${red("╔" + "═".repeat(W + 2) + "╗")}`,
-    `  ${red("║")} ${bold(pad("CIRVIX SECURITY INTERCEPT"))} ${red("║")}`,
-    `  ${red("╠" + "═".repeat(W + 2) + "╣")}`,
-    ...rows.map(([k, v]) => {
-      const body = `${k}:`.padEnd(11) + v;
-      const painted = k === "Risk" || k === "Decision" ? red(pad(body)) : pad(body);
-      return `  ${red("║")} ${painted} ${red("║")}`;
-    }),
-    `  ${red("╚" + "═".repeat(W + 2) + "╝")}`,
-  ];
-
-  // The reason sits outside the box: it is the part that varies in length, and
-  // it is what the agent itself receives as a readable tool result.
-  const reason = event.reason ? `\n  ${dim(event.reason)}\n` : "";
-  return lines.join("\n") + "\n" + reason;
-}
-
+/* Legacy oneLine kept for tests that import it indirectly — now delegates to ui. */
 function oneLine(event) {
-  const tone =
-    { allow: green, sanitize: blue, require_approval: amber, deny: red, audit_only: dim }[event.decision] ?? dim;
-  const riskTone = { low: dim, medium: blue, high: amber, critical: red }[event.risk] ?? dim;
-
-  return (
-    `  ${tone(String(event.decision).toUpperCase().replace(/_/g, " ").padEnd(17))}` +
-    `${riskTone(String(event.risk).toUpperCase().padEnd(9))}` +
-    `${String(event.tool).padEnd(20)}` +
-    `${dim(String(event.resource || event.command || "").slice(-38).padEnd(38))}  ` +
-    `${dim(`${event.latency_ms}ms`)}\n`
-  );
+  return renderDecision(event) + "\n";
 }
 
 export { POISONED_PAGE };

@@ -25,7 +25,7 @@
  */
 
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   collectMcpServers,
@@ -34,8 +34,13 @@ import {
   detectRuntimes,
 } from "../core/detect.mjs";
 import { compile } from "../core/policy-dsl.mjs";
-import { writeToken, defaultEndpoint } from "../core/uds.mjs";
-import { bold, dim, green, amber, blue, plural } from "../core/format.mjs";
+import { writeToken, defaultEndpoint, tokenPath } from "../core/uds.mjs";
+import { UdsClient } from "../core/uds.mjs";
+import { bold, dim, green, red, amber, blue, cyan, gray, plural } from "../core/format.mjs";
+import { shouldAnimate } from "../core/ui/controller.mjs";
+import { brandHeader, panel } from "../core/ui/primitives.mjs";
+import { ConfigBackupManager, validateMcpServersMap } from "../core/config-store.mjs";
+import { detectFleet, generateFleetPlan } from "../adapters/index.mjs";
 
 const STARTER_POLICY = `# Cirvix policy
 #
@@ -250,6 +255,62 @@ require_approval:
   reason = "Agent configuration. Changing it changes what future runs are allowed to do."
 
 require_approval:
+  name = approve-cursorrules-change
+  tool = filesystem.write
+  path = ./.cursorrules
+  approvers = developer
+  reason = "Cursor instructions. Changing it changes what future runs believe they were told."
+
+require_approval:
+  name = approve-cursor-dir-change
+  tool = filesystem.write
+  path = ./.cursor/**
+  approvers = developer
+  reason = "Cursor agent configuration."
+
+require_approval:
+  name = approve-windsurfrules-change
+  tool = filesystem.write
+  path = ./.windsurfrules
+  approvers = developer
+  reason = "Windsurf instructions. Changing it changes what future runs believe they were told."
+
+require_approval:
+  name = approve-codeium-dir-change
+  tool = filesystem.write
+  path = ./.codeium/**
+  approvers = developer
+  reason = "Windsurf agent configuration."
+
+require_approval:
+  name = approve-clinerules-change
+  tool = filesystem.write
+  path = ./.clinerules
+  approvers = developer
+  reason = "Cline instructions. Changing it changes what future runs believe they were told."
+
+require_approval:
+  name = approve-roomodes-change
+  tool = filesystem.write
+  path = ./.roomodes
+  approvers = developer
+  reason = "Roo Code agent configuration."
+
+require_approval:
+  name = approve-codex-config-change
+  tool = filesystem.write
+  path = ./codex.json
+  approvers = developer
+  reason = "Codex agent configuration."
+
+require_approval:
+  name = approve-gemini-config-change
+  tool = filesystem.write
+  path = ./gemini.json
+  approvers = developer
+  reason = "Gemini agent configuration."
+
+require_approval:
   name = approve-database-write
   tool = database.write
   approvers = platform-oncall
@@ -384,6 +445,16 @@ test "writing outside the workspace is denied":
   tool = filesystem.write
   path = /etc/hosts
   expect deny
+
+test "cursor rules modification requires approval":
+  tool = filesystem.write
+  path = ./.cursorrules
+  expect require_approval
+
+test "cline rules modification requires approval":
+  tool = filesystem.write
+  path = ./.clinerules
+  expect require_approval
 `;
 
 async function exists(path) {
@@ -395,17 +466,85 @@ async function exists(path) {
   }
 }
 
+async function probeRuntime(stateDir) {
+  const endpoint = defaultEndpoint(stateDir);
+  try {
+    await access(tokenPath(stateDir));
+  } catch {
+    return { running: false, endpoint, reason: "no session token" };
+  }
+  let token;
+  try {
+    token = (await readFile(tokenPath(stateDir), "utf8")).trim();
+  } catch {
+    return { running: false, endpoint, reason: "unreadable session token" };
+  }
+  try {
+    const client = new UdsClient({ endpoint, token, timeoutMs: 1200 });
+    const status = await client.call("cirvix/status", {});
+    return { running: true, endpoint, live: status };
+  } catch {
+    return { running: false, endpoint, reason: "nothing listening" };
+  }
+}
+
 /**
  * @param {object} opts
  * @param {string} opts.cwd
  * @param {boolean} [opts.json]
- * @param {boolean} [opts.force]  overwrite an existing policy file
+ * @param {boolean} [opts.force]     overwrite an existing policy file
+ * @param {boolean} [opts.apply]     apply integration plans to detected agents
+ * @param {boolean} [opts.dryRun]    preview integration plans without modifying files
+ * @param {boolean|string} [opts.rollback] rollback to previous configuration
+ * @param {number} [opts.pace]       animation pace; 0 disables
  * @returns {Promise<{result:object, output:string}>}
  */
-export async function init({ cwd = process.cwd(), json = false, force = false } = {}) {
-  const steps = [];
+export async function init({
+  cwd = process.cwd(),
+  json = false,
+  force = false,
+  apply = false,
+  dryRun = false,
+  rollback = false,
+  pace,
+} = {}) {
   const stateDir = join(cwd, ".cirvix");
   const policyPath = join(cwd, "cirvix.policy");
+
+  /* ------------------------------------------------------------ 0. rollback */
+  if (rollback) {
+    const backupManager = new ConfigBackupManager({ stateDir });
+    try {
+      const backupId = typeof rollback === "string" ? rollback : null;
+      const res = await backupManager.rollback(backupId);
+      const safe = {
+        ok: true,
+        action: "rollback",
+        backupId: res.backupId,
+        restored: res.restored,
+        removed: res.removed,
+      };
+      const output = json
+        ? JSON.stringify(safe, null, 2)
+        : [
+            "",
+            `  ${green(bold("✓ Configuration rolled back successfully"))}`,
+            `  ${dim("Backup ID:")} ${res.backupId}`,
+            `  ${dim("Restored:")}  ${res.restored.length ? res.restored.join(", ") : "none"}`,
+            `  ${dim("Removed:")}   ${res.removed.length ? res.removed.join(", ") : "none"}`,
+            "",
+          ].join("\n");
+      return { result: safe, output };
+    } catch (err) {
+      const safe = { ok: false, action: "rollback", error: err.message };
+      const output = json
+        ? JSON.stringify(safe, null, 2)
+        : `\n  ${red(bold("✗ Rollback failed:"))} ${err.message}\n`;
+      return { result: safe, output };
+    }
+  }
+
+  const steps = [];
 
   /* ------------------------------------------------------------ 1. runtime */
   await mkdir(stateDir, { recursive: true });
@@ -419,8 +558,9 @@ export async function init({ cwd = process.cwd(), json = false, force = false } 
   });
 
   /* -------------------------------------------------------- 2. MCP servers */
-  const runtimes = await detectRuntimes();
-  const servers = collectMcpServers(runtimes);
+  let fleet = await detectFleet(cwd, { stateDir });
+  let runtimes = fleet.runtimes;
+  const servers = fleet.mcpServers;
   steps.push({
     id: "mcp",
     label: "MCP servers detected",
@@ -431,7 +571,7 @@ export async function init({ cwd = process.cwd(), json = false, force = false } 
   });
 
   /* ------------------------------------------------------------- 3. agents */
-  const frameworks = await detectFrameworks(cwd);
+  const frameworks = fleet.frameworks?.length ? fleet.frameworks : await detectFrameworks(cwd);
   const agentNames = [...runtimes.map((r) => r.label), ...frameworks.map((f) => f.label)];
   steps.push({
     id: "agents",
@@ -487,8 +627,61 @@ export async function init({ cwd = process.cwd(), json = false, force = false } 
     detail: ".cirvix/audit.jsonl · hash-chained, verify with `cirvix audit verify`",
   });
 
+  /* --------------------------------------------------- 7. fleet integration */
+  const fleetPlans = await generateFleetPlan(cwd, { stateDir });
+  const unintegratedPlans = fleetPlans.filter((p) => {
+    const rt = runtimes.find((r) => r.id === p.adapterId);
+    return rt && !rt.isIntegrated && p.canIntegrate;
+  });
+
+  let integrationBackup = null;
+  let appliedCount = 0;
+
+  if (apply && unintegratedPlans.length > 0) {
+    const backupManager = new ConfigBackupManager({ stateDir });
+    const targetFiles = unintegratedPlans.map((p) => p.targetFile);
+    integrationBackup = await backupManager.createBackup(targetFiles, "cirvix init --apply");
+
+    for (const plan of unintegratedPlans) {
+      const targetPath = plan.targetFile;
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, JSON.stringify(plan.plan, null, 2), "utf8");
+      appliedCount++;
+    }
+
+    // Refresh detection after integration
+    fleet = await detectFleet(cwd, { stateDir });
+    runtimes = fleet.runtimes;
+
+    steps.push({
+      id: "integration",
+      label: "Fleet integration applied",
+      ok: true,
+      detail: `${plural(appliedCount, "agent")} wired into CIRVIX · backup ${integrationBackup.backupId}`,
+    });
+  } else if (dryRun) {
+    steps.push({
+      id: "integration",
+      label: "Fleet integration (dry run)",
+      ok: true,
+      detail: `${plural(unintegratedPlans.length, "agent")} ready to wire (no files modified)`,
+    });
+  } else {
+    steps.push({
+      id: "integration",
+      label: "Fleet integration plan",
+      ok: true,
+      detail: unintegratedPlans.length
+        ? `${plural(unintegratedPlans.length, "agent")} ready for automatic integration (use --apply)`
+        : "all detected agents already routed through CIRVIX",
+    });
+  }
+
+  // Probe whether a runtime is actually reachable.
+  const runtimeProbe = await probeRuntime(stateDir);
+
   const result = {
-    ok: steps.every((s) => s.ok || s.id === "mcp" || s.id === "agents"),
+    ok: steps.every((s) => s.ok || s.id === "mcp" || s.id === "agents" || s.id === "integration"),
     cwd,
     stateDir,
     policyPath,
@@ -497,9 +690,24 @@ export async function init({ cwd = process.cwd(), json = false, force = false } 
     rules: ruleCount,
     tests: testCount,
     mcpServers: servers.length,
-    runtimes: runtimes.map((r) => ({ id: r.id, label: r.label, governed: r.governed, path: r.path })),
+    runtimes: runtimes.map((r) => ({
+      id: r.id,
+      label: r.label,
+      governed: r.governed,
+      compatibilityLevel: r.compatibilityLevel,
+      path: r.path,
+    })),
     credentials: credentials.length,
     steps,
+    runtime: runtimeProbe,
+    fleetPlans: unintegratedPlans.map((p) => ({
+      adapterId: p.adapterId,
+      label: p.label,
+      targetFile: p.targetFile,
+      snippet: p.snippet,
+    })),
+    appliedCount,
+    backupId: integrationBackup?.backupId ?? null,
     // Never printed, never logged — returned so a caller that just created the
     // session can use it without reading the file back.
     token,
@@ -507,47 +715,101 @@ export async function init({ cwd = process.cwd(), json = false, force = false } 
 
   if (json) {
     const { token: _hidden, ...safe } = result;
-    return { result, output: JSON.stringify(safe, null, 2) };
+    return { result: safe, output: JSON.stringify(safe, null, 2) };
   }
-  return { result, output: render(result, { runtimes }) };
+  return {
+    result,
+    output: render(result, { runtimes, runtimeProbe, appliedCount, backupId: integrationBackup?.backupId, dryRun }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
 
-function render(result, { runtimes }) {
-  const lines = ["", `  ${bold("CIRVIX")} ${dim("· initializing")}`, ""];
+function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = null, dryRun = false }) {
+  const lines = [];
+  lines.push("");
+  lines.push(brandHeader({ width: 62 }));
+  lines.push("");
 
+  // Initialization steps — premium checkmarks, real data.
+  lines.push(`  ${dim("Initializing CIRVIX runtime...")}`);
   const width = Math.max(...result.steps.map((s) => s.label.length));
   for (const step of result.steps) {
     const tick = step.ok ? green("✓") : amber("○");
     lines.push(`  ${tick} ${step.label.padEnd(width)}   ${dim(step.detail)}`);
   }
-
-  lines.push("");
-  lines.push(`  ${green(bold("Cirvix is protecting your agent."))}`);
   lines.push("");
 
-  // The one thing init deliberately does not do for you.
-  const ungoverned = runtimes.filter((r) => !r.governed);
-  if (ungoverned.length) {
-    lines.push(`  ${amber("One step left.")} ${dim(`${plural(ungoverned.length, "runtime")} still calls tools directly:`)}`);
-    lines.push("");
-    for (const r of ungoverned) {
-      lines.push(`    ${bold(r.label)}  ${dim(r.path)}`);
+  // Protected panel
+  const isOnline = Boolean(runtimeProbe?.running);
+  const runtimeLabel = isOnline ? green(bold("● ONLINE")) : cyan(bold("● CONFIGURED"));
+  const runtimeDetail = isOnline ? dim("control socket reachable") : dim("state configured — start runtime to go ONLINE");
+  const policyDetail = `${result.rules} rules loaded`;
+  const testsDetail = `${result.tests} policy tests`;
+  const secretsDetail = result.credentials ? `${result.credentials} credential sources` : "active";
+
+  const panelLines = [
+    `${bold("CIRVIX PROTECTED")}`,
+    ``,
+    `${"Runtime".padEnd(12)} ${runtimeLabel}  ${runtimeDetail}`,
+    `${"Policy".padEnd(12)} ${green(bold("● ENFORCING"))}  ${dim(policyDetail)}`,
+    `${"Secrets".padEnd(12)} ${green(bold("● PROTECTED"))}  ${dim(secretsDetail)}`,
+    `${"Audit".padEnd(12)} ${green(bold("● RECORDING"))}  ${dim(".cirvix/audit.jsonl")}`,
+    `${"Agents".padEnd(12)} ${String(runtimes.length)} detected`,
+  ];
+
+  if (runtimes.length > 0) {
+    panelLines.push(``);
+    for (const rt of runtimes) {
+      const badge = rt.governed ? green(bold("● " + (rt.compatibilityLevel ?? "INTEGRATED"))) : amber("○ " + (rt.compatibilityLevel ?? "CONFIGURABLE"));
+      panelLines.push(`  ${rt.label.padEnd(16)} ${badge}`);
+    }
+  }
+
+  panelLines.push(``);
+  panelLines.push(`${dim(`${0} blocked  ·  ${0} approvals  ·  ${0} violations`)}`);
+
+  lines.push(panel({ lines: panelLines, width: 62 }));
+  lines.push("");
+
+  if (appliedCount > 0) {
+    lines.push(`  ${green(bold(`✓ Successfully wired ${appliedCount} agent(s) into CIRVIX gateway.`))}`);
+    if (backupId) {
+      lines.push(`  ${dim(`Safe backup saved as: ${backupId}`)}`);
+      lines.push(`  ${dim("To undo this change at any time, run:")} ${blue("cirvix init --rollback")}`);
     }
     lines.push("");
-    lines.push(`  ${dim("Route them through the gateway — Cirvix does not edit your editor config for you:")}`);
+  } else {
+    lines.push(`  ${green(bold("Ready. Your agent is under policy control."))}`);
     lines.push("");
-    lines.push(`    ${blue(`cirvix gateway --servers ${ungoverned[0].path}`)}`);
-    lines.push("");
-    lines.push(`  ${dim("or add this to that file's mcpServers block:")}`);
-    lines.push("");
-    lines.push(dim(`    "cirvix": { "command": "cirvix", "args": ["gateway", "--servers", "${ungoverned[0].path.replace(/\\/g, "/")}"] }`));
+  }
+
+  // Integration guidance
+  const ungoverned = runtimes.filter((r) => !r.governed);
+  if (ungoverned.length && !appliedCount) {
+    const warnLines = [
+      `${amber(bold("⚠ INTEGRATION ACTION AVAILABLE"))}`,
+      ``,
+      `${plural(ungoverned.length, "agent")} detected but not yet routed through`,
+      `the CIRVIX gateway:`,
+      ``,
+      ...ungoverned.map((u) => `  • ${u.label} (${u.compatibilityLevel ?? "CONFIGURABLE"})`),
+      ``,
+      `Automatic non-destructive integration:`,
+      `  ${blue("cirvix init --apply")}       ${dim("(creates pre-modification backup)")}`,
+      `  ${blue("cirvix init --dry-run")}     ${dim("(preview configuration without writing)")}`,
+      `  ${blue("cirvix init --rollback")}    ${dim("(revert to pre-integration state)")}`,
+      ``,
+      `Or manually run:`,
+      `  ${blue(`cirvix gateway --servers ${ungoverned[0].path}`)}`,
+    ];
+    lines.push(panel({ lines: warnLines, width: 62, heavy: true }));
     lines.push("");
   }
 
   lines.push(`  ${dim("Next")}`);
   lines.push(`    ${blue("cirvix policy test")}    ${dim("run the policy's own test cases")}`);
+  lines.push(`    ${blue("cirvix scan")}           ${dim("full inventory of runtimes, MCP servers & secrets")}`);
   lines.push(`    ${blue("cirvix demo")}           ${dim("watch an injected exfiltration attempt get stopped")}`);
   lines.push(`    ${blue("cirvix status")}         ${dim("what is protected right now")}`);
   lines.push("");

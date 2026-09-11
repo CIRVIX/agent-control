@@ -103,6 +103,12 @@ Stated so nobody mistakes silence for coverage.
   control.
 - **DNS rebinding.** The egress guard resolves and checks, but Node's `fetch`
   does not expose address pinning. See the note in `egress.mjs`.
+- **Paths the agent takes without Cirvix.** A direct MCP server entry, a
+  runtime's built-in tools, a subprocess the agent spawns, a socket it opens
+  itself. These are not vulnerabilities in the gateway — they are routes
+  around it, and no userspace gateway can interpose on a path that never
+  enters its process. See [what enforcement does not
+  claim](#what-enforcement-does-not-claim).
 
 ## What the audit chain does and does not prove
 
@@ -119,12 +125,29 @@ Routinely overstated, so stated precisely:
 ## What enforcement does not claim
 
 - Cirvix does not prevent prompt injection. It constrains what an injected agent
-  can **do**, according to configured runtime policies.
+  can **do**, according to configured runtime policies. The canonical
+  demonstration (`node docs/examples/pr-title-injection.mjs`) says
+  PROMPT INJECTION OCCURRED and ATTACK STOPPED in the same run, on purpose.
 - A permissive rule you wrote yourself is honoured exactly as written. Policy
   quality is the operator's responsibility.
-- `guard.wrap` governs the tools you hand it. A tool the agent reaches directly
-  is never evaluated — only the gateway has that property, because it sits on
-  the wire.
+- `guard.wrap` governs the tools you hand it — and nothing else. A tool the
+  agent reaches directly is never evaluated.
+- The gateway governs traffic **actually routed through it** — and nothing
+  else. A direct MCP server entry, a runtime's built-in tools, a subprocess
+  the agent spawns, and a socket the agent opens itself all bypass the
+  gateway by construction, because a userspace process cannot interpose on
+  paths that never enter it.
+- The default deployment does not broker secrets: without an attached broker,
+  arguments forward verbatim and results return unscrubbed. Handle
+  indirection has to be configured, not assumed.
+- The prompt sanitizer is mitigation, not prevention. A determined attacker
+  will phrase an instruction no regex anticipates; the boundary that stops
+  the exfiltration is the deny rule on the credential path, and it only helps
+  if the subsequent tool call is itself routed through policy.
+- The Python SDK (`cirvix`) is decision-only: no audit chain, no secret
+  brokering or return-path scrubbing, no risk engine, no quarantine,
+  delegation, authority, entitlement, or cost gates. Same taxonomy, same
+  default-deny — not the same product surface. Do not claim parity.
 - Policy decides authorization, not payload semantics. A permitted query
   returning more rows than intended is a query design problem.
 

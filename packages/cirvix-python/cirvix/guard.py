@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from .canonical import canonical_url
 from .policy import VERDICT, Decision, evaluate
 
 __all__ = [
@@ -84,15 +85,97 @@ class CirvixHeld(CirvixDenied):
         self.approval_id = approval_id
 
 
-_ACTION_PATTERNS = [
-    (re.compile(r"(^|[._-])(read|get|cat|fetch)($|[._-])"), "fs.read"),
-    (re.compile(r"(^|[._-])(write|create|put|save|edit)($|[._-])"), "fs.write"),
-    (re.compile(r"(^|[._-])(delete|remove|rm|unlink|drop)($|[._-])"), "fs.delete"),
-    (re.compile(r"(^|[._-])(list|ls|search|find|query|grep)($|[._-])"), "fs.list"),
-    (re.compile(r"(^|[._-])(exec|run|shell|command|spawn)($|[._-])"), "shell.exec"),
-    (re.compile(r"(^|[._-])(request|http|curl|browse|scrape)($|[._-])"), "http.request"),
-    (re.compile(r"(^|[._-])(apply|deploy|rollout)($|[._-])"), "k8s.apply"),
+# Ported from the Node classifier (agent-control/src/core/normalize.mjs).
+# There is one taxonomy, in two languages. When they disagree, the same policy
+# governs different things depending on which SDK the agent used — the exact
+# defect class the consistency oracle exists to catch. Change one, change both.
+_TAXONOMY = [
+    # Version control — read-only, the LOW baseline.
+    ("git.status", "vcs.read", r"^git[._ \-]?(status|st)$"),
+    ("git.log", "vcs.read", r"^git[._ \-]?(log|history)$"),
+    ("git.diff", "vcs.read", r"^git[._ \-]?(diff|show)$"),
+    ("git.branch", "vcs.write", r"^git[._ \-]?(branch|checkout|switch)$"),
+    ("git.commit", "vcs.write", r"^git[._ \-]?commit$"),
+    ("git.push", "vcs.push", r"^git[._ \-]?push$"),
+    # Filesystem.
+    ("filesystem.read", "fs.read", r"(^|[._\-])(read|cat|open|load|slurp)([._\-]|$)"),
+    ("filesystem.list", "fs.list", r"(^|[._\-])(list|ls|dir|readdir|tree|glob)([._\-]|$)"),
+    ("filesystem.search", "fs.search", r"(^|[._\-])(search|find|grep|rg|ripgrep)([._\-]|$)"),
+    ("filesystem.stat", "fs.stat", r"(^|[._\-])(stat|exists|metadata)([._\-]|$)"),
+    ("filesystem.write", "fs.write", r"(^|[._\-])(write|create|put|save|edit|patch|append|touch|mkdir)([._\-]|$)"),
+    ("filesystem.delete", "fs.delete", r"(^|[._\-])(delete|remove|rm|unlink|rmdir)([._\-]|$)"),
+    ("filesystem.move", "fs.move", r"(^|[._\-])(move|mv|rename|copy|cp)([._\-]|$)"),
+    # Execution.
+    ("shell.exec", "shell.exec", r"(^|[._\-])(exec|execute|run|shell|bash|sh|zsh|powershell|cmd|command|spawn|terminal)([._\-]|$)"),
+    ("package.install", "pkg.install", r"(^|[._\-])(install|add[-_]?dependency|npm[-_]?install|pip[-_]?install)([._\-]|$)"),
+    # Data.
+    ("database.query", "db.read", r"(^|[._\-])(query|select|find[-_]?one|find[-_]?many|fetch[-_]?rows)([._\-]|$)"),
+    ("database.write", "db.write", r"(^|[._\-])(insert|update|upsert|delete[-_]?row|execute[-_]?sql|mutate)([._\-]|$)"),
+    ("database.migrate", "db.migrate", r"(^|[._\-])(migrate|migration|schema[-_]?change)([._\-]|$)"),
+    # Network.
+    ("network.request", "http.request", r"(^|[._\-])(request|http|https|fetch|curl|get[-_]?url|post|browse|scrape|crawl|web[-_]?search)([._\-]|$)"),
+    # Infrastructure.
+    ("deploy.apply", "k8s.apply", r"(^|[._\-])(apply|deploy|rollout|release|promote|helm|terraform)([._\-]|$)"),
+    # Credentials.
+    ("secrets.get", "secrets.read", r"(^|[._\-])(secret|credential|token|password|vault|keychain)([._\-]|$)"),
 ]
+
+_FILE_SUBJECT = re.compile(r"(^|[._\-])(file|files|filepath|path|dir|directory|folder)([._\-]|s?$)", re.IGNORECASE)
+_NETWORK_SUBJECT = re.compile(
+    r"(^|[._\-])(web|url|uri|http|https|browser|internet|remote|api)([._\-]|$)", re.IGNORECASE
+)
+_FILE_VERBS = [
+    ("fs.delete", re.compile(r"(^|[._\-])(delete|remove|rm|unlink|destroy)([._\-]|$)", re.IGNORECASE)),
+    ("fs.write", re.compile(r"(^|[._\-])(write|create|put|save|edit|patch|append|touch|mkdir|upload)([._\-]|$)", re.IGNORECASE)),
+    ("fs.move", re.compile(r"(^|[._\-])(move|mv|rename|copy|cp)([._\-]|$)", re.IGNORECASE)),
+    ("fs.list", re.compile(r"(^|[._\-])(list|ls|dir|readdir|tree|glob)([._\-]|$)", re.IGNORECASE)),
+    ("fs.search", re.compile(r"(^|[._\-])(search|find|grep|rg)([._\-]|$)", re.IGNORECASE)),
+    ("fs.stat", re.compile(r"(^|[._\-])(stat|exists|metadata|info)([._\-]|$)", re.IGNORECASE)),
+    # Read last: the fallback for anything naming a file without saying it
+    # changes it. The read rules are the strict ones, so a misfile lands on
+    # the safer side.
+    ("fs.read", re.compile(r".*", re.IGNORECASE)),
+]
+
+
+def _split_camel_case(name: str) -> str:
+    spelled = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name or ""))
+    return re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", spelled).lower()
+
+
+def classify_tool(name: Any, server: str | None = None) -> tuple[str, str]:
+    """Classifies a raw tool name into ``(tool, action)``.
+
+    Mirrors the Node ``classifyTool`` exactly: exact canonical names win, the
+    network subject beats the verb, the file subject beats the suffix
+    patterns, and an unrecognised name keeps its own namespaced identity
+    rather than being guessed into a bucket. Guessing here would be the worst
+    possible failure — a destructive tool misfiled as ``fs.read`` would
+    inherit a read rule's permission.
+    """
+    raw = str(name or "")
+
+    for tool, action, _pattern in _TAXONOMY:
+        if raw == tool or raw == action:
+            return tool, action
+
+    spelled = _split_camel_case(raw)
+
+    if _NETWORK_SUBJECT.search(spelled):
+        return "network.request", "http.request"
+
+    if _FILE_SUBJECT.search(spelled):
+        for action, pattern in _FILE_VERBS:
+            if pattern.search(spelled):
+                public = next((t for t, a, _p in _TAXONOMY if a == action), action)
+                return public, action
+
+    for tool, action, pattern in _TAXONOMY:
+        if re.search(pattern, spelled, re.IGNORECASE):
+            return tool, action
+
+    fallback = f"mcp.{server}.{raw}" if server else f"tool.{raw}"
+    return fallback, fallback
 
 _RESOURCE_KEYS = (
     "path", "file", "filename", "filepath", "uri", "url", "resource", "target", "query", "sql",
@@ -102,14 +185,24 @@ _RESOURCE_KEYS = (
 def action_for_tool(server: str | None, tool: str) -> str:
     """Maps a tool name to the action vocabulary policy is written against.
 
-    An unrecognised name falls back to a namespaced action rather than to a
-    permissive default, so a rule can always be written for it.
+    Delegates to :func:`classify_tool` — the single classifier — with explicit
+    mappings for protocol operations, mirroring the Node core. An unrecognised
+    name falls back to a namespaced action rather than to a permissive
+    default, so a rule can always be written for it.
     """
     lowered = str(tool).lower()
-    for pattern, action in _ACTION_PATTERNS:
-        if pattern.search(lowered):
-            return action
-    return f"mcp.{server}.{tool}" if server else f"tool.{tool}"
+    # Protocol operations, not tool names: a resource URI is overwhelmingly a
+    # file, and a subscription is a standing read of one. Without this they
+    # would fall through to ``mcp.<server>.resources.subscribe`` —
+    # default-denied, so legitimate subscriptions break, and governed by no
+    # filesystem rule, so credential-path rules would not apply.
+    if lowered in ("resources.read", "resources.subscribe"):
+        return "fs.read"
+    if lowered in ("resources.list", "resources.templates.list"):
+        return "fs.list"
+    if lowered == "prompts.get":
+        return "fs.read"
+    return classify_tool(tool, server)[1]
 
 
 def resource_for_call(args: Any) -> str:
@@ -141,7 +234,11 @@ def destination_for(resource: str, args: Any) -> str | None:
         candidates += [args.get("url"), args.get("uri"), args.get("endpoint"), args.get("href")]
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.lower().startswith(("http://", "https://")):
-            return candidate
+            # Canonical, not raw: a destination rule is a string match, so the
+            # raw form let `http://2852039166/` (decimal for 169.254.169.254)
+            # walk past a rule naming the dotted address. Same normalization
+            # both engines use for resources.
+            return canonical_url(candidate) or candidate
     return None
 
 
@@ -319,20 +416,29 @@ def wrap(tools: Any, guard: Guard | None = None, **options: Any) -> Any:
     if isinstance(tools, (list, tuple)):
         wrapped = []
         for tool in tools:
-            if callable(tool) and not hasattr(tool, "__dict__"):
+            # Object tools first: a framework tool object may itself be
+            # callable, and its callable attribute is the governed entry
+            # point — not the object. Only a value with NO recognized tool
+            # attribute falls through to bare-callable wrapping below.
+            attr = next((a for a in CALLABLE_ATTRS if callable(getattr(tool, a, None))), None)
+            if attr is not None:
+                name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
+                # The tool object is mutated in place only after being copied, so a
+                # framework holding the original list does not find it governed as a
+                # side effect of us reading it.
+                clone = _shallow_clone(tool)
+                setattr(clone, attr, _wrap_callable(getattr(tool, attr), name, active))
+                wrapped.append(clone)
+                continue
+            # Bare functions used to fall through to the attr search above and
+            # be returned UNWRAPPED — every function has a __dict__, so the old
+            # `not hasattr(tool, "__dict__")` guard never fired. A bare
+            # function in the list is a tool with one entry point: wrap it, or
+            # the call executes with zero policy evaluation.
+            if callable(tool):
                 wrapped.append(_wrap_callable(tool, getattr(tool, "__name__", "tool"), active))
                 continue
-            attr = next((a for a in CALLABLE_ATTRS if callable(getattr(tool, a, None))), None)
-            if attr is None:
-                wrapped.append(tool)
-                continue
-            name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
-            # The tool object is mutated in place only after being copied, so a
-            # framework holding the original list does not find it governed as a
-            # side effect of us reading it.
-            clone = _shallow_clone(tool)
-            setattr(clone, attr, _wrap_callable(getattr(tool, attr), name, active))
-            wrapped.append(clone)
+            wrapped.append(tool)
         return type(tools)(wrapped) if isinstance(tools, tuple) else wrapped
 
     raise TypeError("guard.wrap expects a callable, a sequence of tools, or a mapping of tools.")

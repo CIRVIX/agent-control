@@ -212,13 +212,19 @@ import the one you mean.
 ## What `wrap` does not do
 
 - **It does not govern tools you did not hand it.** A tool the agent reaches
-  directly is never evaluated. The [gateway](./cli.md#cirvix-gateway) does not
-  have this limitation because it sits on the wire.
+  directly is never evaluated. The [gateway](./cli.md#cirvix-gateway) governs
+  traffic actually routed through it — direct MCP entries, built-in runtime
+  tools, and the agent's own subprocesses stay outside both.
 - **It does not broker secrets.** The Python `Guard` has no `secrets` parameter.
-  A Python agent that needs handle substitution and return-path redaction routes
+  Handles pass through as literals and results return unredacted. A Python
+  agent that needs handle substitution and return-path redaction routes
   its tool calls through the gateway, which does.
 - **It does not write an audit chain.** The Python `Guard` has no `audit`
   parameter. Use `on_decision` to forward records wherever you keep them, or run
   the gateway.
+- **It does not run the risk engine, quarantine, value, receipt, or cost
+  gates, and it does not narrow by delegation, authority, or entitlements.**
+  Same taxonomy, same default-deny — not the same enforcement depth. See the
+  [parity table](./sdk-node.md#parity-with-python).
 - **It does not reach the network.** No telemetry is shipped and no policy is
   pulled. Both are the daemon's job.

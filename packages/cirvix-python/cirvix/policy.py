@@ -437,6 +437,14 @@ def evaluate(
     observed: list[dict[str, Any]] = []
 
     for rule in rules or []:
+        # A malformed entry (None, a string, a list) is skipped, never
+        # executed and never fatal. Crashing evaluation on a bad entry turns
+        # a policy typo into an exception path — and an exception anywhere
+        # near enforcement is a bypass waiting for a caller that catches it.
+        # Skipping keeps default-deny: the entry authorizes nothing.
+        if not isinstance(rule, Mapping):
+            considered.append({"rule": None, "effect": None, "matched": False, "skipped": "malformed"})
+            continue
         matched = (
             _match_any(rule.get("agents"), agent)
             and _match_any(rule.get("actions"), action)

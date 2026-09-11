@@ -336,5 +336,127 @@ class WorkspaceRootDefault(unittest.TestCase):
         self.assertEqual(tools["read_file"](path="src/index.ts"), "<src/index.ts>")
 
 
+class WrapCoverage(unittest.TestCase):
+    """Every callable handed to ``wrap`` must come back governed.
+
+    Regression: bare functions inside a list were returned UNWRAPPED — every
+    function has a ``__dict__``, so the old ``not hasattr(tool, "__dict__")``
+    guard never fired and ``wrap([fn])`` was a silent total bypass. An
+    unwrapped tool is executable; an executable unwrapped tool is the gap
+    this file exists to close.
+    """
+
+    def test_bare_functions_in_a_list_are_wrapped(self) -> None:
+        ran = []
+
+        def read_secret(path):
+            ran.append(path)
+            return f"<{path}>"
+
+        [governed] = wrap([read_secret], guard=make_guard())
+        with self.assertRaises(CirvixDenied):
+            governed(path="/workspace/.env")
+        self.assertEqual(ran, [], "a denied bare function executed anyway")
+
+    def test_bare_functions_in_a_tuple_are_wrapped(self) -> None:
+        def read_file(path):
+            return f"<{path}>"
+
+        (governed,) = wrap((read_file,), guard=make_guard())
+        self.assertEqual(governed(path="/workspace/a.ts"), "</workspace/a.ts>")
+
+    def test_denied_bare_function_leaves_permit_path_working(self) -> None:
+        def read_file(path):
+            return f"<{path}>"
+
+        [governed] = wrap([read_file], guard=make_guard())
+        with self.assertRaises(CirvixDenied):
+            governed(path="/workspace/.env.production")
+        self.assertEqual(governed(path="/workspace/a.ts"), "</workspace/a.ts>")
+
+    def test_object_tools_still_win_over_bare_callable_fallback(self) -> None:
+        # A framework tool object is itself callable AND carries its entry
+        # point on an attribute. The attribute is the governed surface — not
+        # the object — or framework metadata (name, schema) would be lost.
+        original = LangChainStyleTool()
+        [tool] = wrap([original], guard=make_guard())
+        self.assertEqual(tool.func(path="/workspace/a.ts"), "read /workspace/a.ts")
+        self.assertIsNot(original.func, tool.func)
+
+
+class MalformedRules(unittest.TestCase):
+    """A bad rule entry must never become an exception near enforcement."""
+
+    def test_non_mapping_entries_are_skipped_not_fatal(self) -> None:
+        active = Guard(
+            rules=[
+                None,
+                "not-a-rule",
+                ["effect", "permit"],
+                {"name": "allow-all", "effect": "permit", "actions": ["*"], "resources": ["*"]},
+            ],
+            agent="t",
+            cwd=CWD,
+        )
+        decision = active.authorize(tool="read_file", args={"path": "/workspace/a.ts"})
+        self.assertEqual(decision.verdict, "permit")
+        self.assertEqual(decision.rule, "allow-all")
+        skipped = [c for c in (decision.considered or []) if c.get("skipped") == "malformed"]
+        self.assertEqual(len(skipped), 3)
+
+    def test_malformed_only_policy_stays_default_deny(self) -> None:
+        active = Guard(rules=[None, 42], agent="t", cwd=CWD)
+        decision = active.authorize(tool="read_file", args={"path": "/workspace/a.ts"})
+        self.assertEqual(decision.verdict, "deny")
+
+
+class SharedTaxonomy(unittest.TestCase):
+    """One taxonomy, two languages: the same name must file identically.
+
+    Spot-checks of the port against the Node classifier. The full agreement
+    battery lives in the conformance fixture; these pin the shapes that once
+    diverged (file-subject capture, network-subject priority, camelCase,
+    and the namespaced fallback for the unknown).
+    """
+
+    CASES = {
+        "readFile": "fs.read",
+        "fetch_file": "fs.read",
+        "web_search": "http.request",
+        "fetch_url": "http.request",
+        "shell_exec": "shell.exec",
+        "Bash": "shell.exec",
+        "execute_sql": "shell.exec",
+        "database.write": "db.write",
+        "migrate": "db.migrate",
+        "secrets.get": "secrets.read",
+        "npm_install": "pkg.install",
+        "resources.read": "fs.read",
+        "resources.subscribe": "fs.read",
+        "prompts.get": "fs.read",
+    }
+
+    def test_shared_cases_file_to_the_same_action(self) -> None:
+        from cirvix import action_for_tool
+
+        for name, action in self.CASES.items():
+            with self.subTest(tool=name):
+                self.assertEqual(action_for_tool("srv", name), action)
+
+    def test_unknown_names_keep_namespaced_identity(self) -> None:
+        from cirvix import classify_tool
+
+        self.assertEqual(classify_tool("getRidOf", "srv"), ("mcp.srv.getRidOf", "mcp.srv.getRidOf"))
+        self.assertEqual(classify_tool("unknownThing", None), ("tool.unknownThing", "tool.unknownThing"))
+
+    def test_decimal_ip_destination_collapses_to_the_dotted_form(self) -> None:
+        from cirvix import destination_for
+
+        dotted = destination_for("http://169.254.169.254/latest", {})
+        decimal = destination_for("http://2852039166/latest", {})
+        self.assertIsNotNone(dotted)
+        self.assertEqual(decimal, dotted)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

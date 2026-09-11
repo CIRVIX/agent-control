@@ -267,13 +267,21 @@ Subpath exports, for importing one thing without the rest:
 ## Parity with Python
 
 Both engines run the same 44-case
-[conformance fixture](../packages/conformance/policy-conformance.json). Two
-differences are real and intentional:
+[conformance fixture](../packages/conformance/policy-conformance.json), share
+one tool taxonomy (`classifyTool` / `classify_tool` — verified identical), and
+default-deny the same way. The differences below are real and load-bearing —
+do not claim SDK parity:
 
 | | Node | Python |
 |---|---|---|
-| Secret brokering in `Guard` | yes (`secrets`) | no |
-| Audit chain in `Guard` | yes (`audit`) | no |
+| Secret brokering in `Guard` | yes (`secrets`) | no — handles pass through as literals |
+| Audit chain in `Guard` | yes (`audit`) | no — `on_decision` callback only |
+| Return-path scrubbing | yes | no — results return unredacted |
+| Risk classification + floor | yes | no |
+| Deny-only risk gate, value gate, quarantine, receipts | no (not in this tree) | no |
+| Delegation / entitlements narrowing | yes | no |
+| Destination canonicalization | yes | yes |
+| Malformed rule entries | skipped | skipped |
 
-A Python agent that needs brokering routes through the gateway. See
-[Python SDK](./sdk-python.md#what-wrap-does-not-do).
+A Python agent that needs brokering, audit, or any gate routes through the
+gateway. See [Python SDK](./sdk-python.md#what-wrap-does-not-do).

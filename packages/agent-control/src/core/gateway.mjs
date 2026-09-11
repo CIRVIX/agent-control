@@ -42,6 +42,17 @@
  *   the only point in the process where a credential exists inside a request,
  *   and it sits downstream of the decision that authorized it. See
  *   `./secrets.mjs`.
+ *
+ * WHAT THE GATEWAY DOES NOT GOVERN.
+ *
+ * The gateway governs traffic actually routed through it — every `tools/call`,
+ * `resources/read`, `resources/subscribe`, `prompts/get`, `completion/complete`,
+ * and unmodeled method crossing this process is evaluated before anything
+ * executes, and unknown methods are default-denied. What never enters this
+ * process is never evaluated: a direct MCP server entry in the agent's config,
+ * the runtime's built-in tools, a subprocess the agent spawns, a socket the
+ * agent opens itself. Those are routes around the boundary, not through it,
+ * and no userspace gateway can interpose on them.
  */
 
 import { spawn } from "node:child_process";
@@ -465,10 +476,15 @@ export class Gateway {
   /* ---------------------------------------------------------------------- */
 
   async handleClientMessage(message) {
-    // Notifications are forwarded to every upstream and never answered.
+    // Notifications carry no id and expect no answer, but they still reach
+    // upstream processes — so they still cross the boundary. A small set of
+    // lifecycle notifications is benign plumbing; anything else is evaluated
+    // like any other call, and dropped unless permitted. Previously every
+    // notification was broadcast to ALL upstreams unevaluated, so a
+    // tools/call-shaped action framed as a notification bypassed the engine
+    // entirely, with no decision and no audit record.
     if (message.id === undefined && message.method) {
-      for (const up of this.upstreams.values()) up.send(message);
-      return;
+      return this.#handleNotification(message);
     }
 
     switch (message.method) {
@@ -525,11 +541,173 @@ export class Gateway {
         this.write({ jsonrpc: "2.0", id: message.id, result: {} });
         return;
 
-      default:
-        // Anything else is broadcast to the first live upstream. The gateway
-        // deliberately does not invent behaviour for methods it doesn't model.
+      /*
+       * `prompts/get` returns server-authored text that enters the model's
+       * context with instruction-level authority — the same reason tool
+       * definitions are pinned. It was falling through to the default branch
+       * and reaching the agent with no rule consulted and no decision
+       * recorded. It is now evaluated as a read of the named prompt.
+       */
+      case "prompts/get":
+        return this.#handlePromptsGet(message);
+
+      /*
+       * `completion/complete` asks an upstream to complete an argument value.
+       * Low-risk content, but still upstream-influenced text entering the
+       * agent loop — evaluated, then forwarded on permit.
+       */
+      case "completion/complete":
+        return this.#handleCompletion(message);
+
+      /*
+       * `logging/setLevel` carries no content and executes nothing: it asks
+       * upstreams to adjust log verbosity. Forwarded as benign plumbing, and
+       * reported on the protocol sink (not the decision sink) so it can never
+       * be mistaken for a policy decision.
+       */
+      case "logging/setLevel":
+        this.onDecision({ kind: "protocol", method: message.method, action: "forward" });
+        this.log(`forward ${message.method} (benign protocol plumbing)`);
         return this.#forwardToAny(message);
+
+      default:
+        // Default-deny applies to methods, not just tools. Anything the
+        // gateway does not model is evaluated as `mcp.<method>` against the
+        // active policy and forwarded only on an explicit permit — previously
+        // this branch forwarded to the first live upstream unevaluated and
+        // unrecorded, which made every unmodeled method a full bypass.
+        return this.#rejectUnknown(message);
     }
+  }
+
+  /* Allowlisted lifecycle notifications: session plumbing with no content and
+   * no upstream side effect beyond what the protocol requires. Reported on
+   * the protocol sink, never the decision sink. */
+  static #BENIGN_NOTIFICATIONS = new Set([
+    "notifications/initialized",
+    "notifications/cancelled",
+    "notifications/progress",
+  ]);
+
+  async #handleNotification(message) {
+    if (Gateway.#BENIGN_NOTIFICATIONS.has(message.method)) {
+      this.onDecision({ kind: "protocol", method: message.method, action: "forward" });
+      for (const up of this.upstreams.values()) up.send(message);
+      return;
+    }
+    const { decision } = await this.guard.authorize({
+      tool: `mcp.notification.${message.method}`,
+      server: null,
+      args: message.params ?? {},
+      ...callerIdentity(message.params),
+    });
+    this.stats = this.guard.stats;
+    if (decision.verdict !== "permit") {
+      this.log(`DROP notification ${message.method} (${decision.rule ?? "default-deny"})`);
+      return;
+    }
+    this.onDecision({ kind: "protocol", method: message.method, action: "forward", decision: decision.decisionId });
+    for (const up of this.upstreams.values()) up.send(message);
+  }
+
+  async #handlePromptsGet(message) {
+    const fullName = message.params?.name ?? "";
+    const sep = fullName.indexOf(NS);
+    const server = sep === -1 ? null : fullName.slice(0, sep);
+    const promptName = sep === -1 ? fullName : fullName.slice(sep + NS.length);
+    const up = server ? this.upstreams.get(server) : null;
+
+    if (!up || !up.alive) {
+      this.write(
+        errorResponse(
+          message.id,
+          ERROR_CODE.UPSTREAM_UNAVAILABLE,
+          `No registered server for prompt "${fullName}".`,
+        ),
+      );
+      return;
+    }
+
+    const { agent: callerAgent, delegation } = callerIdentity(message.params);
+    const { decision } = await this.guard.authorize({
+      tool: "prompts.get",
+      server,
+      args: { name: promptName, ...(message.params?.arguments ?? {}) },
+      agent: callerAgent,
+      delegation,
+    });
+    this.stats = this.guard.stats;
+
+    if (decision.verdict === "deny") {
+      this.log(`DENY prompts/get ${promptName} (${decision.rule})`);
+      this.write(deniedToolResult(message.id, decision));
+      return;
+    }
+    if (decision.verdict === "hold") {
+      decision.approvalId = `apr_${String(decision.decisionId).slice(4, 12)}`;
+      this.log(`HOLD prompts/get ${promptName} (${decision.rule})`);
+      this.write(heldToolResult(message.id, decision));
+      return;
+    }
+
+    const gatewayId = `gw-${this.nextGatewayId++}`;
+    this.inflight.set(gatewayId, { clientId: message.id, upstream: up, decision });
+    up.send({
+      jsonrpc: "2.0",
+      id: gatewayId,
+      method: "prompts/get",
+      params: { ...message.params, name: promptName },
+    });
+  }
+
+  async #handleCompletion(message) {
+    const ref = message.params?.ref ?? {};
+    const target = typeof ref.name === "string" && ref.name
+      ? ref.name
+      : typeof ref.uri === "string" ? ref.uri : "";
+    const { agent: callerAgent, delegation } = callerIdentity(message.params);
+    const { decision } = await this.guard.authorize({
+      tool: "completion.complete",
+      server: null,
+      args: { ref: target, argument: message.params?.argument ?? {} },
+      agent: callerAgent,
+      delegation,
+    });
+    this.stats = this.guard.stats;
+
+    if (decision.verdict === "deny") {
+      this.log(`DENY completion/complete ${target} (${decision.rule})`);
+      this.write(deniedToolResult(message.id, decision));
+      return;
+    }
+    if (decision.verdict === "hold") {
+      decision.approvalId = `apr_${String(decision.decisionId).slice(4, 12)}`;
+      this.log(`HOLD completion/complete ${target} (${decision.rule})`);
+      this.write(heldToolResult(message.id, decision));
+      return;
+    }
+    return this.#forwardToAny(message);
+  }
+
+  async #rejectUnknown(message) {
+    const method = message.method ?? "(missing)";
+    const { agent: callerAgent, delegation } = callerIdentity(message.params);
+    const { decision } = await this.guard.authorize({
+      tool: `mcp.${method}`,
+      server: null,
+      args: message.params ?? {},
+      agent: callerAgent,
+      delegation,
+    });
+    this.stats = this.guard.stats;
+
+    if (decision.verdict !== "permit") {
+      this.log(`DENY ${method} (${decision.rule ?? "default-deny"}) — unmodeled method, no explicit permit`);
+      this.write(deniedToolResult(message.id, decision));
+      return;
+    }
+    this.log(`PERMIT ${method} (${decision.rule}) — explicitly permitted unmodeled method`);
+    return this.#forwardToAny(message);
   }
 
   #handleInitialize(message) {
@@ -675,8 +853,11 @@ export class Gateway {
     }
 
     // Unsubscribing is always permitted: refusing to let an agent stop
-    // receiving something is not a security property.
+    // receiving something is not a security property. Reported on the
+    // protocol sink so the forward is visible without fabricating a policy
+    // decision that never happened.
     if (message.method === "resources/unsubscribe") {
+      this.onDecision({ kind: "protocol", method: message.method, action: "forward" });
       const gatewayId = `gw-${this.nextGatewayId++}`;
       this.inflight.set(gatewayId, { clientId: message.id, upstream: up });
       up.send({ jsonrpc: "2.0", id: gatewayId, method: message.method, params: { ...message.params, uri } });

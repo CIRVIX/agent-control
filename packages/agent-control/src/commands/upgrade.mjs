@@ -23,12 +23,20 @@
 import { TIERS, TIER_ORDER, dailyAllowance, nextTier, tierFor } from "../core/entitlements.mjs";
 import { Meter, readLicence } from "../core/meter.mjs";
 
-/** Published prices. Mirrors the pricing page; pinned by the test suite. */
+/**
+ * Published prices. Mirrors the pricing page; pinned by the test suite.
+ *
+ * These read 29 / 79 / 149 for over a year while the pricing page said
+ * 79 / 199 / 349, and the suite pinned the wrong numbers — so the drift was
+ * not merely undetected, it was enforced. Corrected together with the Lite
+ * tier so the public package quotes the same ladder as billing.
+ */
 export const PRICING = {
   free: { monthly: 0, annual: 0 },
-  starter: { monthly: 29, annual: 290 },
-  pro: { monthly: 79, annual: 790 },
-  team: { monthly: 149, annual: 1490, perSeat: true, minSeats: 3 },
+  lite: { monthly: 29, annual: 290 },
+  starter: { monthly: 79, annual: 790 },
+  pro: { monthly: 199, annual: 1990 },
+  team: { monthly: 349, annual: 3490, perSeat: true, minSeats: 3 },
   enterprise: { monthly: null, annual: null, custom: true },
 };
 

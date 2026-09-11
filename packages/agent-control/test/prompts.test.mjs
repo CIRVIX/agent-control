@@ -18,7 +18,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TIERS, dailyAllowance } from "../src/core/entitlements.mjs";
+import { TIERS, dailyAllowance, nextTier } from "../src/core/entitlements.mjs";
 import {
   quotaReached,
   agentLimitReached,
@@ -29,7 +29,7 @@ import {
 import { Meter } from "../src/core/meter.mjs";
 
 const scratch = () => mkdtempSync(join(tmpdir(), "cirvix-prompt-"));
-const ALL = ["free", "starter", "pro", "team"];
+const ALL = ["free", "lite", "starter", "pro", "team"];
 
 describe("what every prompt must do", () => {
   const samples = ALL.flatMap((tier) => [
@@ -75,15 +75,17 @@ describe("the numbers come from the table, never from the copy", () => {
   });
 
   test("the quota prompt quotes the NEXT tier's real allowance", () => {
+    const next = nextTier("free");
     const out = quotaReached({ tier: "free" });
-    assert.match(out, new RegExp(TIERS.starter.decisionsPerDay.toLocaleString("en-US")));
-    assert.match(out, /cirvix upgrade starter/);
+    assert.match(out, new RegExp(TIERS[next].decisionsPerDay.toLocaleString("en-US")));
+    assert.match(out, new RegExp(`cirvix upgrade ${next}`));
   });
 
   test("the agent prompt quotes the real agent counts", () => {
+    const next = nextTier("free");
     const out = agentLimitReached({ tier: "free" });
     assert.ok(out.includes(`${TIERS.free.agents} concurrent agent`), out);
-    assert.ok(out.includes(`unlocks ${TIERS.starter.agents}`), out);
+    assert.ok(out.includes(`unlocks ${TIERS[next].agents}`), out);
   });
 
   test("the secret prompt quotes the real TTL and only fires where handles are ephemeral", () => {

@@ -50,6 +50,7 @@ describe("the tier table matches what is sold", () => {
   /** Straight from the pricing page. If this table changes, so must that one. */
   const PUBLISHED = [
     ["free", 100, 1, 12, false],
+    ["lite", 500, 2, 24 * 3, false],
     ["starter", 1_500, 2, 24 * 7, true],
     ["pro", 12_000, 8, 24 * 90, true],
     ["team", 40_000, null, 24 * 365, true],
@@ -71,10 +72,11 @@ describe("the tier table matches what is sold", () => {
   }
 
   test("prices match the pricing page", () => {
-    assert.deepEqual(PRICING.starter, { monthly: 29, annual: 290 });
-    assert.deepEqual(PRICING.pro, { monthly: 79, annual: 790 });
-    assert.equal(PRICING.team.monthly, 149);
-    assert.equal(PRICING.team.annual, 1490);
+    assert.deepEqual(PRICING.lite, { monthly: 29, annual: 290 });
+    assert.deepEqual(PRICING.starter, { monthly: 79, annual: 790 });
+    assert.deepEqual(PRICING.pro, { monthly: 199, annual: 1990 });
+    assert.equal(PRICING.team.monthly, 349);
+    assert.equal(PRICING.team.annual, 3490);
     assert.equal(PRICING.team.perSeat, true);
     assert.equal(PRICING.team.minSeats, 3);
     assert.equal(PRICING.free.monthly, 0);
@@ -83,7 +85,7 @@ describe("the tier table matches what is sold", () => {
 
   test("every paid tier is ten months for twelve", () => {
     // The "2 months free" claim on the page is arithmetic, so it can be checked.
-    for (const id of ["starter", "pro", "team"]) {
+    for (const id of ["lite", "starter", "pro", "team"]) {
       assert.equal(PRICING[id].annual, PRICING[id].monthly * 10, `${id} annual`);
     }
   });
@@ -126,11 +128,12 @@ describe("daily allowance", () => {
   });
 
   test("tier ordering", () => {
-    assert.deepEqual(TIER_ORDER, ["free", "starter", "pro", "team", "enterprise"]);
+    assert.deepEqual(TIER_ORDER, ["free", "lite", "starter", "pro", "team", "enterprise"]);
     assert.equal(tierAtLeast("pro", "starter"), true);
     assert.equal(tierAtLeast("starter", "pro"), false);
     assert.equal(tierAtLeast("pro", "pro"), true);
-    assert.equal(nextTier("free"), "starter");
+    assert.equal(nextTier("free"), "lite");
+    assert.equal(nextTier("lite"), "starter");
     assert.equal(nextTier("enterprise"), "enterprise", "nothing above the top");
   });
 });
@@ -154,6 +157,13 @@ describe("the quota gate", () => {
     assert.equal(r.remaining, 0);
     assert.match(r.reason, /100/);
     assert.match(r.reason, /00:00 UTC/, "the reset time is the actionable part");
+    assert.match(r.remediation, /cirvix upgrade lite/);
+  });
+
+  test("lite exhaustion points at starter, preserving the ladder", () => {
+    const r = checkQuota({ tier: "lite" }, 500);
+    assert.equal(r.gate, GATE.QUOTA_EXHAUSTED);
+    assert.equal(r.allowance, 500);
     assert.match(r.remediation, /cirvix upgrade starter/);
   });
 
@@ -458,22 +468,31 @@ describe("cirvix upgrade", () => {
 
   test("suggests the next tier by default", async () => {
     const { out } = await run([], scratch());
-    assert.match(out, /Free → Starter/);
+    assert.match(out, /Free → Lite/);
     assert.match(out, /\$29\/mo/);
   });
 
-  test("only lists differences that are real", async () => {
-    const { out } = await run([], scratch());
+  test("starter is the step after lite, with secrets and 3x the volume", async () => {
+    const { out } = await run(["starter"], scratch());
     assert.match(out, /1,500 decisions\/day/);
     assert.match(out, /Secret handles survive a restart/);
-    // Starter does not add approvals; claiming it would be a false promise.
+    assert.match(out, /\$79\/mo/);
+  });
+
+  test("only lists differences that are real", async () => {
+    // Default next tier is Lite: volume and retention only, no capabilities.
+    const { out } = await run([], scratch());
+    assert.match(out, /500 decisions\/day — up from 100/);
+    assert.match(out, /2 concurrent agents — up from 1/);
+    // Lite adds no paid capabilities; claiming any would be a false promise.
+    assert.doesNotMatch(out, /Secret handles survive a restart/);
     assert.doesNotMatch(out, /approvals/i);
   });
 
   test("prices Team for the seats actually asked for", async () => {
     const { out } = await run(["team", "--seats", "5"], scratch());
-    assert.match(out, /\$149\/seat\/mo/);
-    assert.match(out, /\$745\/mo for 5 seats/);
+    assert.match(out, /\$349\/seat\/mo/);
+    assert.match(out, /\$1,745\/mo for 5 seats/);
   });
 
   test("enterprise carries no invented number", async () => {
@@ -509,7 +528,8 @@ describe("cirvix upgrade", () => {
   });
 
   test("price lines are honest about the cycle", () => {
-    assert.match(priceLine("starter"), /\$29\/mo · \$290\/yr/);
-    assert.match(priceLine("team", 3), /\$447\/mo for 3 seats/);
+    assert.match(priceLine("lite"), /\$29\/mo · \$290\/yr/);
+    assert.match(priceLine("starter"), /\$79\/mo · \$790\/yr/);
+    assert.match(priceLine("team", 3), /\$1,047\/mo for 3 seats/);
   });
 });

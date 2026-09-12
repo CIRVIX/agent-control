@@ -26,6 +26,8 @@ export const red = wrap(31, 39);
 export const green = wrap(32, 39);
 export const amber = wrap(33, 39);
 export const blue = wrap(34, 39);
+/** Motion/informational accent only — verdicts stay green/red/amber. */
+export const cyan = wrap(36, 39);
 
 /** "1 server" / "3 servers" — avoids the "1 servers" that reads as a bug. */
 export function plural(n, noun, pluralForm) {

@@ -39,6 +39,16 @@ import { STARTER_POLICY } from "./init.mjs";
 import { scan as scanInjection } from "../core/sanitize.mjs";
 import { DECISION } from "../core/decisions.mjs";
 import { bold, dim, green, red, amber, blue } from "../core/format.mjs";
+import {
+  allowContinuation,
+  approvalHold,
+  blockSignature,
+  boot,
+  cinematicEnabled,
+  evaluation,
+  requestTravel,
+  topology,
+} from "../core/cinematic.mjs";
 
 /** The poisoned content. This is what an agent finds on a page it was told to read. */
 const POISONED_PAGE = `# Deploying to production
@@ -160,7 +170,18 @@ export async function demo({
   });
   const steps = [];
 
+  // Human TTY only: piped output, CI, --json and pace 0 are untouched.
+  const animated = cinematicEnabled({ json, pace });
+
   if (!json) {
+    await boot({
+      write,
+      rulesCount: ruleSet.length,
+      auditOpen: chain !== null,
+      agent: "claude-code",
+      pace,
+      animated,
+    });
     write("\n");
     write(`  ${bold("CIRVIX")} ${dim("· live demo · every decision below is computed, not scripted")}\n`);
     write("\n");
@@ -198,6 +219,21 @@ export async function demo({
       await sleep(pace);
     }
 
+    // The packet travels first; the verdict below is the real measured one.
+    // Animation is presentation — latency_ms is timed inside submit().
+    if (animated) {
+      const args = step.call.arguments ?? {};
+      const target = args.path ?? args.url ?? args.command ?? args.name ?? "";
+      await requestTravel({
+        write,
+        agent: "claude-code",
+        tool: step.call.tool,
+        target: String(target ?? ""),
+        pace,
+        animated,
+      });
+    }
+
     const { event } = await pipeline.submit(step.call);
     steps.push({ narration: step.narration ?? null, event });
 
@@ -208,11 +244,26 @@ export async function demo({
       await sleep(pace / 2);
     }
 
-    if (step.intercept && event.decision === DECISION.DENY) {
-      write(interceptBox(event));
+    // Show the engine working on narrated beats, interceptions, and
+    // anything that is not a plain allow — the allow path included.
+    if (animated && (step.intercept || event.decision !== DECISION.ALLOW || step.narration)) {
+      await evaluation({ write, event, pace, animated });
+    }
+
+    if (event.decision === DECISION.DENY) {
+      if (animated) {
+        await blockSignature({ write, event, pace, animated });
+      } else {
+        write(interceptBox(event));
+      }
       write("\n");
     } else {
       write(oneLine(event));
+      if (event.decision === DECISION.REQUIRE_APPROVAL) {
+        approvalHold({ write, event });
+      } else if (animated && (event.decision === DECISION.ALLOW || event.decision === DECISION.SANITIZE)) {
+        allowContinuation({ write, event });
+      }
     }
     await sleep(pace);
   }
@@ -245,6 +296,10 @@ export async function demo({
   write(`${red(bold(String(denied)))} ${dim("blocked")}   `);
   write(`${amber(bold(String(held)))} ${dim("held for a human")}   `);
   write(`${dim(`P99 ${p.p99}ms over ${p.samples} decisions`)}\n\n`);
+  if (animated) {
+    topology({ write, states: { cirvix: "active" } });
+    write("\n");
+  }
   write(`  ${bold("Cirvix did not disable the agent. It made the dangerous half controllable.")}\n\n`);
   write(`  ${dim("Every decision above is in the audit chain:")}  ${blue("cirvix logs")}\n`);
   write(`  ${dim("Ask why any one of them happened:")}          ${blue("cirvix logs --tree <request-id>")}\n\n`);

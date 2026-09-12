@@ -33,6 +33,7 @@ import { upgrade as upgradeCmd } from "../src/commands/upgrade.mjs";
 import { AgentRegistry, Meter, readLicence } from "../src/core/meter.mjs";
 import { commercialNotices } from "../src/core/notices.mjs";
 import { demo as demoCmd } from "../src/commands/demo.mjs";
+import { animatedStartup, bannerAllowed, cinematicEnabled, requestTravel, runPhase, startupBanner, ttyProgress } from "../src/core/cinematic.mjs";
 
 /**
  * Read from the manifest, never written down twice.
@@ -284,12 +285,31 @@ async function main() {
     return 0;
   }
 
+  // The invocation moment: a human starting cirvix watches the runtime come
+  // online (~1s). Reduced-motion, pipes, --json, gateway (protocol stdout)
+  // and demo (own boot) fall back to the static banner or silence.
+  const jsonOut = Boolean(flags.json);
+  const animPace = flags.fast ? 0 : 700;
+  if (
+    command !== "demo" &&
+    command !== "gateway" &&
+    bannerAllowed({ command, json: jsonOut }) &&
+    cinematicEnabled({ json: jsonOut, pace: animPace })
+  ) {
+    await animatedStartup({ pace: animPace, version: VERSION, animated: true });
+  } else {
+    const banner = startupBanner({ command, json: jsonOut, version: VERSION });
+    if (banner) process.stdout.write(banner);
+  }
+
   switch (command) {
     case "scan": {
+      const animateScan = cinematicEnabled({ json: Boolean(flags.json), pace: flags.fast ? 0 : 450 });
       const { result, output } = await scan({
         cwd,
         json: Boolean(flags.json),
         deep: Boolean(flags.deep),
+        phase: (label, fn, detail) => runPhase(label, fn, { enabled: animateScan, detail }),
       });
 
       // Written before the exit-code gate below, so a failing scan still
@@ -518,6 +538,17 @@ async function main() {
       if (flags.json) {
         process.stdout.write(JSON.stringify(decision, null, 2) + "\n");
       } else {
+        // Human TTY only: the request visibly travels through the boundary
+        // before the real verdict prints. Piped/CI output is untouched.
+        if (cinematicEnabled({ json: false, pace: flags.fast ? 0 : 350 })) {
+          await requestTravel({
+            agent: String(flags.agent ?? "local"),
+            tool: action,
+            target: resource,
+            pace: 350,
+            animated: true,
+          });
+        }
         const tone =
           decision.verdict === "permit" ? green : decision.verdict === "hold" ? amber : red;
         process.stdout.write(
@@ -711,6 +742,19 @@ async function main() {
             process.stderr.write(red("  explain needs --tool <name>.\n"));
             return 2;
           }
+          const callArgs = callArgsFrom(flags);
+          // Human TTY only: watch the request travel through the boundary
+          // before the real verdict prints. Piped/CI output is untouched.
+          if (cinematicEnabled({ json: Boolean(flags.json), pace: flags.fast ? 0 : 350 })) {
+            const target = callArgs.path ?? callArgs.url ?? callArgs.command ?? "";
+            await requestTravel({
+              agent: String(flags.agent ?? "local"),
+              tool,
+              target: String(target ?? ""),
+              pace: 350,
+              animated: true,
+            });
+          }
           const { output, code } = await policyCmd.explain({
             path: loaded.path,
             // The starter set has no file, so explain against the rules directly.
@@ -718,7 +762,7 @@ async function main() {
             cwd,
             json: Boolean(flags.json),
             tool,
-            args: callArgsFrom(flags),
+            args: callArgs,
             agent: String(flags.agent ?? "local"),
             environment: String(flags.env ?? "local"),
           });
@@ -762,11 +806,13 @@ async function main() {
 
     case "status": {
       const rules = await loadRules(flags.policy, cwd);
+      const animateStatus = cinematicEnabled({ json: Boolean(flags.json), pace: flags.fast ? 0 : 450 });
       const { output } = await statusCmd({
         cwd,
         rules,
         json: Boolean(flags.json),
         stateDir: stateDirFor(flags, cwd),
+        progress: ttyProgress({ enabled: animateStatus }),
       });
       process.stdout.write(output + "\n");
       return 0;

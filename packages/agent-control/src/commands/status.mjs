@@ -75,14 +75,18 @@ async function probeRuntime(stateDir) {
  * @param {Array} [opts.rules]      already-loaded rule set
  * @param {boolean} [opts.json]
  */
-export async function status({ cwd = process.cwd(), rules = [], json = false, stateDir: dir } = {}) {
+export async function status({ cwd = process.cwd(), rules = [], json = false, stateDir: dir, progress = null } = {}) {
   const stateDir = dir ?? join(cwd, ".cirvix");
+  const probe = (progress ?? { start: () => ({ succeed() {}, fail() {} }) }).start(
+    "probing control socket + reading history",
+  );
 
   const [runtimes, runtime, records] = await Promise.all([
     detectRuntimes(),
     probeRuntime(stateDir),
     readJournal(join(stateDir, "audit.jsonl")),
   ]);
+  probe.succeed(runtime.running ? "runtime responding" : "no runtime — status from disk");
 
   const servers = collectMcpServers(runtimes);
   const protectedRuntimes = runtimes.filter((r) => r.governed);

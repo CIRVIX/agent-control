@@ -17,11 +17,11 @@ import {
 } from "../core/detect.mjs";
 import { bold, dim, green, red, amber, blue, plural } from "../core/format.mjs";
 
-export async function scan({ cwd = process.cwd(), json = false, deep = false } = {}) {
-  const runtimes = await detectRuntimes();
-  const frameworks = await detectFrameworks(cwd);
-  const servers = collectMcpServers(runtimes);
-  const credentials = await detectCredentials(cwd);
+export async function scan({ cwd = process.cwd(), json = false, deep = false, phase = async (_label, fn) => fn() } = {}) {
+  const runtimes = await phase("detecting agent runtimes", () => detectRuntimes(), (r) => `${r.length} found`);
+  const frameworks = await phase("detecting agent frameworks", () => detectFrameworks(cwd), (f) => (f.length ? `${f.length} found` : "none"));
+  const servers = await phase("collecting MCP servers", async () => collectMcpServers(runtimes), (s) => (s.length ? `${s.length} found` : "none"));
+  const credentials = await phase("scanning for exposed credentials", () => detectCredentials(cwd), (c) => (c.length ? `${c.length} found` : "none"));
 
   const findings = buildFindings({ runtimes, frameworks, servers, credentials });
   const counts = tally(findings);

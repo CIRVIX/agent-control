@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.3 — 2026-09-13
+
+Audit-chain signing (repudiation gap closed), honest verification, CLI gates:
+
+- `AuditChain` signs every record's hash with Ed25519 when a signer is
+  configured; `verify()` checks signatures and reports
+  `signed/signaturesVerified/unsigned` — a forged chain with every hash
+  recomputed now fails on the signature, where before it verified clean.
+- `cirvix audit verify --keygen <dir>` writes a private key plus a
+  publishable public key; `--verify-key <pem>` checks signatures; a gateway
+  booting in a state directory holding `audit-key.pem` signs from the next
+  append. Publish the public key and a full-disk compromise cannot backdate
+  authority.
+- Unsigned chains are unchanged, byte-identical; adoption mid-chain is
+  supported (the honest limit — attribution to the key, not a third party —
+  is stated in the source, same contract as proof.mjs).
+- `cirvix redteam --policy <file>` attacks the caller's own rule set (was
+  silently the built-in benchmark rules); `--min-integrity <pct>` fails the
+  run below the floor — a CI gate that cannot be silently disabled (NaN and
+  out-of-range are loud refusals).
+
+No breaking changes. Repro: `npm test`, `npm run verify:adversarial`,
+`npm run verify:license`.
+
 ## v0.1.2 — 2026-09-11
 
 Enforcement boundary (gateway is now authoritative for routed traffic):

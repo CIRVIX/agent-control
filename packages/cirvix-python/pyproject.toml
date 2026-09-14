@@ -27,8 +27,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://www.cirvix.com"
-Documentation = "https://www.cirvix.com/sdks.html"
+Homepage = "https://cirvix.com/"
+Documentation = "https://cirvix.com/sdks.html"
 
 [tool.hatch.build.targets.wheel]
 packages = ["cirvix"]

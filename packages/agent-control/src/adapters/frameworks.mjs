@@ -103,7 +103,7 @@ export class FrameworksAdapter extends BaseAgentAdapter {
       currentServers: {},
       upstreams: {},
       plan: null,
-      snippet: `import { guard } from "@cirvix/agent-control/guard";\nconst governedTools = guard.wrap(myTools, { agent: "worker" });`,
+      snippet: `import { guard } from "@cirvix_ai/agent-control/guard";\nconst governedTools = guard.wrap(myTools, { agent: "worker" });`,
       reason: "Agent frameworks in application code are instrumented via guard.wrap(tools, { agent, rules }).",
     };
   }

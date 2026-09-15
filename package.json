@@ -1,6 +1,6 @@
 {
   "name": "cirvix",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Runtime policy enforcement for AI agent tool calls. Apache 2.0 engine, zero runtime dependencies.",
   "license": "Apache-2.0",

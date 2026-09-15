@@ -24,10 +24,18 @@
  * The limit notice fires on the transition into the limit, not on every
  * refused call after it — a process that keeps calling past its quota would
  * otherwise print the same paragraph hundreds of times. The nudge is once per
- * day and `Meter` owns that flag.
+ * day and `Meter` owns that flag. The domain-signal prompt is once per
+ * process, on the first egress-class denial: the story it offers to share is
+ * worth telling once, not every time an agent reaches for a credential file.
  */
 
-import { agentLimitReached, quotaReached, softNudge } from "./prompts.mjs";
+import {
+  agentLimitReached,
+  domainSignal,
+  quotaReached,
+  softNudge,
+  EGRESS_DENY_RULES,
+} from "./prompts.mjs";
 
 /**
  * Builds the per-decision notice hook.
@@ -43,6 +51,7 @@ export function commercialNotices({ licence, meter, write }) {
 
   let saidQuota = false;
   let saidAgents = false;
+  let saidDomain = false;
 
   return function notice(decision) {
     if (!decision) return;
@@ -53,6 +62,17 @@ export function commercialNotices({ licence, meter, write }) {
     // and getting it wrong here fails silently — which is the failure mode
     // this whole file exists to correct.
     const rule = decision.rule ?? decision.policy;
+
+    if (decision.verdict === "deny" && EGRESS_DENY_RULES.has(rule)) {
+      if (saidDomain) return;
+      saidDomain = true;
+      const text = domainSignal(licence, {
+        rule,
+        destination: decision.destination ?? "",
+      });
+      if (text) write(`\n${text}\n`);
+      return;
+    }
 
     if (rule === "quota-exhausted") {
       if (saidQuota) return;

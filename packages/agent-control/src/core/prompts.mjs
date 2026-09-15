@@ -110,6 +110,57 @@ export function ephemeralSecret(licence = {}, handle = "sec_handle_…") {
 
 /** The fraction of the allowance that triggers the one soft nudge. */
 export const NUDGE_AT = 0.7;
+/**
+ * The egress-class DENY rules that carry a third-party destination.
+ *
+ * A denial in this class is the moment someone learns what Cirvix is for:
+ * an agent they run tried to send something somewhere, and the engine said
+ * no. That is also the story worth telling other people — which is why the
+ * prompt that fires on it offers to share it, and why the share offer lives
+ * here rather than in a place it would fire on every mundane refusal.
+ */
+export const EGRESS_DENY_RULES = new Set([
+  "deny-external-egress-after-secret",
+  "deny-unlisted-egress",
+  "deny-credential-files",
+  "deny-dotenv-production",
+]);
+
+export const SHARE_URL = "https://www.cirvix.com/share.html";
+
+/**
+ * The domain-signal prompt, or null.
+ *
+ * FIRES ON THE EGRESS-CLASS DENIALS ONLY, AND AT MOST ONCE PER PROCESS. A
+ * blocked credential file or a blocked exfiltration-shaped egress is the
+ * strongest evidence that the person behind the terminal is running agents
+ * against real infrastructure — exactly who Team exists for. The prompt
+ * states what was seen (a rule name and a destination, never a secret value),
+ * names the tier's own limits as proof it read them, and offers one next
+ * step. It does not fire on every refusal: a denial of a workspace write is
+ * housekeeping, not a signal.
+ *
+ * Like everything else in this file it decides nothing: the caller owns when,
+ * `notices.mjs` owns once-per-process, and this only shapes the sentence.
+ */
+export function domainSignal(licence = {}, { rule = "", destination = "" } = {}) {
+  const tier = tierFor(licence.tier);
+  if (!EGRESS_DENY_RULES.has(rule)) return null;
+
+  const seen = [rule, destination ? `→ ${destination}` : ""].filter(Boolean).join(" ");
+
+  return [
+    `[cirvix] Blocked an outbound action on ${tier.name} (${seen}).`,
+    tier.agents !== null
+      ? `${tier.name} watches 1 agent; Team (${n(TIERS.team.seatsIncluded)}+ seats) shares one policy across all of them.`
+      : "",
+    "Seen something worth showing? Share the blocked action — no secrets, your call:",
+    `→ ${SHARE_URL}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 
 /**
  * The single mid-day nudge, or null.

@@ -45,7 +45,8 @@ function run(command, args, cwd, expected = 0) {
 const temp = await mkdtemp(join(tmpdir(), "cirvix-package-"));
 try {
   const packJson = JSON.parse(await run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], packageDir));
-  const tarball = packJson[0]?.filename;
+  const packEntry = Array.isArray(packJson) ? packJson[0] : packJson[Object.keys(packJson)[0]] ?? Object.values(packJson)[0];
+  const tarball = packEntry?.filename;
   if (!tarball) throw new Error("npm pack returned no tarball");
   const archive = join(temp, tarball);
   const manifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));

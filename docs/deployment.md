@@ -4,7 +4,7 @@ Everything here has been run. Commands are copy-pasteable in order.
 
 **What you are deploying:** a control plane that distributes policy, receives
 decisions, and backs the console — plus an endpoint daemon and MCP gateway
-(`@cirvix/agent-control`) on each machine running agents.
+(`@cirvix_ai/agent-control`) on each machine running agents.
 
 ```
   developer laptop / server / CI          your infrastructure
@@ -139,7 +139,7 @@ the control plane" while `curl` works, the origin does not match what was built.
 ## 5. Govern a machine
 
 ```bash
-npx @cirvix/agent-control scan          # read-only, no account
+npx @cirvix_ai/agent-control scan          # read-only, no account
 
 cirvix gateway \
   --servers ~/.cursor/mcp.json \

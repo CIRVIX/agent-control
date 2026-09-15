@@ -217,14 +217,14 @@ machine-readable error code is shown, character-filtered.
 ### Dependencies
 
 The two shipped packages have **zero** runtime npm dependencies —
-`@cirvix/control-plane` depends only on `@cirvix/agent-control`, which depends
+`@cirvix/control-plane` depends only on `@cirvix_ai/agent-control`, which depends
 on nothing. The audit surface is the website's build-time tree.
 
 ---
 
 ## Review, 2026-08-13 — cross-boundary identity
 
-Scoped to `@cirvix/agent-control`, and specifically to what happens when
+Scoped to `@cirvix_ai/agent-control`, and specifically to what happens when
 authority crosses a **transport** as well as an agent:
 
 ```

@@ -24,7 +24,7 @@ guard.wrap(tools, { agent: "x", policyDir: "./policies" });
 
 // right
 import { readFile } from "node:fs/promises";
-import { parseRules } from "@cirvix/agent-control";
+import { parseRules } from "@cirvix_ai/agent-control";
 const rules = parseRules(JSON.parse(await readFile("cirvix.policy.json", "utf8")));
 guard.wrap(tools, { agent: "x", rules });
 ```

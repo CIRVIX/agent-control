@@ -19,6 +19,7 @@ import { Gateway } from "../src/core/gateway.mjs";
 import { MessageFramer, serialize } from "../src/core/jsonrpc.mjs";
 import { scan } from "../src/commands/scan.mjs";
 import { bold, dim, green, red, amber, blue, plural } from "../src/core/format.mjs";
+import { SHARE_URL } from "../src/core/prompts.mjs";
 
 import { MODE, DECISION } from "../src/core/decisions.mjs";
 import { Pipeline } from "../src/core/pipeline.mjs";
@@ -527,6 +528,9 @@ async function main() {
             `  ${dim("rule")}    ${decision.rule ?? dim("— no rule matched (default deny)")}`,
             `  ${dim("reason")}  ${decision.reason}`,
             decision.remediation ? `  ${dim("fix")}     ${blue(decision.remediation)}` : "",
+            decision.verdict === "deny" && !flags.json
+              ? `  ${dim("share")}  ${dim(`was this a good catch? ${SHARE_URL} — redact first, your call`)}`
+              : "",
             decision.approvers?.length
               ? `  ${dim("waits")}   ${decision.approvers.join(", ")}`
               : "",

@@ -38,7 +38,7 @@ and [MCP](./guides/mcp.md).
 
 Three components, deployable independently:
 
-- **`@cirvix/agent-control`** — a zero-dependency Node package containing the
+- **`@cirvix_ai/agent-control`** — a zero-dependency Node package containing the
   policy engine, the MCP gateway, the endpoint daemon, the audit chain, the
   secret client, the scanner, and the `cirvix` CLI.
 - **`cirvix`** (PyPI) — a zero-dependency Python package containing a second
@@ -82,7 +82,7 @@ basis for every claim here:
 | Node — `control-plane` | 322 | `cd packages/control-plane && npm test` |
 | Python | 108 | `cd packages/cirvix-python && python -m unittest discover -s tests` |
 | Shared conformance | 106 cases | included in the above |
-| Adversarial verification | 11,629 attack cases, 405 suite tests | `cd packages/agent-control && npm run verify:adversarial` |
+| Adversarial verification | 11,629 attack cases, 417 suite tests | `cd packages/agent-control && npm run verify:adversarial` |
 
 The adversarial run is the one to look at. It reports zero-tolerance counters —
 policy bypasses, secret leaks, approval bypasses, audit inconsistencies,

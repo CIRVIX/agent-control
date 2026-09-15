@@ -25,7 +25,7 @@ import {
   CirvixHeld,
   STARTER_RULES,
   parseRules,
-} from "@cirvix/agent-control";
+} from "@cirvix_ai/agent-control";
 
 /*
  * The policy a real pr-triage agent would have: it is allowed to do its job.

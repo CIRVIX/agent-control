@@ -12,3 +12,28 @@ build/
 *.pem
 *.key
 .DS_Store
+
+# Test and e2e artifacts. `.e2e/` is the SQLite database a live control-plane
+# test boots against; it is regenerated on every run and has no business in a
+# public repository. It was untracked and unignored here, which meant one
+# `git add -A` away from publishing a database file.
+.e2e/
+**/.e2e/
+
+# The control plane is proprietary and lives in the private monorepo. This
+# repository is a curated extraction of the engine only. Nothing under this
+# path may ever be committed here.
+packages/control-plane/
+
+# Local Python environments and packaging output. `ci.yml` builds the Python
+# sdist and wheel into `.artifacts/python`, and `packages/cirvix-python` has a
+# test suite the README tells you to run, so a venv and a stray build directory
+# are each one `git add -A` away from the public repository.
+.artifacts/
+.venv/
+venv/
+
+# Transient logs. The private tree keeps a `dev.log`; nothing of that shape
+# belongs in a public repository.
+*.log
+

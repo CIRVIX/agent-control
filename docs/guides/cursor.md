@@ -6,7 +6,7 @@ boundary, so a server added later is still evaluated when routed through it.
 ## Install → init
 
 ```bash
-npm install -g @cirvix/agent-control
+npm install -g @cirvix_ai/agent-control
 mkdir my-agent-policy && cd my-agent-policy
 cirvix init
 cirvix policy check

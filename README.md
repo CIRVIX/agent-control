@@ -1,9 +1,24 @@
 # Cirvix AgentControl
 
+[![npm](https://img.shields.io/npm/v/%40cirvix_ai%2Fagent-control?style=flat-square)](https://www.npmjs.com/package/@cirvix_ai/agent-control)
+[![PyPI](https://img.shields.io/pypi/v/cirvix?style=flat-square)](https://pypi.org/project/cirvix/)
+[![licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue?style=flat-square)](./LICENSE)
+[![deps 0](https://img.shields.io/badge/deps-0-success?style=flat-square)](#)
+[![corpus 11,629](https://img.shields.io/badge/corpus-11%2C629%20cases-informational?style=flat-square)](#)
+
 **Every tool call an AI agent makes is evaluated against policy before it runs,
 and the decision is recorded either way.**
 
+> The agent can reason. Cirvix decides whether it gets to act.
+
 Apache 2.0. Zero runtime dependencies. Node and Python.
+
+![cirvix scan — 30-sec demo](docs/assets/scan-30s.gif)
+
+*Read-only. Nothing sent anywhere. This is a real scan — 8 seconds.*
+
+Try the interactive decision pipeline: [cirvix.com/sandbox.html](https://cirvix.com/sandbox.html) · Reproduce the attack: `node docs/examples/pr-title-injection.mjs`
+
 
 ```bash
 npx @cirvix_ai/agent-control scan

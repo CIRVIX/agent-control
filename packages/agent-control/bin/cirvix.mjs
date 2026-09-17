@@ -66,6 +66,8 @@ const HELP = `
     cirvix <command> [options]
 
   ${bold("GETTING STARTED")}
+    console               Interactive runtime authorization (the product UI)
+    onboard               10-second guided first run
     init                  Detect agents and MCP servers, write a policy, start protecting
     init --apply          Safely wire detected agents with pre-integration backup
     init --dry-run        Preview agent configuration changes without modifying files
@@ -80,6 +82,7 @@ const HELP = `
     prove <decision-id>   Sign a decision into a portable proof artifact
     verify <proof>        Check a proof offline: signature, chain, integrity
     scan                  Inventory what is ungoverned on this machine
+    theme                 Change appearance (dark|light|midnight|high-contrast|monochrome)
 
   ${bold("ENFORCEMENT")}
     gateway               Run the MCP gateway — intercepts and enforces
@@ -1069,6 +1072,55 @@ async function main() {
         stateDir: stateDirFor(flags, cwd),
       });
       process.stdout.write(output + "\n");
+      return 0;
+    }
+
+    /* ------------------------------------------------------------ console */
+    case "console": {
+      if (typeof flags.theme === "string") {
+        const { setTheme } = await import("../src/core/theme.mjs");
+        try {
+          setTheme(flags.theme);
+          process.env.CIRVIX_THEME = flags.theme;
+        } catch (err) {
+          process.stderr.write(red(`  ${err.message}\n`));
+          return 2;
+        }
+      }
+      const rules = await loadRules(flags.policy, cwd);
+      const { consoleCmd } = await import("../src/commands/console.mjs");
+      await consoleCmd({
+        cwd,
+        rules,
+        mode: flags.mode === "audit" ? MODE.AUDIT : MODE.ENFORCE,
+        evalText: typeof flags.eval === "string" ? flags.eval : null,
+        once: Boolean(flags.once ?? flags.eval),
+      });
+      return 0;
+    }
+
+    case "theme": {
+      const { setTheme, THEME_NAMES } = await import("../src/core/theme.mjs");
+      const name = sub ?? flags.set;
+      if (!name) {
+        process.stdout.write(
+          `\n  Current theme: ${process.env.CIRVIX_THEME ?? "dark"}\n  Available: ${THEME_NAMES.join(", ")}\n\n  Usage: cirvix theme <name>\n  Persist it: CIRVIX_THEME=${THEME_NAMES[0]} cirvix console\n\n`,
+        );
+        return 0;
+      }
+      try {
+        setTheme(name);
+        process.stdout.write(`\n  Theme → ${name} (set CIRVIX_THEME=${name} to keep it)\n\n`);
+        return 0;
+      } catch (err) {
+        process.stderr.write(red(`  ${err.message}\n`));
+        return 2;
+      }
+    }
+
+    case "onboard": {
+      const { onboard } = await import("../src/commands/onboard.mjs");
+      await onboard({ cwd, pace: flags.fast ? 0 : 400 });
       return 0;
     }
 

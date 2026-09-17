@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cirvix"
-version = "0.2.0"
+version = "0.2.1"
 description = "Runtime governance for AI agents — evaluate every tool call against policy before it executes."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -37,4 +37,10 @@ packages = ["cirvix"]
 # The conformance fixture ships with the source distribution so the suite that
 # proves this engine agrees with the Node one can be run by anyone auditing it,
 # not only by us.
-include = ["cirvix", "tests", "README.md", "../conformance/policy-conformance.json"]
+include = ["cirvix", "tests", "README.md", "hatch_build.py"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../conformance/policy-conformance.json" = "tests/fixtures/policy-conformance.json"
+
+[tool.hatch.build.targets.sdist.hooks.custom]
+path = "hatch_build.py"

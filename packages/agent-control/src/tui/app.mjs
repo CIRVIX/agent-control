@@ -22,103 +22,113 @@
  * `echo "…" | cirvix console`.
  */
 
-import { Pipeline } from "../core/pipeline.mjs";
+import { readFileSync } from "node:fs";
+import readline from "node:readline";
 import { decideNow } from "../core/journal.mjs";
-import { EventBus, createEvent, initialState, reduce, attachPipeline } from "../core/events.mjs";
-import { header, policyCard, toolCard, blockedCard, heldCard, explainDecision, userRow, cirvixRow, spinnerFrame } from "./cards.mjs";
+import { EventBus, createEvent, initialState, reduce } from "../core/events.mjs";
+import { header, policyCard, blockedCard, heldCard, explainDecision, userRow, cirvixRow } from "./cards.mjs";
 import { statusBar } from "./status.mjs";
 import { collapsedFeed } from "./activity.mjs";
 import { paletteBox } from "./palette.mjs";
 import { setTheme, THEME_NAMES, bold, dim, style } from "../core/theme.mjs";
-import { startComposer } from "./composer.mjs";
+import { startComposer, KEY_HINT } from "./composer.mjs";
 
-const VERSION = "0.1.0";
+const VERSION = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+).version;
 
 export class ConsoleApp {
-  constructor({ cwd = process.cwd(), rules = [], mode = "enforce", agent = "local", write = (s) => process.stdout.write(s) } = {}) {
+  constructor({ cwd = process.cwd(), rules = [], policyFilePresent = null, mode = "enforce", agent = "local", input = process.stdin, output = process.stdout, write = (s) => output.write(s) } = {}) {
     this.cwd = cwd;
     this.rules = rules;
+    this.policyFilePresent = policyFilePresent;
     this.agent = agent;
     this.write = write;
+    this.input = input;
+    this.output = output;
+    this.transient = { palette: null };
+    this.composer = null;
+    this.redrawScheduled = false;
     this.bus = new EventBus();
     this.state = initialState();
     this.state.status.mode = mode;
     this.expanded = false;
     this.overlay = null; // 'palette' | null
+    this.entries = [];
+    this.errors = [];
 
-    this.pipeline = new Pipeline({ rules, cwd, agent, mode, onEvent: () => {} });
-    attachPipeline(this.pipeline, this.bus);
     this.bus.onAny((e) => {
       this.state = reduce(this.state, e);
+      this.entries.push({ ...e });
     });
     this.bus.emit(createEvent.sessionStarted({ agent }));
   }
 
   /* ---------------------------------------------------------- rendering */
 
+  renderOptions() {
+    return { width: this.output.columns ?? 80, preview: true };
+  }
+
   renderHeader() {
-    return header({ mode: this.state.status.mode === "audit" ? "AUDIT MODE" : "PROTECTED", version: VERSION });
+    return header({ mode: "PREVIEW", version: VERSION, ...this.renderOptions() });
   }
 
   renderStatus() {
-    return statusBar(this.state, { version: VERSION });
+    return statusBar(this.state, { version: VERSION, ...this.renderOptions() });
   }
 
   renderActivity() {
-    return collapsedFeed(this.state.activity, { expanded: this.expanded });
+    return collapsedFeed(this.state.activity, { expanded: this.expanded, ...this.renderOptions() });
   }
 
   /** Full re-render of the transcript region (used on clear / toggle). */
   renderTranscript() {
     const out = [this.renderHeader(), ``];
-    for (const m of this.state.messages) {
-      out.push(m.role === "user" ? userRow(m.text) : cirvixRow(m.text), ``);
+    for (const entry of this.entries) {
+      if (entry.type === "USER_MESSAGE") out.push(userRow(entry.text, this.renderOptions()), ``);
+      else if (entry.type === "POLICY_DECISION") out.push(this.renderDecision(entry.raw), ``);
+      else if (entry.type === "response") out.push(cirvixRow(entry.text, this.renderOptions()), ``);
+      else if (entry.type === "RUNTIME_ERROR") out.push(cirvixRow(`Error: ${entry.message}`, this.renderOptions()), ``);
     }
-    if (this.narrow()) {
-      out.push(`▼ Activity`, this.renderActivity(), ``);
-    }
-    out.push(this.renderStatus());
+    out.push(`Activity (preview)`, this.renderActivity(), ``, this.renderStatus());
+    if (this.transient.palette) out.push(paletteBox(this.transient.palette.query, { ...this.renderOptions(), selected: this.transient.palette.selected }));
     return out.join("\n");
   }
 
   narrow() {
-    return (process.stdout.columns ?? 80) < 90;
+    return (this.output.columns ?? 80) < 90;
   }
 
   /* ------------------------------------------------------------- events */
 
-  /** Animated "evaluating" line. Resolves with a stop() that clears it. */
-  animate(label) {
-    if (!process.stdout.isTTY) {
-      this.write(`${dim("◐")} ${label}...\n`);
-      return () => {};
-    }
-    let i = 0;
-    const timer = setInterval(() => {
-      process.stdout.write(`\r${dim(spinnerFrame(i++))} ${dim(label)}...`);
-    }, 90);
-    return () => {
-      clearInterval(timer);
-      process.stdout.write("\r" + " ".repeat(label.length + 6) + "\r");
-    };
+  requestRedraw() {
+    if (this.redrawScheduled || !this.composer) return;
+    this.redrawScheduled = true;
+    queueMicrotask(() => {
+      this.redrawScheduled = false;
+      if (!this.composer) return;
+      readline.cursorTo(this.output, 0, 0);
+      readline.clearScreenDown(this.output);
+      this.write(this.renderTranscript() + "\n" + KEY_HINT + "\n");
+      this.composer.refresh();
+    });
   }
 
   /** Evaluate one free-text line through policy and render the product UI. */
   async runOnce(input) {
     const text = String(input ?? "").trim();
     if (!text) return "";
-    if (text.startsWith("/")) return this.runSlash(text);
+    if (text.startsWith("/")) {
+      const result = await this.runSlash(text);
+      if (result && result !== "quit" && text !== "/clear") this.entries.push({ type: "response", text: result });
+      return result;
+    }
 
     this.bus.emit(createEvent.userMessage(text));
-    const lines = [userRow(text), ``, cirvixRow(`${dim("◐ Evaluating authorization...")}`)];
-    const stop = this.animate("Evaluating policy");
+    const lines = [userRow(text, this.renderOptions()), ``, cirvixRow("Authorization preview", this.renderOptions())];
     const parsed = parseRequest(text, { agent: this.agent });
-    let decision;
-    try {
-      ({ decision } = decideNow({ ...parsed, rules: this.rules, cwd: this.cwd }));
-    } finally {
-      stop();
-    }
+    const { decision } = decideNow({ ...parsed, rules: this.rules, cwd: this.cwd });
     const event = {
       decision_id: `dec_local`,
       request_id: `req_local`,
@@ -129,10 +139,11 @@ export class ConsoleApp {
       decision: decision.decision ?? "deny",
       policy: decision.rule,
       reason: decision.reason,
+      remediation: decision.remediation,
+      explicit: decision.explicit,
       latency_ms: 0,
     };
     this.bus.emit(createEvent.policyDecision(event));
-    if (event.decision === "require_approval") this.bus.emit(createEvent.approvalRequested({ tool: event.tool, resource: event.resource }));
     this.bus.emit(createEvent.agentMessage(`Decision: ${event.decision}`));
 
     return [...lines, ``, this.renderDecision(event, parsed), ``, this.renderStatus()].join("\n");
@@ -142,10 +153,10 @@ export class ConsoleApp {
     const d = event.decision;
     if (d === "deny") {
       const target = event.resource || parsed.args?.command || "";
-      return [blockedCard({ tool: event.tool, target, policy: event.policy, reason: event.reason }), ``, explainDecision(event)].join("\n");
+      return [blockedCard({ tool: event.tool, target, policy: event.policy, reason: event.reason }, this.renderOptions()), ``, explainDecision(event, { policyFilePresent: this.policyFilePresent, ...this.renderOptions() })].join("\n");
     }
     if (d === "require_approval") {
-      return heldCard({ tool: event.tool, target: event.resource, approvers: event.approvers ?? [], reason: event.reason });
+      return heldCard({ tool: event.tool, target: event.resource, approvers: event.approvers ?? [], reason: event.reason }, this.renderOptions());
     }
     return [
       policyCard({
@@ -155,8 +166,9 @@ export class ConsoleApp {
         identity: `agent:${event.agent}`,
         reason: event.reason,
         latencyMs: event.latency_ms,
-      }),
-      ...(d === "sanitize" ? [``, explainDecision(event)] : []),
+        decision: d,
+      }, this.renderOptions()),
+      ...(d === "sanitize" ? [``, explainDecision(event, this.renderOptions())] : []),
     ].join("\n");
   }
 
@@ -171,8 +183,11 @@ export class ConsoleApp {
       case "/quit":
       case "/exit":
         return "quit";
-      case "/clear":
+      case "/clear": {
+        this.entries = [];
+        this.entries.push({ type: "response", text: "Preview cleared; decisions and activity above are gone from view only." });
         return "\x1b[2J\x1b[0;0H" + this.renderTranscript();
+      }
       case "/expand":
         this.expanded = true;
         return this.renderActivity();
@@ -221,35 +236,42 @@ export class ConsoleApp {
   /* ---------------------------------------------------------- interactive */
 
   async start() {
-    this.write(this.renderTranscript() + "\n\n");
-    this.write(dim("Type / for commands. Ctrl+K palette · Ctrl+O activity · Esc close.\n"));
-    const rl = startComposer({
-      prompt: "> ",
-      onLine: async (line) => {
-        if (!line) return;
-        if (line === "/quit" || line === "/exit") return "quit";
+    if (!this.input.isTTY || !this.output.isTTY) throw new Error("Interactive console requires input and output TTYs.");
+    this.write(this.renderTranscript() + "\n" + KEY_HINT + "\n");
+    const resize = () => this.requestRedraw();
+    this.composer = startComposer({
+      input: this.input,
+      output: this.output,
+      transient: this.transient,
+      onLine: async (line, { signal }) => {
+        if (signal.aborted) return;
         const out = await this.runOnce(line);
+        if (signal.aborted) return;
         if (out === "quit") return "quit";
-        this.write("\n" + out + "\n\n");
-        if (!this.narrow()) {
-          // Side-pane refresh on wide terminals: reprint compact activity.
-          this.write(dim("─ Activity ─") + "\n" + this.renderActivity() + "\n\n" + this.renderStatus() + "\n");
-        }
+        this.requestRedraw();
+      },
+      onChange: () => {
+        if (this.transient.palette || this.overlay) this.requestRedraw();
+        this.overlay = this.transient.palette ? "palette" : null;
+      },
+      onError: (error) => {
+        this.bus.emit(createEvent.runtimeError(error?.message ?? String(error)));
+        this.requestRedraw();
       },
       onKey: (key) => {
-        if (key === "toggle-activity") {
-          this.expanded = !this.expanded;
-          this.write("\n" + this.renderActivity() + "\n");
-        } else if (key === "palette") {
-          this.write("\n" + paletteBox("/") + "\n");
-        } else if (key === "policies") {
-          this.write("\n" + `Policies: ${this.rules.length} loaded` + "\n");
-        }
+        if (key === "toggle-activity") this.expanded = !this.expanded;
+        else if (key === "policies") this.entries.push({ type: "response", text: `Policies: ${this.rules.length} loaded` });
+        else if (key === "audit") this.entries.push({ type: "response", text: "Preview activity only; no audit records are written." });
+        else if (key === "session") this.entries.push({ type: "response", text: `Preview session: ${this.state.status.requests} evaluations` });
+        this.requestRedraw();
       },
     });
-    await new Promise((resolve) => rl.on("close", resolve));
+    this.output.on("resize", resize);
+    await new Promise((resolve) => this.composer.once("close", resolve));
+    this.output.removeListener("resize", resize);
+    this.composer = null;
     this.bus.emit(createEvent.sessionEnded({}));
-    this.write("\n" + dim("Session ended. Audit chain intact.") + "\n");
+    this.write("\n" + dim("Preview session ended. No actions run or audit records written.") + "\n");
   }
 }
 
@@ -265,6 +287,10 @@ export class ConsoleApp {
  */
 export function parseRequest(text, { agent = "local" } = {}) {
   const t = String(text);
+  const exact = t.trim().replace(/^[Rr][Uu][Nn][ \t]+/, "");
+  if (/^(?:git[ \t]+status|(["'`])git[ \t]+status\1)$/.test(exact)) {
+    return { tool: "git_status", server: null, args: {}, agent };
+  }
   const url = t.match(/https?:\/\/[^\s"'`]+/i)?.[0];
   const credPath = t.match(/(~\/\.aws\/credentials|\.env[^\s]*|\.aws[^\s]*)/i)?.[0];
   const cmd = t.match(/`([^`]+)`/)?.[1] ?? t.match(/run\s+"([^"]+)"/i)?.[1];

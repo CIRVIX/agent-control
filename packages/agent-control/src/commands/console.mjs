@@ -12,38 +12,34 @@
 
 import { ConsoleApp } from "../tui/app.mjs";
 
-export async function consoleCmd({ cwd = process.cwd(), rules = [], mode = "enforce", evalText = null, once = false, write = (s) => process.stdout.write(s) } = {}) {
-  const app = new ConsoleApp({ cwd, rules, mode, write });
-
-  if (evalText) {
-    const out = await app.runOnce(evalText);
-    if (out && out !== "quit") write(out + "\n");
-    return { app, output: out };
-  }
-
-  if (once || !process.stdin.isTTY) {
-    // Piped: evaluate each line, print cards, exit. Never start readline
-    // on a non-TTY — it would hang waiting for a terminal that is not there.
-    const chunks = await readStdin();
-    const lines = chunks.split("\n").map((l) => l.trim()).filter(Boolean);
-    let output = "";
-    for (const line of lines) {
-      const out = await app.runOnce(line);
-      if (out && out !== "quit") {
-        write(out + "\n");
-        output += out + "\n";
-      }
-    }
-    if (!lines.length) {
-      const help = app.renderTranscript();
-      write(help + "\n");
-      return { app, output: help };
-    }
-    return { app, output };
-  }
-
+export async function consoleCmd({ cwd = process.cwd(), rules = [], policyFilePresent = null, mode = "enforce", evalText = null, once = false, write = (s) => process.stdout.write(s) } = {}) {
+  const app = new ConsoleApp({ cwd, rules, policyFilePresent, mode, write });
+  if (evalText || once || !process.stdin.isTTY) return oneShot(app, evalText, write);
+  if (!process.stdout.isTTY) throw new Error("cirvix console requires a TTY on stdout for the interactive preview.");
   await app.start();
   return { app, output: "" };
+}
+
+async function oneShot(app, evalText, write) {
+  const run = async (text) => {
+    const out = await app.runOnce(text);
+    if (out && out !== "quit") {
+      write(out + "\n");
+      return out + "\n";
+    }
+    return "";
+  };
+  if (evalText) return { app, output: await run(evalText) };
+  const chunks = await readStdin();
+  const lines = chunks.split("\n").map((l) => l.trim()).filter(Boolean);
+  let output = "";
+  for (const line of lines) output += await run(line);
+  if (!lines.length) {
+    const help = app.renderTranscript();
+    write(help + "\n");
+    return { app, output: help };
+  }
+  return { app, output };
 }
 
 function readStdin() {

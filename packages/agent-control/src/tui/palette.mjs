@@ -34,15 +34,20 @@ export function filterCommands(input) {
   );
 }
 
-export function paletteBox(input) {
+export function paletteBox(input, { width = process.stdout.columns ?? 80, selected = 0 } = {}) {
   const matches = filterCommands(input);
-  const lines = [
-    `╭─ Commands ─${"─".repeat(24)}╮`,
-    `│ > ${(input ?? "").padEnd(32)} │`,
-    `│${" ".repeat(36)}│`,
-    ...matches.slice(0, 8).map((c) => `│  ${(c.name.padEnd(14))} ${c.hint.slice(0, 18).padEnd(18)} │`),
-    ...(matches.length === 0 ? [`│  (no match)${" ".repeat(24)} │`] : []),
-    `╰${"─".repeat(36)}╯`,
+  const size = Math.max(1, Math.min(76, Math.floor(width)));
+  const inner = Math.max(0, size - 4);
+  const fit = (text, limit = inner) => Array.from(String(text).replace(/[\x00-\x1f\x7f]/g, " ")).slice(0, limit).join("");
+  const row = (text) => size < 4 ? fit(text, size) : `│ ${fit(text).padEnd(inner)} │`;
+  const start = Math.max(0, selected - 7);
+  const rows = [
+    "Commands",
+    `> ${input ?? ""}`,
+    ...matches.slice(start, start + 8).map((c, i) => `${start + i === selected ? ">" : " "} ${c.name.padEnd(16)} ${c.hint}`),
+    ...(matches.length ? [] : ["(no match)"]),
+    "↑↓ select · Enter run · Esc close",
   ];
-  return lines.join("\n");
+  if (size < 4) return rows.map(row).join("\n");
+  return [`╭${"─".repeat(size - 2)}╮`, ...rows.map(row), `╰${"─".repeat(size - 2)}╯`].join("\n");
 }

@@ -1087,11 +1087,12 @@ async function main() {
           return 2;
         }
       }
-      const rules = await loadRules(flags.policy, cwd);
+      const loaded = await loadPolicy(flags.policy, cwd);
       const { consoleCmd } = await import("../src/commands/console.mjs");
       await consoleCmd({
         cwd,
-        rules,
+        rules: loaded.rules,
+        policyFilePresent: Boolean(loaded.path),
         mode: flags.mode === "audit" ? MODE.AUDIT : MODE.ENFORCE,
         evalText: typeof flags.eval === "string" ? flags.eval : null,
         once: Boolean(flags.once ?? flags.eval),

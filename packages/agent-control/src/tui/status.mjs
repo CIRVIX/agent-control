@@ -8,9 +8,21 @@
 
 import { style, bold, dim } from "../core/theme.mjs";
 import { latencyStats } from "../core/events.mjs";
+import { clipText, wrapText, width as terminalWidth } from "./cards.mjs";
 
-export function statusBar(state, { version = "", width = process.stdout.columns ?? 80 } = {}) {
+export function statusBar(state, { version = "", width = process.stdout.columns ?? 80, preview = false } = {}) {
+  width = terminalWidth(width);
   const s = state.status;
+  if (preview) {
+    return dim("─".repeat(Math.max(0, width - 1))) + "\n" + wrapText([
+      bold("AUTHORIZATION PREVIEW") + (version ? dim(`  v${version}`) : ""),
+      `${s.requests} evaluations · Policy: ${s.policyName ?? "strict"}`,
+      `Would allow: ${s.allowed} · Would sanitize: ${s.sanitized}`,
+      `Would block: ${s.blocked} · Would require approval: ${s.held}`,
+      dim("No action executed by preview."),
+      dim("No audit records written. Latency not measured."),
+    ].join("\n"), width);
+  }
   const lat = latencyStats(s.latencies);
   const mode = s.mode === "audit"
     ? `${style("○", "warning")} ${style("AUDIT", "warning")}`
@@ -19,7 +31,7 @@ export function statusBar(state, { version = "", width = process.stdout.columns 
   if (width < 72) {
     // Compact: [● PROTECTED] 148 req  21 blocked  P95 18ms
     return dim("─".repeat(Math.max(0, width - 1))) + "\n" +
-      `${mode}  ${s.requests} req  ${blockedPart(s)}  ${dim(`P95 ${lat.p95}ms`)}`;
+      clipText(`${mode}  ${s.requests} req  ${blockedPart(s)}  ${dim(`P95 ${lat.p95}ms`)}`, width);
   }
 
   const line1 = dim("─".repeat(Math.max(0, width - 1)));
@@ -28,7 +40,7 @@ export function statusBar(state, { version = "", width = process.stdout.columns 
     `${dim("Allow:")} ${style(String(s.allowed), "allow")}   ${dim("│")}  ${dim("Sanitized:")} ${s.sanitized}   ${dim("│")}  ${dim("Blocked:")} ${blockedCount(s)}`,
     `${dim(`P50 ${lat.p50}ms`)}   ${dim("│")}  ${dim(`P95 ${lat.p95}ms`)}   ${dim("│")}  ${dim("Audit")} ${style("✓", "allow")}${version ? dim(`  │  v${version}`) : ""}`,
   ];
-  return line1 + "\n" + cells.join("\n");
+  return line1 + "\n" + wrapText(cells.join("\n"), width);
 }
 
 function blockedCount(s) {

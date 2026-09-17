@@ -96,6 +96,7 @@ export const TIERS = {
     shareableReplay: false,
     policyPacks: 2,
     sharedPolicy: false,
+    customPolicies: false,
   },
   starter: {
     id: "starter",
@@ -112,6 +113,7 @@ export const TIERS = {
     shareableReplay: "local",
     policyPacks: 6,
     sharedPolicy: false,
+    customPolicies: true,
   },
   pro: {
     id: "pro",
@@ -128,6 +130,7 @@ export const TIERS = {
     shareableReplay: "full",
     policyPacks: null,
     sharedPolicy: "basic",
+    customPolicies: true,
   },
   team: {
     id: "team",
@@ -144,6 +147,7 @@ export const TIERS = {
     shareableReplay: "team",
     policyPacks: null,
     sharedPolicy: "full",
+    customPolicies: true,
   },
   enterprise: {
     id: "enterprise",
@@ -163,6 +167,7 @@ export const TIERS = {
     shareableReplay: "team",
     policyPacks: null,
     sharedPolicy: "full",
+    customPolicies: true,
   },
 };
 
@@ -269,6 +274,7 @@ export function nextTier(id) {
 export function can(licence, feature) {
   const tier = tierFor(licence?.tier);
   switch (feature) {
+    case "customPolicies": return tier.customPolicies === true;
     case "persistentSecrets": return tier.persistentSecrets === true;
     case "approvals": return tier.approvals === true;
     case "attestation": return tier.attestation === true;

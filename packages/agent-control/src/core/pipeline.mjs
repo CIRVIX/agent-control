@@ -61,6 +61,11 @@ import { approvalFingerprint } from "./approvals.mjs";
 import { applyDelegation } from "./delegation.mjs";
 import { redact as redactSecrets, scan as scanSecrets } from "./secret-detect.mjs";
 import { stripInjection } from "./sanitize.mjs";
+import { SessionTaint, assessTrifecta, applyTrifecta } from "./trifecta.mjs";
+import { evaluateIntent } from "./intent.mjs";
+import { SessionTracker } from "./session.mjs";
+import { BehavioralBaseline } from "./baseline.mjs";
+import { globalKillSwitch } from "./kill-switch.mjs";
 
 /** Wall-clock for one stage, in fractional milliseconds. */
 function timer() {
@@ -105,6 +110,10 @@ export class Pipeline {
     agents = null,
     riskFloor = "high",
     runId = null,
+    killSwitch = null,
+    sessionTracker = null,
+    baseline = null,
+    intent = null,
     onEvent = () => {},
     log = () => {},
   } = {}) {
@@ -123,11 +132,21 @@ export class Pipeline {
     this.agents = agents;
     this.riskFloor = riskFloor;
     this.runId = runId;
+    this.killSwitch = killSwitch;
+    this.sessionTracker = sessionTracker;
+    this.baseline = baseline;
+    this.intent = intent;
     this.onEvent = onEvent;
     this.log = log;
 
-    /** Set once this session reads secret-shaped material. */
-    this.touchedSecret = false;
+    /**
+     * Sequence state for this session.
+     *
+     * Was a bare `touchedSecret` boolean. It is now the full three-leg record
+     * the Lethal Trifecta needs, with `touchedSecret` kept as an accessor so
+     * the gateway and every existing caller are unaffected.
+     */
+    this.taint = new SessionTaint();
 
     this.stats = {
       calls: 0,
@@ -141,6 +160,19 @@ export class Pipeline {
       latencyTotal: 0,
       latencies: [],
     };
+  }
+
+  /**
+   * Kept so the gateway, the guard and any embedder that set or read this
+   * boolean keep working unchanged. Leg A of the trifecta and the old
+   * "this session touched a secret" flag are the same fact.
+   */
+  get touchedSecret() {
+    return this.taint.touchedSecret;
+  }
+
+  set touchedSecret(value) {
+    this.taint.touchedSecret = value;
   }
 
   /**
@@ -225,6 +257,18 @@ export class Pipeline {
       if (context) call.delegation = context;
     }
 
+    /*
+     * Sequence-aware enforcement, after policy and after mode.
+     *
+     * It runs last among the tightening steps so that a call policy already
+     * refused keeps policy's reason — the first refusal is the actionable one.
+     * `applyTrifecta` is a no-op unless all three legs are satisfied, so the
+     * common path costs one object comparison.
+     */
+    const trifecta = assessTrifecta(call, this.taint, { response: this.trifectaResponse });
+    decision = applyTrifecta(decision, trifecta);
+    call.trifecta = { complete: trifecta.complete, satisfied: trifecta.satisfied, imminent: trifecta.imminent };
+
     decision = applyMode(decision, this.mode);
     decision.decision_id = `dec_${id.slice(4)}`;
 
@@ -242,6 +286,86 @@ export class Pipeline {
       agents: this.agents,
       agent: call.agent,
     });
+
+    /* ------------------------------------------- kill switch evaluation ---- */
+    const ksEngine = this.killSwitch ?? globalKillSwitch;
+    const killCheck = ksEngine.evaluate({
+      agentId: call.agent,
+      tool: call.tool,
+      resource: call.resource,
+      session: this.runId,
+      environment: this.environment,
+    });
+    if (killCheck.killed) {
+      decision = {
+        decision: killCheck.decision ?? DECISION.QUARANTINE,
+        verdict: killCheck.decision ?? DECISION.QUARANTINE,
+        rule: "emergency-kill-switch",
+        reason: killCheck.reason,
+        risk: "critical",
+      };
+      call.killSwitchTriggered = true;
+    }
+
+    /* -------------------------------------------------- intent firewall ---- */
+    const declaredIntent = ctx.intent ?? call.intent ?? this.intent;
+    if (declaredIntent && decision.decision === DECISION.ALLOW) {
+      const intentEval = evaluateIntent({
+        intent: declaredIntent,
+        action: call.action,
+        resource: call.resource,
+        tool: call.tool,
+        context: ctx,
+      });
+      call.intentEvaluation = intentEval;
+      if (!intentEval.aligned) {
+        decision = {
+          decision: DECISION.DENY,
+          verdict: "deny",
+          rule: "intent-firewall-boundary",
+          reason: intentEval.reason,
+          risk: "high",
+        };
+      }
+    }
+
+    /* ------------------------------------- stateful session security ---- */
+    if (this.sessionTracker) {
+      const chainCheck = this.sessionTracker.recordStep({
+        action: call.action,
+        resource: call.resource,
+        tool: call.tool,
+        decision: decision.decision,
+        risk: call.risk,
+      });
+      call.sessionRisk = chainCheck.risk;
+      if (chainCheck.suspicious && decision.decision === DECISION.ALLOW) {
+        decision = {
+          decision: DECISION.DENY,
+          verdict: "deny",
+          rule: "stateful-exfiltration-chain",
+          reason: chainCheck.reason,
+          risk: "critical",
+        };
+      }
+    }
+
+    /* --------------------------------------- behavioral baseline check ---- */
+    if (this.baseline) {
+      const deviation = this.baseline.scoreDeviation({
+        tool: call.tool,
+        action: call.action,
+        resource: call.resource,
+      });
+      call.anomalyScore = deviation.anomalyScore;
+      if (deviation.isDeviation && decision.decision === DECISION.ALLOW) {
+        decision = escalateForRisk(
+          decision,
+          { level: "HIGH", signals: ["behavioral_anomaly"], reason: deviation.reasons[0] },
+          { floor: this.riskFloor }
+        );
+      }
+    }
 
     stages.policy = t();
 
@@ -487,15 +611,29 @@ export class Pipeline {
     stages.audit = t();
     event.stages.audit = Number(stages.audit.toFixed(3));
 
+    /* Attach only when there is something to record. A key present with an
+       undefined value and an absent key are identical to JSON.stringify but
+       not to the canonicaliser the audit chain hashes with, and setting one
+       unconditionally broke chain verification for every call. */
+    if (trifecta.complete) {
+      event.trifecta = { complete: true, legs: trifecta.legs, response: trifecta.decision };
+    } else if (trifecta.satisfied.length) {
+      event.trifecta = { complete: false, satisfied: trifecta.satisfied, imminent: trifecta.imminent };
+    }
+
     this.#count(decision, latency);
     this.onEvent({ kind: "decision", ...event });
 
     // Any permitted read of secret-shaped material taints the session. A
     // brokered substitution deliberately does not: the agent never held the
     // material, which is the entire point of a handle.
-    if (isForwarded(decision.decision) && /secret|credential|token|password|\.env/i.test(call.resource)) {
-      this.touchedSecret = true;
-    }
+    this.taint.observeCall(call, isForwarded(decision.decision));
+
+    /* The result comes back through scrubResult(), which the transport calls
+       with only the decision — it has no call in hand. Holding the last call
+       here is what lets leg B attribute an ingested page to the fetch that
+       asked for it, instead of recording an anonymous taint. */
+    this.lastCall = call;
 
     return { event, call, decision, arguments: outgoing };
   }
@@ -513,7 +651,7 @@ export class Pipeline {
    *      default would corrupt legitimate content that merely discusses
    *      prompts.
    */
-  scrubResult(payload, decision = {}) {
+  scrubResult(payload, decision = {}, call = null) {
     let out = payload;
     const findings = [];
 
@@ -541,6 +679,10 @@ export class Pipeline {
       out = stripped.value;
       for (const f of stripped.findings) findings.push({ ...f, kind: "injection" });
     }
+
+    /* Leg B. The injection findings were already computed here and then
+       discarded; remembering them is what makes the trifecta detectable. */
+    this.taint.observeResult(call ?? decision.call ?? this.lastCall ?? {}, findings);
 
     if (findings.length) {
       this.stats.leaks += findings.filter((f) => f.kind === "credential").length;

@@ -29,7 +29,9 @@ import { classify } from "./risk.mjs";
 import { classifyTool, extractCommand, publicToolName } from "./normalize.mjs";
 import { scan as scanSecrets } from "./secret-detect.mjs";
 import { applyDelegation } from "./delegation.mjs";
+import { assessAuthority, applyAuthority } from "./authority.mjs";
 import { applyEntitlements } from "./entitlement-gate.mjs";
+import { SessionTaint, assessTrifecta, applyTrifecta } from "./trifecta.mjs";
 
 /**
  * A refusal the agent can read and plan around.
@@ -176,6 +178,12 @@ export class Guard {
     runId = null,
     riskFloor = "high",
     delegation = null,
+    /* Mission-scoped authority. Absent by default, and absent means INERT —
+       not "deny everything". Authority is subtractive: it can take away what
+       policy allows and can never add to it, so a Guard built without a
+       mission behaves exactly as before. See core/authority.mjs. */
+    missions = null,
+    mission = null,
     /* Commercial enforcement. All three default to absent, so a Guard built
        without them behaves exactly as before — which is what keeps the SDK's
        library callers and the shared conformance fixture working unchanged.
@@ -192,6 +200,9 @@ export class Guard {
     this.secrets = secrets;
     /** DelegationBroker, when agent-to-agent delegation is in use. */
     this.delegation = delegation;
+    /** MissionRegistry, and/or a single mission this Guard always acts under. */
+    this.missions = missions;
+    this.mission = mission;
     this.licence = licence;
     this.meter = meter;
     this.agents = agents;
@@ -200,10 +211,18 @@ export class Guard {
     this.runId = runId;
     /** Risk level at or above which an unnamed call is escalated to approval. */
     this.riskFloor = riskFloor;
-    /** Set once this session reads secret-shaped material. */
-    this.touchedSecret = false;
+    /** Sequence taint tracking for Lethal Trifecta. */
+    this.taint = new SessionTaint();
     this.stats = { calls: 0, permitted: 0, denied: 0, held: 0, leaks: 0, latencyTotal: 0 };
     this.nextId = 1;
+  }
+
+  get touchedSecret() {
+    return this.taint.touchedSecret;
+  }
+
+  set touchedSecret(value) {
+    this.taint.touchedSecret = value;
   }
 
   /**
@@ -215,7 +234,8 @@ export class Guard {
    *
    * @returns {Promise<{decision:object, record:object, args:any}>}
    */
-  async authorize({ tool, server = null, args = {}, delegation = null, agent = null }) {
+  async authorize({ tool, server = null, args, arguments: callArguments, delegation = null, agent = null }) {
+    args = args ?? callArguments ?? {};
     const action = actionForTool(server, tool);
     const resource = resourceForCall(args);
     // A caller may act as a specific agent per call — a gateway serving several
@@ -271,7 +291,7 @@ export class Guard {
       secrets: { detected: scanned.length },
     };
 
-    const decision = evaluate(
+    let decision = evaluate(
       { agent: caller, action, resource, context },
       this.rules,
       { cwd: this.cwd },
@@ -307,6 +327,88 @@ export class Guard {
       action,
       resource: decision.resource ?? resource,
     });
+
+    /*
+     * AUTHORITY RUNS HERE, ON THE SAME PATH AS EVERYTHING ELSE.
+     *
+     * Mission, capability, constraint and expiry are evaluated for every call,
+     * not only for the ones a caller remembers to check. Placing it beside
+     * delegation is deliberate: both answer "does this principal actually hold
+     * the authority it is exercising", both can only narrow, and both have to
+     * be on the ONE path that `guard.wrap()`, the MCP gateway and the socket
+     * all go through. The three bypasses documented above this line were all
+     * the same mistake — a check that lived on one surface and not the others —
+     * and an authority layer with that shape would be worse than none, because
+     * the console would show a boundary the runtime was not enforcing.
+     *
+     * `assessAuthority` is pure. It reads the mission and reports; it does not
+     * spend the budget. Usage is recorded below and only for a call that was
+     * actually permitted, so a refused call cannot exhaust the allowance it was
+     * refused under — otherwise every constraint doubles as a denial-of-service
+     * against the agent's real work.
+     */
+    const activeMission =
+      this.mission ?? (this.missions ? this.missions.forAgent(caller) : null);
+
+    const authorityAssessment = assessAuthority(
+      {
+        agent: caller,
+        action,
+        resource: decision.resource ?? resource,
+        tool,
+        server,
+        destination: destinationFor(decision.resource ?? resource, args),
+        environment: this.environment,
+        costUsd: args?.costUsd ?? 0,
+        delegating: Boolean(delegation),
+      },
+      activeMission,
+    );
+
+    const authorityContext = applyAuthority(decision, authorityAssessment);
+
+    /*
+     * An attempt is recorded whether or not authority is what refused it.
+     *
+     * A call policy already denied is still an agent reaching outside its
+     * boundary, and if only authority-attributed refusals were counted an
+     * agent could probe the boundary for free by choosing actions policy
+     * denies anyway. The benchmark scores attempts, not attributions.
+     */
+    if (this.missions && authorityAssessment.applicable && !authorityAssessment.authorized) {
+      this.missions.recordEscape({
+        missionId: activeMission?.id ?? null,
+        agent: caller,
+        kind: authorityAssessment.escape?.kind ?? null,
+        stage: authorityAssessment.stage,
+        code: authorityAssessment.code,
+        action,
+        resource: decision.resource ?? resource,
+        tool,
+        reason: authorityAssessment.reason,
+        blocked: decision.verdict === "deny" || decision.verdict === "hold",
+      });
+    }
+
+    /*
+     * Sequence-aware enforcement (Lethal Trifecta) in Guard.
+     * Prevents untrusted content + sensitive data read + outbound egress.
+     */
+    const trifectaCall = {
+      action,
+      resource: decision.resource ?? resource,
+      tool,
+      server,
+      destination: destinationFor(decision.resource ?? resource, args),
+      environment: this.environment,
+      egress: this.isExternal(decision.resource ?? resource) ? "external" : "none",
+      timestamp: new Date().toISOString(),
+      sql: typeof args?.sql === "string" ? args.sql : typeof args?.query === "string" ? args.query : null,
+      secretsDetected: scanned.length,
+    };
+    const trifecta = assessTrifecta(trifectaCall, this.taint);
+    decision = applyTrifecta(decision, trifecta);
+    decision.trifecta = { complete: trifecta.complete, satisfied: trifecta.satisfied, imminent: trifecta.imminent };
 
     /*
      * THE COMMERCIAL GATE RUNS HERE TOO, NOT ONLY IN THE PIPELINE.
@@ -391,7 +493,12 @@ export class Guard {
       // Who authorized this must be answerable after the fact, on every surface
       // — not only the one that happened to record it.
       ...(delegationContext ? { delegation: delegationContext } : {}),
+      // Authority is part of the record for the same reason delegation is:
+      // "who authorized this" must be answerable after the fact.
+      ...(authorityContext ? { authority: authorityContext } : {}),
+      ...(decision.escape ? { escape: decision.escape } : {}),
       ...(brokered.length ? { secrets: brokered, secrets_brokered: brokered } : {}),
+      ...(decision.trifecta ? { trifecta: decision.trifecta } : {}),
       // Findings never carry the value — see secret-detect.mjs.
       ...(scanned.length
         ? {
@@ -413,6 +520,13 @@ export class Guard {
     else if (decision.verdict === "hold") this.stats.held++;
     else {
       this.stats.permitted++;
+      // Budget and rate are consumed by calls that HAPPEN. See the note above
+      // `assessAuthority`: charging a refused call would let a blocked agent
+      // exhaust its own mission.
+      if (this.missions && activeMission) {
+        this.missions.record(activeMission.id, { costUsd: args?.costUsd ?? 0 });
+      }
+      this.taint.observeCall(trifectaCall, true);
       // Any successful read of secret-shaped material taints the session. A
       // brokered substitution deliberately does not: the agent never held the
       // material, which is the entire point of a handle.

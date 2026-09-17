@@ -78,8 +78,8 @@ basis for every claim here:
 
 | Suite | Count | Command |
 |---|---|---|
-| Node — `agent-control` | 688 (2 skipped on Windows) | `cd packages/agent-control && npm test` |
-| Node — `control-plane` | 322 | `cd packages/control-plane && npm test` |
+| Node — `agent-control` | 812 (2 skipped on Windows) | `cd packages/agent-control && npm test` |
+| Node — `control-plane` | 322 (private control plane package; not in this repository) | `cd packages/control-plane && npm test` — private monorepo only |
 | Python | 108 | `cd packages/cirvix-python && python -m unittest discover -s tests` |
 | Shared conformance | 106 cases | included in the above |
 | Adversarial verification | 11,629 attack cases, 417 suite tests | `cd packages/agent-control && npm run verify:adversarial` |

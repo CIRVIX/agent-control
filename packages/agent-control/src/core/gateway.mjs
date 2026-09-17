@@ -55,6 +55,7 @@ const GATEWAY_VERSION = JSON.parse(
 
 import { Guard, actionForTool, destinationFor, resourceForCall } from "./guard.mjs";
 import { HttpUpstream } from "./http-transport.mjs";
+import { prepareSpawn, killProcessTree } from "./windows.mjs";
 import { DECISION } from "./decisions.mjs";
 import {
   ERROR_CODE,
@@ -126,28 +127,12 @@ class Upstream {
 
   start() {
     const { command, args = [], env = {} } = this.spec;
-    // Windows: Node >= 18.20 throws EINVAL when spawning .cmd/.bat shims
-    // (npm, npx, pnpm) without a shell (CVE-2024-27980 mitigation). MCP configs
-    // name such shims constantly. Going through the shell only for shims keeps
-    // POSIX behaviour unchanged; with shell:true Node joins argv verbatim, so
-    // every argument is quoted here to survive spaces and metacharacters.
-    const isWindowsShim =
-      process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-    const quoted = args.map((a) =>
-      /[\s"^&|<>]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a,
-    );
-    this.proc = isWindowsShim
-      ? spawn([command, ...quoted].join(" "), {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, ...env },
-          shell: true,
-          windowsHide: true,
-        })
-      : spawn(command, args, {
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, ...env },
-          shell: false,
-        });
+    const prepared = prepareSpawn(command, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+      shell: false,
+    });
+    this.proc = spawn(prepared.command, prepared.args, prepared.options);
 
     this.alive = true;
 
@@ -224,7 +209,7 @@ class Upstream {
   stop() {
     this.alive = false;
     try {
-      this.proc?.kill();
+      if (this.proc) killProcessTree(this.proc);
     } catch {
       /* already gone */
     }

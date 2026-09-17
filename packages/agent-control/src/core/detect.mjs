@@ -15,6 +15,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { detectFleet } from "../adapters/index.mjs";
 
 /** Best-effort read; a missing or unreadable file is simply "not present". */
 async function readJson(path) {
@@ -93,39 +94,9 @@ const FRAMEWORK_MARKERS = [
   { id: "mcp-sdk", label: "MCP SDK", deps: ["@modelcontextprotocol/sdk"] },
 ];
 
-export async function detectRuntimes() {
-  const found = [];
-
-  for (const probe of RUNTIME_PROBES) {
-    // Merge across every config path a runtime uses rather than stopping at
-    // the first that exists. Claude Code, for example, has both
-    // ~/.claude/settings.json and ~/.claude.json, and MCP servers may live in
-    // either — breaking early reports "0 MCP servers" for a machine that has
-    // several, which is exactly the false clean bill this tool must not give.
-    const paths = [];
-    const servers = {};
-
-    for (const path of probe.paths) {
-      if (!(await exists(path))) continue;
-      paths.push(path);
-      const config = await readJson(path);
-      Object.assign(servers, config?.[probe.mcpKey] ?? {});
-    }
-
-    if (paths.length === 0) continue;
-
-    found.push({
-      id: probe.id,
-      label: probe.label,
-      path: paths[0],
-      paths,
-      governed: isGoverned(servers),
-      serverCount: Object.keys(servers).length,
-      servers,
-    });
-  }
-
-  return found;
+export async function detectRuntimes(cwd = process.cwd(), options = {}) {
+  const { runtimes } = await detectFleet(cwd, options);
+  return runtimes;
 }
 
 /** A runtime is governed when its MCP traffic routes through the gateway. */

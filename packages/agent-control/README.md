@@ -13,6 +13,7 @@ No account, no signup, no config file, no daemon to leave running.
 
 ```bash
 npx @cirvix_ai/agent-control scan
+# or: npm install -g @cirvix_ai/agent-control && cirvix scan
 ```
 
 That reads your machine and tells you which agent runtimes are ungoverned. It
@@ -20,6 +21,7 @@ writes nothing and sends nothing anywhere. Then decide one call:
 
 ```bash
 npx @cirvix_ai/agent-control check --action fs.read --resource .env.production
+# or with a global install: cirvix check --action fs.read --resource .env.production
 ```
 
 ```
@@ -34,7 +36,8 @@ To govern an agent rather than a single call, wrap its tools — the call cannot
 leave without being decided, so there is no verdict to forget to check:
 
 ```bash
-npm install @cirvix_ai/agent-control
+npm install @cirvix_ai/agent-control        # local to your project
+# or globally for the CLI: npm install -g @cirvix_ai/agent-control
 ```
 
 ```js
@@ -60,9 +63,9 @@ conformance fixture that both must pass.
 
 ## Licence
 
-Apache-2.0. The local enforcement engine is open source and ships with the
-Apache-2.0 licence and attribution notice in this package. The hosted Cirvix
-control plane is a separate product and is not included here.
+Proprietary. Not open source — see [LICENSE](./LICENSE), and the full terms at
+[cirvix.com/terms.html](https://www.cirvix.com/terms.html). The free local
+runtime carries no fee and no support, availability or fitness commitment.
 
 ## `cirvix scan`
 
@@ -316,26 +319,82 @@ guarantees doing so is *visible*.
 Hashes are SHA-256 over a canonical JSON serialization with sorted keys, so
 two semantically identical records hash identically.
 
+## Enterprise Agent Authorization & Security Architecture
+
+Cirvix enforces full-lifecycle governance across autonomous software:
+`DISCOVER -> IDENTITY -> INTENT -> AUTHORITY -> POLICY -> ACTION -> RUNTIME ENFORCEMENT -> HUMAN APPROVAL -> AUDIT/RECEIPT -> DETECTION -> RESPONSE -> RECOVERY`.
+
+### 1. Cryptographic Agent Passports (`@cirvix_ai/agent-control/passport`)
+Zero-trust agent identity backed by Ed25519 asymmetric cryptography. Every agent instance issues a cryptographically signed passport declaring its identity, organizational tenant scope, allowed capabilities, parameter limits, and valid lifetime.
+- Fast keypair generation with SHA-512 canonical envelope signing.
+- Non-repudiation: tool calls and action requests carry cryptographic signatures.
+- Zero-downtime key rotation (`rotatePassportKeys`) and immediate revocation.
+
+### 2. Intent-Aware Agent Firewall (`@cirvix_ai/agent-control/intent`)
+Prevents mission hijacking and prompt injection drift:
+- Compares requested tool actions against the agent's declared mission semantic context.
+- Classifies operations into risk categories: `READ_ONLY`, `CODE_EDIT`, `DATA_MUTATION`, `INFRASTRUCTURE`, `SECRET_ACCESS`, `FINANCIAL`, `PRIVILEGED`.
+- Automatically rejects out-of-scope actions before execution.
+
+### 3. Stateful Session Security & Kill Chain Detection (`@cirvix_ai/agent-control/session`)
+Stateless per-call inspection cannot catch staged attacks. Cirvix tracks action timelines across agent sessions to detect multi-step kill chains:
+- **Exfiltration Chains**: `read sensitive file/secret -> encode/stage -> external network egress`.
+- **Reconnaissance Chains**: Rapid privilege probing across sensitive targets.
+- Computes cumulative session risk and triggers automated circuit breakers upon threat threshold breach.
+
+### 4. Behavioral Profiling & Anomaly Detection (`@cirvix_ai/agent-control/baseline`)
+Builds rolling statistical baselines per agent family:
+- Tracks normal tool distribution, approved network egress domains, parameter entropy, and call frequency.
+- Evaluates actions for statistical drift, flagging anomalous calls before destructive impact.
+
+### 5. Universal Multi-Scope Emergency Kill Switches (`@cirvix_ai/agent-control/kill-switch`)
+Instant, sub-millisecond containment across granular blast radiuses:
+- `agent`: Terminate a compromised agent instance immediately.
+- `family`: Freeze all agents sharing a behavioral profile or code lineage.
+- `org`: Emergency lockdown of an entire tenant's autonomous operations.
+- `tool` / `mcp`: Block a specific vulnerable tool or rogue MCP server globally.
+- `credential`: Instantly invalidate all handles tied to a compromised secret.
+- CLI: `cirvix kill trigger --scope agent --target <agent-id> --reason "Suspicious behavior"`
+
+### 6. Universal Agent Sandbox (`@cirvix_ai/agent-control/sandbox`)
+Runtime confinement ensuring agent isolation:
+- Filesystem confinement within approved root directories, preventing path traversal.
+- Network confinement blocking SSRF and cloud instance metadata (`169.254.169.254`).
+- Strict process execution and shell argument boundaries.
+
+### 7. Shadow Mode & Counterfactual Evaluation (`@cirvix_ai/agent-control/shadow`)
+Safely benchmark and tune policies without disrupting operations:
+- Evaluates candidate policies against live production streams in parallel.
+- Generates counterfactual verdicts (`Would Allow`, `Would Block`, `Diff`) with latency tracking.
+- CLI: `cirvix shadow run --policy candidate.json --input events.jsonl`
+
+### 8. Continuous Adversarial Red Teaming (`@cirvix_ai/agent-control/redteam`)
+Automated security validation against modern attack vectors:
+- Built-in adversarial plugins: Direct & indirect prompt injections, secret exfiltration chains, SSRF / IMDS probes, and unauthorized tool invocation.
+- Scored evaluation reports highlighting authorization weaknesses.
+- CLI: `cirvix redteam run --target local`
+
+### 9. Verified MCP Server Registry (`@cirvix_ai/agent-control/verified`)
+Supply chain verification for Model Context Protocol tools:
+- Scans MCP server definitions and tool schemas for prompt injection hooks, unpinned network endpoints, and dangerous wildcard parameters.
+- Validates vendor signatures, trust levels, and scopes.
+
+### 10. Tamper-Proof Merkle Action Receipts (`@cirvix_ai/agent-control/proof`)
+Cryptographic receipts proving execution authorization:
+- Every approved or denied action emits an immutable receipt with Merkle evidence hashes (`agentPassportHash`, `policyHash`, `inputHash`, `verdict`).
+- Can be independently validated by compliance auditors or relying parties.
+
+---
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-93 tests covering the three policy invariants, traversal bypass attempts, glob
-safety under hostile patterns, condition safety, chain tamper detection,
-gateway interception against a real child-process MCP server, handle
-substitution on both the outbound and return paths, and the `guard.wrap`
-surface.
-
-## Status
-
-Pre-release. `scan`, `check`, `policy`, `why`, `replay`, `audit verify`,
-`gateway`, and `daemon` work today, as does secret brokering and `guard.wrap`
-when a control plane is configured. Not yet built: a Python SDK, and the
-hosted control plane — the one in `packages/control-plane` is self-hosted. See
-[cirvix.com](https://www.cirvix.com).
+806 unit and integration tests covering policy invariants, cryptographic passports, Merkle receipts, stateful session kill chains, multi-scope kill switches, sandbox confinement, shadow evaluation, MCP verification, and adversarial red teaming.
 
 ## License
 
 See LICENSE. Cirvix is a product of Umang Kumar, trading as Cirvix.
+

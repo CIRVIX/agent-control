@@ -12,7 +12,6 @@ build/
 *.pem
 *.key
 .DS_Store
-
 # Test and e2e artifacts. `.e2e/` is the SQLite database a live control-plane
 # test boots against; it is regenerated on every run and has no business in a
 # public repository. It was untracked and unignored here, which meant one

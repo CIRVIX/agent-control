@@ -4,7 +4,7 @@
   "private": true,
   "description": "Runtime policy enforcement for AI agent tool calls. Apache 2.0 engine, zero runtime dependencies.",
   "license": "Apache-2.0",
-  "homepage": "https://www.cirvix.com",
+  "homepage": "https://cirvix.com/",
   "publishConfig": {
     "access": "public"
   },

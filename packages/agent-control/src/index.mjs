@@ -140,4 +140,46 @@ export { scan } from "./commands/scan.mjs";
 export { init, STARTER_POLICY } from "./commands/init.mjs";
 export { status } from "./commands/status.mjs";
 export { demo } from "./commands/demo.mjs";
+export { consoleCmd as console } from "./commands/console.mjs";
+export { onboard } from "./commands/onboard.mjs";
+
+/* Product UI (engine stays presentation-free; these render events) -------- */
+export {
+  THEME_NAMES,
+  THEME_NAMES as THEMES,
+  ROLES,
+  badgeForDecision,
+  colors,
+  roleForDecision,
+  roleForRisk,
+  setTheme,
+  style,
+  themeName,
+} from "./core/theme.mjs";
+export {
+  EVENT,
+  EventBus,
+  attachPipeline,
+  createEvent,
+  initialState,
+  latencyStats,
+  reduce,
+} from "./core/events.mjs";
+export {
+  blockedCard,
+  cirvixRow,
+  explainDecision,
+  frame,
+  header,
+  heldCard,
+  policyCard,
+  rule,
+  spinnerFrame,
+  toolCard,
+  userRow,
+} from "./tui/cards.mjs";
+export { statusBar } from "./tui/status.mjs";
+export { activitySummary, collapsedFeed, activityRow } from "./tui/activity.mjs";
+export { COMMANDS, filterCommands, paletteBox } from "./tui/palette.mjs";
+export { ConsoleApp, parseRequest } from "./tui/app.mjs";
 export { check as policyCheck, explain as policyExplain, list as policyList, loadPolicyFile, test as policyTest } from "./commands/policy.mjs";

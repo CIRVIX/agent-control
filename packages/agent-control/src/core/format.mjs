@@ -1,31 +1,23 @@
 /**
- * Terminal formatting.
+ * Terminal formatting — thin compatibility layer over the semantic theme.
  *
- * Colour is suppressed when stdout is not a TTY, when `NO_COLOR` is set, or
- * when `TERM=dumb` — so piping to a file or a CI log produces clean text
- * rather than escape sequences. `FORCE_COLOR` overrides for the cases where a
- * CI runner does support colour but does not present as a TTY.
+ * New code should import from `theme.mjs` and use `colors.*` / `style(text,
+ * role)` so meaning stays in one place. This module keeps the historic names
+ * (`green`, `red`, `amber`, `blue`, `bold`, `dim`, `plural`) working for the
+ * existing CLI, gateway logs, and every test that already asserts on them.
  *
- * The palette mirrors the product's chroma rule: green means permitted, red
- * means denied, amber means held. Nothing decorative uses them.
+ * Mapping (the product's chroma rule — green means permitted, red denied,
+ * amber held, blue sanitized/info):
+ *   green → allow · red → block · amber → hold/warning · blue → sanitize/info
  */
 
-const forced = process.env.FORCE_COLOR === "1" || process.env.FORCE_COLOR === "true";
-const disabled =
-  !forced &&
-  (process.env.NO_COLOR !== undefined ||
-    process.env.TERM === "dumb" ||
-    !process.stdout.isTTY);
+export { bold, dim, colors, style, setTheme, themeName, THEME_NAMES } from "./theme.mjs";
+import { style } from "./theme.mjs";
 
-const wrap = (open, close) => (s) =>
-  disabled ? String(s) : `[${open}m${s}[${close}m`;
-
-export const bold = wrap(1, 22);
-export const dim = wrap(2, 22);
-export const red = wrap(31, 39);
-export const green = wrap(32, 39);
-export const amber = wrap(33, 39);
-export const blue = wrap(34, 39);
+export const green = (s) => style(s, "allow");
+export const red = (s) => style(s, "block");
+export const amber = (s) => style(s, "hold");
+export const blue = (s) => style(s, "sanitize");
 
 /** "1 server" / "3 servers" — avoids the "1 servers" that reads as a bug. */
 export function plural(n, noun, pluralForm) {

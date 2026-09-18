@@ -59,13 +59,14 @@ import { applyEntitlements } from "./entitlement-gate.mjs";
 import { normalize, policyRequest, requestId } from "./normalize.mjs";
 import { approvalFingerprint } from "./approvals.mjs";
 import { applyDelegation } from "./delegation.mjs";
+import { assessAuthority, applyAuthority, acquireMission, captureMissionCost, missionAllowanceRefusal, recordMissionUsage } from "./authority.mjs";
 import { redact as redactSecrets, scan as scanSecrets } from "./secret-detect.mjs";
 import { stripInjection } from "./sanitize.mjs";
 import { SessionTaint, assessTrifecta, applyTrifecta } from "./trifecta.mjs";
 import { evaluateIntent } from "./intent.mjs";
 import { SessionTracker } from "./session.mjs";
 import { BehavioralBaseline } from "./baseline.mjs";
-import { globalKillSwitch } from "./kill-switch.mjs";
+import { enforceKillSwitch } from "./kill-switch.mjs";
 
 /** Wall-clock for one stage, in fractional milliseconds. */
 function timer() {
@@ -100,6 +101,8 @@ export class Pipeline {
     secrets = null,
     approvals = null,
     delegation = null,
+    missions = null,
+    mission = null,
     /* Commercial enforcement. All three default to absent, so a Pipeline
        built without them behaves exactly as before — which is what keeps the
        existing suite, the shared conformance fixture and every embedding
@@ -127,6 +130,8 @@ export class Pipeline {
     this.approvals = approvals;
     /** DelegationBroker, when agent-to-agent delegation is in use. */
     this.delegation = delegation;
+    this.missions = missions;
+    this.mission = mission;
     this.licence = licence;
     this.meter = meter;
     this.agents = agents;
@@ -185,9 +190,21 @@ export class Pipeline {
    * @returns {Promise<{event:object, call:object, decision:object, arguments:any}>}
    */
   async submit(raw, ctx = {}) {
+    const costUsd = captureMissionCost(ctx);
     const total = timer();
     const stages = {};
-    const id = raw.request_id ?? requestId();
+    const input = raw;
+    raw = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const name = raw.method === "tools/call" ? raw.params?.name : raw.tool ?? raw.name;
+    const args = raw.method === "tools/call" ? raw.params?.arguments : raw.arguments ?? raw.args ?? raw.params;
+
+    // Identity is host context, not a declaration in the untrusted payload.
+    // Transports must authenticate that context before calling submit().
+    const malformed = !input || typeof name !== "string" || !name.trim() ||
+      (raw.request_id != null && (typeof raw.request_id !== "string" || !raw.request_id)) ||
+      (args != null && (typeof args !== "object" || Array.isArray(args)));
+    const id = typeof raw.request_id === "string" && raw.request_id ? raw.request_id : requestId();
+    if (malformed) raw = {};
 
     /* ------------------------------------------------------------ 1. parse */
     let t = timer();
@@ -197,7 +214,7 @@ export class Pipeline {
     /* -------------------------------------------------------- 2. normalize */
     t = timer();
     const call = normalize(
-      { ...parsed, request_id: id },
+      { ...parsed, agent: ctx.agent ?? this.agent, request_id: id },
       {
         agent: ctx.agent ?? this.agent,
         source: ctx.source ?? raw.source,
@@ -258,6 +275,56 @@ export class Pipeline {
     }
 
     /*
+     * Authority narrows. Mission, capability, constraint and expiry are evaluated.
+     */
+    let activeMission =
+      ctx.mission ?? this.mission ?? (this.missions ? this.missions.forAgent(call.agent) : null);
+    if (typeof activeMission === "string") {
+      activeMission = this.missions?.get(activeMission) ?? null;
+      if (!activeMission) Object.assign(decision, { decision: DECISION.DENY, verdict: "deny", rule: "authority-mission-unavailable", reason: "The requested mission could not be resolved." });
+    }
+
+    // Registry IDs resolve to the same object even across Pipeline/Guard instances.
+    if (activeMission?.id && this.missions?.get(activeMission.id)) activeMission = this.missions.get(activeMission.id);
+    const missionLease = acquireMission(activeMission);
+    try {
+    const allowanceRefusal = missionAllowanceRefusal(activeMission, costUsd, missionLease);
+    const authorityAssessment = assessAuthority(
+      {
+        agent: call.agent,
+        action: call.action,
+        resource: call.resource,
+        tool: call.tool,
+        server: call.server,
+        destination: call.destination,
+        environment: call.environment,
+        costUsd,
+        delegating: Boolean(ctx.delegation || call.delegating),
+      },
+      activeMission,
+      // Mission allowance uses the runtime clock, not a replay/event timestamp.
+      { now: Date.now() },
+    );
+
+    const authorityContext = applyAuthority(decision, authorityAssessment);
+    if (authorityContext) call.authority = authorityContext;
+
+    if (this.missions && authorityAssessment.applicable && !authorityAssessment.authorized) {
+      this.missions.recordEscape({
+        missionId: activeMission?.id ?? null,
+        agent: call.agent,
+        kind: authorityAssessment.escape?.kind ?? null,
+        stage: authorityAssessment.stage,
+        code: authorityAssessment.code,
+        action: call.action,
+        resource: call.resource,
+        tool: call.tool,
+        reason: authorityAssessment.reason,
+        blocked: decision.verdict === "deny" || decision.verdict === "hold",
+      });
+    }
+
+    /*
      * Sequence-aware enforcement, after policy and after mode.
      *
      * It runs last among the tightening steps so that a call policy already
@@ -270,6 +337,12 @@ export class Pipeline {
     call.trifecta = { complete: trifecta.complete, satisfied: trifecta.satisfied, imminent: trifecta.imminent };
 
     decision = applyMode(decision, this.mode);
+    // Mission allowance and contention remain hard bounds even in shadow mode.
+    if (activeMission && !authorityAssessment.authorized) {
+      applyAuthority(decision, authorityAssessment);
+      decision.enforced = true;
+    }
+    if (allowanceRefusal) Object.assign(decision, allowanceRefusal, { decision: DECISION.DENY, verdict: "deny", enforced: true });
     decision.decision_id = `dec_${id.slice(4)}`;
 
     /* ------------------------------------------------- entitlement gate ----
@@ -288,28 +361,20 @@ export class Pipeline {
     });
 
     /* ------------------------------------------- kill switch evaluation ---- */
-    const ksEngine = this.killSwitch ?? globalKillSwitch;
-    const killCheck = ksEngine.evaluate({
+    const killContext = {
       agentId: call.agent,
       tool: call.tool,
-      resource: call.resource,
+      rawTool: call.raw_tool,
       session: this.runId,
-      environment: this.environment,
-    });
-    if (killCheck.killed) {
-      decision = {
-        decision: killCheck.decision ?? DECISION.QUARANTINE,
-        verdict: killCheck.decision ?? DECISION.QUARANTINE,
-        rule: "emergency-kill-switch",
-        reason: killCheck.reason,
-        risk: "critical",
-      };
-      call.killSwitchTriggered = true;
-    }
+      environment: call.environment,
+      mcp: call.server,
+    };
+    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
+    call.killSwitchTriggered = decision.rule === "emergency-kill-switch";
 
     /* -------------------------------------------------- intent firewall ---- */
     const declaredIntent = ctx.intent ?? call.intent ?? this.intent;
-    if (declaredIntent && decision.decision === DECISION.ALLOW) {
+    if (declaredIntent && decision.decision !== DECISION.DENY && decision.decision !== DECISION.AUDIT_ONLY) {
       const intentEval = evaluateIntent({
         intent: declaredIntent,
         action: call.action,
@@ -339,11 +404,12 @@ export class Pipeline {
         risk: call.risk,
       });
       call.sessionRisk = chainCheck.risk;
-      if (chainCheck.suspicious && decision.decision === DECISION.ALLOW) {
+      if (chainCheck.suspicious && decision.decision !== DECISION.DENY && (decision.decision !== DECISION.AUDIT_ONLY || this.sessionTracker.status !== "active")) {
         decision = {
           decision: DECISION.DENY,
           verdict: "deny",
           rule: "stateful-exfiltration-chain",
+          enforced: true,
           reason: chainCheck.reason,
           risk: "critical",
         };
@@ -367,6 +433,16 @@ export class Pipeline {
       }
     }
 
+    // Validation is mandatory even in audit mode. Refuse before approvals or
+    // secret substitution, irrespective of what a wildcard policy permits.
+    if (malformed) {
+      Object.assign(decision, {
+        decision: DECISION.DENY, verdict: "deny", rule: "invalid-request",
+        reason: "A tool call needs a string tool name, object arguments and a string request id.",
+        enforced: true,
+      });
+    }
+    decision.decision_id = `dec_${id.startsWith("req_") ? id.slice(4) : id}`;
     stages.policy = t();
 
     /* ---------------------------------------------------------- 6. approval */
@@ -496,10 +572,12 @@ export class Pipeline {
         // rule, so one call still produces exactly one decision.
         decision.decision = DECISION.DENY;
         decision.verdict = "deny";
-        decision.rule = "secret-broker";
+        decision.rule = substitution.outcome === "revoked" ? "credential-revoked" : "secret-broker";
         decision.reason = substitution.reason;
         decision.remediation =
-          "Request a handle scoped to this destination, or add the destination to the secret's allowlist.";
+          substitution.outcome === "revoked"
+            ? "Re-issue or restore the credential handle in the vault."
+            : "Request a handle scoped to this destination, or add the destination to the secret's allowlist.";
       }
     }
 
@@ -525,6 +603,9 @@ export class Pipeline {
     /* ------------------------------------------------------------- 8. audit */
     t = timer();
     const latency = total();
+
+    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
+    if (!isForwarded(decision.decision)) outgoing = call.arguments;
 
     const event = {
       request_id: id,
@@ -553,6 +634,9 @@ export class Pipeline {
       ...(decision.riskEscalated ? { risk_escalated: true } : {}),
       ...(call.delegation ? { delegation: call.delegation } : {}),
       ...(decision.approvalId ? { approval_id: decision.approvalId } : {}),
+      ...(decision.approvedBy ? { approved_by: decision.approvedBy } : {}),
+      ...(call.authority ? { authority: call.authority } : {}),
+      ...(decision.escape ? { escape: decision.escape } : {}),
       ...(brokered.length ? { secrets_brokered: brokered } : {}),
       // Findings never carry the value — see secret-detect.mjs.
       ...(argumentFindings.length
@@ -635,7 +719,12 @@ export class Pipeline {
        asked for it, instead of recording an anonymous taint. */
     this.lastCall = call;
 
+    if (activeMission && isForwarded(decision.decision)) recordMissionUsage(activeMission, { costUsd });
+
     return { event, call, decision, arguments: outgoing };
+    } finally {
+      missionLease.release();
+    }
   }
 
   /**

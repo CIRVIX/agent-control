@@ -4,7 +4,9 @@
 Agent A ──▶ Agent B ──▶ tool
 ```
 
-One invariant, and everything here exists to enforce it:
+This is an opt-in Node library layer, not a default CLI or Python capability. Supply a broker to the enforcement path and independently establish caller identity. CLI gateway/runtime constructors do not currently provision one; signed grant fields do not themselves authenticate a transport connection.
+
+One invariant the configured layer is intended to enforce:
 
 > **An agent cannot gain authority merely because another agent has it.**
 
@@ -102,8 +104,7 @@ const guard = new Guard({ rules, cwd, delegation: broker });
 await guard.authorize({ tool: "read_file", args, agent: "summariser", delegation: grant });
 ```
 
-Both engines route through one implementation (`applyDelegation`), and a test
-asserts `Guard` and `Pipeline` produce the same rule for the same call.
+Node Guard and Pipeline use `applyDelegation` when wired with a broker and the relevant presented context. These are two Node orchestration paths, not the Node and Python engines; Python does not implement delegation.
 
 ## What refusal looks like
 

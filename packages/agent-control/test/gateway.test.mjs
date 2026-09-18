@@ -16,7 +16,7 @@ const CWD = "/workspace";
  * is stubbed — messages cross actual pipes, so the framing, id rewriting, and
  * child lifecycle are all exercised.
  */
-function harness({ drift = false, rules = STARTER_RULES, scopeFor, pins } = {}) {
+function harness({ drift = false, rules = STARTER_RULES, scopeFor, pins, ...gateway } = {}) {
   const outbound = [];
   const waiters = new Map();
 
@@ -33,6 +33,7 @@ function harness({ drift = false, rules = STARTER_RULES, scopeFor, pins } = {}) 
     cwd: CWD,
     log: () => {},
     ...(pins ? { pins } : {}),
+    ...gateway,
   });
 
   gw.start((msg) => {
@@ -209,6 +210,75 @@ test("calling an unregistered server returns a clean error", async () => {
     });
     assert.ok(res.error);
     assert.match(res.error.message, /No registered server/);
+  } finally {
+    h.stop();
+  }
+});
+
+test("an unknown method fails closed instead of being broadcast upstream", async () => {
+  const h = harness();
+  try {
+    const res = await h.send({
+      jsonrpc: "2.0",
+      id: 14,
+      method: "sampling/createMessage",
+      params: {},
+    });
+    assert.ok(res.error, "must be answered, not dropped");
+    assert.equal(res.error.code, -32601);
+    assert.ok(!h.outbound.some((m) => m.method === "sampling/createMessage"), "was forwarded");
+  } finally {
+    h.stop();
+  }
+});
+
+test("a stopped gateway answers requests left in flight instead of dropping them", async () => {
+  const h = harness();
+  try {
+    const reply = new Promise((resolve) => (h.gw.write = resolve));
+    h.gw.inflight.set("gw-manual", {
+      clientId: 15,
+      upstream: [...h.gw.upstreams.values()][0],
+      timer: setTimeout(() => {}, 10_000),
+    });
+    h.gw.stop();
+    const res = await reply;
+    assert.equal(res.id, 15);
+    assert.equal(res.error.code, -32003);
+  } finally {
+    h.stop();
+  }
+});
+
+test("a stopped gateway refuses new requests rather than forwarding them", async () => {
+  const h = harness();
+  h.stop();
+  const res = await h.send({
+    jsonrpc: "2.0",
+    id: 16,
+    method: "tools/call",
+    params: { name: "files__read_file", arguments: { path: "/workspace/src/app.ts" } },
+  });
+  assert.ok(res.error);
+  assert.equal(res.error.code, -32003);
+});
+
+test("the in-flight limit refuses overflow rather than growing without bound", async () => {
+  const h = harness({ maxInflight: 1 });
+  try {
+    h.gw.inflight.set("gw-occupied", {
+      clientId: 999,
+      upstream: [...h.gw.upstreams.values()][0],
+      timer: setTimeout(() => {}, 10_000),
+    });
+    const res = await h.send({
+      jsonrpc: "2.0",
+      id: 17,
+      method: "tools/call",
+      params: { name: "files__read_file", arguments: { path: "/workspace/src/app.ts" } },
+    });
+    assert.ok(res.error);
+    assert.equal(res.error.code, -32003);
   } finally {
     h.stop();
   }

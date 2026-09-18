@@ -21,14 +21,16 @@ import { createInterface } from "node:readline";
 
 import { bold, dim, green, red, gray } from "../core/format.mjs";
 
-/* Hard-exit helper for this command only. The verify call leaves undici's
-   keep-alive socket winding down, and on Windows Node 24 that races the
-   event-loop drain and prints a meaningless libuv assertion at exit. Waiting
-   one drain tick then exiting keeps the goodbye clean without changing exit
-   codes. */
-const finish = (code) => {
-  setTimeout(() => process.exit(code), 50);
-};
+/* `login()` returns its exit code and never terminates the process.
+ *
+ * It used to schedule a hard `process.exit()` from here, which is wrong for a
+ * module: the dashboard and any embedding host call this function in-process,
+ * and a hard exit there is a killed host, not a returned failure. Nothing is
+ * lost by removing it — `bin/cirvix.mjs` resolves the command's return value
+ * into `process.exit(code)` at the one place an exit belongs, and the drain
+ * ticks below still let undici's keep-alive socket close before that happens.
+ */
+const returned = (code) => code;
 
 export const DEFAULT_CONTROL_PLANE = "https://api.cirvix.com";
 export const DASHBOARD_URL = "https://www.cirvix.com/account.html";
@@ -52,12 +54,16 @@ export async function readCredentials() {
  *  scary, meaningless "Assertion failed" after a successful login. One
  *  one-shot https request has nothing to wind down. */
 async function verifyKey(url, apiKey) {
-  const { get } = await import("node:https");
-  const target = new URL(`${url.replace(/\/+$/, "")}/v1/me`);
   try {
+    const target = new URL(`${url.replace(/\/+$/, "")}/v1/me`);
+    if (target.protocol !== "https:" || target.username || target.password) {
+      throw new Error("Control-plane login requires an HTTPS URL without embedded credentials.");
+    }
+    const { get } = await import("node:https");
     const body = await new Promise((resolve, reject) => {
       const req = get(
-        { hostname: target.hostname, path: target.pathname, headers: { authorization: `Bearer ${apiKey}` }, timeout: 6000 },
+        target,
+        { headers: { authorization: `Bearer ${apiKey}` }, timeout: 6000 },
         (res) => {
           let data = "";
           res.on("data", (c) => (data += c));
@@ -148,13 +154,13 @@ export async function login({ key = null, url = null, status = false, browser = 
       await store(origin, linked.apiKey);
       process.stdout.write(`  ${green("✓ Linked to ")}${bold(origin)}${linked.orgName ? ` ${dim(`· ${linked.orgName}`)}` : ""}\n`);
       process.stdout.write(`  ${dim("Stored in ~/.cirvix/credentials.json. Run")} ${bold("cirvix doctor")} ${dim("any time.")}\n`);
-      finish(0);
+      return returned(0);
     } catch (err) {
       process.stderr.write(`  ${red("✗ Browser sign-in failed")} — ${err?.message ?? err}\n`);
       process.stderr.write(`  ${dim("Fall back to")} ${bold("cirvix login --key <api-key>")}\n`);
-      finish(1);
+      return returned(1);
     }
-    return;
+    return 1;
   }
 
   const interactive = !apiKey && process.stdin.isTTY;
@@ -190,7 +196,7 @@ export async function login({ key = null, url = null, status = false, browser = 
     await new Promise((resolve) => setImmediate(resolve));
     if (json) process.stdout.write(JSON.stringify({ ok: false, error: reason }) + "\n");
     else process.stderr.write(`  ${red("✗ Login failed")} — ${reason}.\n  ${dim("Check the key, your connection, and the control-plane URL.")}\n`);
-    finish(1);
+    return 1;
   }
 
   await store(origin, apiKey);
@@ -205,7 +211,7 @@ export async function login({ key = null, url = null, status = false, browser = 
     process.stdout.write(`  ${green("✓ Linked to ")}${bold(origin)}${check.org ? ` ${dim(`· ${check.org}`)}` : ""}\n`);
     process.stdout.write(`  ${dim("Stored in ~/.cirvix/credentials.json. Run")} ${bold("cirvix doctor")} ${dim("any time.")}\n`);
   }
-  finish(0);
+  return returned(0);
 }
 
 /** `cirvix logout` — remove the stored key. Local file only; the server-side

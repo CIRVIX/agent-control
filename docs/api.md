@@ -1,10 +1,10 @@
 # API reference
 
-The control plane is a zero-dependency Node HTTP server exposing **110 routes**.
-Multi-tenant, RBAC-enforced, SQL-backed.
+> Historical external/private control-plane contract. The server and its 110-route implementation are absent from this public checkout; hosted availability and the guarantees below are unverified. These are not APIs served by `cirvix runtime` or the MCP gateway. See [Deployment](./deployment.md).
 
-Base URL is whatever you deploy it at. There is no hosted `api.cirvix.com` —
-every deployment is your own.
+The historical contract below describes a separately supplied HTTP server. The route count, RBAC, SQL implementation and deployment guarantees cannot be verified from this repository. The local MCP gateway and socket do not serve these routes.
+
+Hosted availability is unknown. Client defaults naming an API host neither establish its availability nor prove that no hosted service exists.
 
 ```bash
 export CIRVIX_API=https://cirvix.internal.example.com

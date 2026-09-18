@@ -11,23 +11,64 @@ npx @cirvix_ai/agent-control scan
 
 Requires Node 20 or later.
 
+## Current checkout and default invocation
+
+The package metadata and `cirvix --version` report **0.2.1**.
+
+- Bare `cirvix` shows onboarding when `<cwd>/.cirvix` is absent. In an existing
+  workspace it opens the legacy interactive screen only when its TTY/environment
+  gates allow it; otherwise it prints a local status digest and next steps.
+  Startup branding is not evidence that an enforcement runtime was started.
+- `cirvix console` previews what policy would decide. With `--eval "<tool>
+  <resource>"` it prints one hypothetical decision and exits — no tool runs,
+  nothing is recorded, no network is touched. Without `--eval` on a TTY it
+  launches the full-screen terminal; without a TTY it prints the local digest.
+  Unknown `console` subcommands are usage errors (exit 2).
+- Bare `cirvix --eval "<tool> <resource>"` is the same preview without the
+  subcommand: evaluate-and-exit, safe in scripts and CI. It does not execute
+  or enforce — use `cirvix check` or `cirvix policy explain` for the
+  enforcement-path evaluation.
+- `cirvix --help` and `cirvix <command> --help` print global usage and exit 0
+  without executing the command, provided argument parsing succeeds. A malformed
+  value-taking option can fail before help processing. `-h` is not an alias.
+- Piped/non-TTY bare invocation does not enter the interactive screen. `--fast`,
+  `NO_COLOR`, `TERM=dumb`, and `CIRVIX_NO_ANIM=1` also suppress it; the legacy
+  CI gate permits `FORCE_COLOR=1` to override CI when TTY requirements hold.
+  Bare `cirvix --json` currently prints help, **not JSON**. For automation use
+  explicit reporting commands such as `cirvix status --json`.
+
+### `cirvix console`
+
+```bash
+cirvix console --eval "fs.read .env.production"
+cirvix console --eval "tool=fs.read resource=.env.production" --json
+cirvix console --eval '{"tool":"fs.read","resource":".env.production"}'
+cirvix --eval "fs.read .env.production"   # same preview, no subcommand
+```
+
+`--eval` also accepts `--policy <file>`, `--agent`, and `--env`. Exit 0 on a
+printed preview, 2 on malformed input.
+
+
 ## Commands
 
 | Command | Needs a control plane | What it does |
 |---|---|---|
 | [`scan`](#cirvix-scan) | no | Inventory what is ungoverned on this machine |
+| [`console`](#cirvix-console) | no | Preview what policy would decide — never executes |
 | [`check`](#cirvix-check) | no | Evaluate a single hypothetical call against policy |
 | [`policy`](#cirvix-policy) | no | Print the active rule set |
 | [`gateway`](#cirvix-gateway) | optional | Run the MCP gateway — intercepts and enforces |
 | [`daemon`](#cirvix-daemon) | yes | Run the endpoint service — policy sync + telemetry |
 | [`audit verify`](#cirvix-audit-verify) | no | Recompute the local decision chain and report any break |
-| [`why`](#cirvix-why) | yes | Explain one decision, and name the run it belongs to |
+| [`why`](#cirvix-why) | optional | Explain a local decision or query an external control plane |
 | [`replay`](#cirvix-replay) | yes | Re-evaluate a recorded run under a candidate policy |
 | [`help`](#help-and-version) | no | Print usage |
 | [`version`](#help-and-version) | no | Print the version |
 
-Everything except `why` and `replay` works offline, because enforcement has to.
-Those two ask about something already recorded somewhere else.
+`why` reads the local audit journal without remote configuration. `replay` and `daemon` require an external control plane; that server is not shipped here. Login/browser and commercial links do not establish hosted availability.
+
+Additional local commands include `init`, `status`, `doctor`, `runtime`, `protect`, `logs`, `approvals`, `approve`, `deny`, `prove`, and `verify`; use `cirvix help` for the current inventory. `init --dry-run` writes nothing, while normal `init` configures state rather than starting enforcement.
 
 ## Global flags
 
@@ -35,7 +76,7 @@ Those two ask about something already recorded somewhere else.
 |---|---|---|
 | `--json` | all reporting commands | Machine-readable output |
 | `--cwd <dir>` | all | Workspace root (default: current directory) |
-| `--policy <file>` | `check`, `gateway`, `policy`, `replay` | Rule set to evaluate against. Omitted → the starter rules |
+| `--policy <file>` | `check`, `gateway`, `policy`, `replay` | Local commands discover workspace policy before starter fallback; remote replay has server-specific defaults |
 | `--api <url>` | `gateway`, `daemon`, `why`, `replay` | Control-plane base URL. Or `CIRVIX_API_URL` |
 | `--key <cvx_…>` | `gateway`, `daemon`, `why`, `replay` | API key. Or `CIRVIX_API_KEY` |
 | `--state <dir>` | `gateway`, `daemon` | Policy cache + telemetry spool (default `./.cirvix`) |
@@ -46,8 +87,7 @@ Those two ask about something already recorded somewhere else.
 
 ## `cirvix scan`
 
-Read-only inventory of what an agent on this machine could reach with nothing
-in the way. Nothing is changed and nothing is sent.
+Local heuristic inventory of known configurations and credential paths, including home locations. It is not exhaustive and does not establish actual routing or live execution. Do not run discovery without authorization for that scope. The scanner itself opens no network connection; `npx` may fetch packages, and `--sarif` writes a report.
 
 ```bash
 cirvix scan
@@ -124,7 +164,7 @@ cirvix check --action fs.read --resource .env.production
 |---|---|---|
 | `--action <action>` | yes | e.g. `fs.read`, `shell.exec`, `k8s.apply` |
 | `--resource <resource>` | yes | Path or URL. Canonicalized before matching |
-| `--policy <file>` | no | Rule set. Omitted → starter rules |
+| `--policy <file>` | no | Rule set. Omitted → discovered workspace policy, then starter rules |
 | `--agent <name>` | no | Default `local` |
 | `--env <name>` | no | Default `local` |
 | `--json` | no | Full decision record |
@@ -151,7 +191,7 @@ cirvix policy --policy cirvix.policy.json --json
 
 | Flag | Meaning |
 |---|---|
-| `--policy <file>` | Rule set to print. Omitted → the nine starter rules |
+| `--policy <file>` | Rule set to print. Omitted → discovered workspace policy, then starter rules |
 | `--json` | The rules verbatim, suitable for piping |
 
 Always exits `0`.
@@ -165,14 +205,14 @@ upstream MCP servers. Every `tools/call` is evaluated before it is forwarded,
 and every result is scanned on the way back.
 
 ```bash
-cirvix gateway --servers ~/.cursor/mcp.json
-cirvix gateway --servers ./mcp.json --policy cirvix.policy.json --env staging
+cirvix gateway --servers ./mcp-upstreams.json
+cirvix gateway --servers ./mcp-upstreams.json --policy cirvix.policy.json --env staging
 ```
 
 | Flag | Required | Meaning |
 |---|---|---|
 | `--servers <file>` | yes | MCP server map |
-| `--policy <file>` | no | Rule set. Omitted → starter rules |
+| `--policy <file>` | no | Rule set. Omitted → discovered workspace policy, then starter rules |
 | `--state <dir>` | no | Audit log + spool (default `./.cirvix`) |
 | `--agent <name>` | no | Recorded against every decision (default `local`) |
 | `--env <name>` | no | Environment context (default `local`) |
@@ -182,7 +222,7 @@ cirvix gateway --servers ./mcp.json --policy cirvix.policy.json --env staging
 
 Accepts an editor's config verbatim — `mcpServers` (Claude Code, Cursor,
 Windsurf) or `servers` (VS Code) — so you point at the file you already have
-rather than authoring a new format. stdio transport only.
+rather than authoring a new format. Upstreams may use stdio (`command`/`args`/`env`) or HTTP (`url`/`headers`). Inbound HTTP is enabled by `--http`, with `--host`, `--port`, and optional `--token`. It is MCP transport, not an `HTTP_PROXY` egress proxy.
 
 ```json
 {
@@ -192,8 +232,7 @@ rather than authoring a new format. stdio transport only.
 }
 ```
 
-An entry named `cirvix` is skipped: pointing the gateway at a governed config
-would otherwise make it proxy itself.
+An entry named `cirvix` is skipped. Keep upstream definitions in a separate file from the client's gateway-only map; pointing back at the same replaced file leaves no upstreams. Remove direct client entries, and validate actual routing rather than treating a config entry as enforcement.
 
 ### With and without a control plane
 
@@ -201,11 +240,7 @@ Without `--api`/`--key` the gateway enforces from the local rule set and writes
 decisions to `<state>/audit.jsonl`. The product is useful before you have an
 account.
 
-With them, a [daemon](#cirvix-daemon) starts alongside: it supplies policy,
-registers the agent in the fleet inventory, opens a run that every decision in
-the session belongs to, and ships telemetry. On shutdown it flushes the spool
-before closing the run, so a reader never sees a finished run whose steps have
-not landed yet.
+With both values, a [daemon](#cirvix-daemon) starts alongside and attempts registration, run creation and telemetry delivery to a separately supplied API. The gateway selects cached/local rules at construction; later daemon refreshes are not wired into its active rules. Registration/run creation may fail. Daemon record snapshots and spool operations are serialized within the instance; shutdown attempts a final batch and reports whether backlog remains, rather than guaranteeing full delivery. This CLI construction does not supply a secret broker. See [Operations](./operations.md#current-local-operations-and-recovery).
 
 ### Output discipline
 
@@ -263,8 +298,7 @@ cirvix audit verify --file .cirvix/audit.jsonl --json
   It does not attest to their content.
 ```
 
-That caveat is printed every time on purpose. A hash chain proves integrity, not
-truth.
+The displayed wording overstates standalone verification: it checks internal consistency, not completeness or truth. Missing/unreadable logs can produce an empty valid chain. Tail deletion or full recomputation requires an independently trusted head/count checkpoint to detect. Check expected file existence/readability and records, not only exit status.
 
 `audit` accepts no other subcommand; anything else exits `2`.
 
@@ -297,8 +331,7 @@ cirvix why dec_01JQ8F2K7M
   cirvix replay run_01JQ8F2K7M --diff
 ```
 
-Reads `GET /v1/decisions/:decisionId`. Requires `--api` and `--key`, or
-`CIRVIX_API_URL` and `CIRVIX_API_KEY`.
+With both API URL and key configured, reads `GET /v1/decisions/:decisionId`. Otherwise reads `<state>/audit.jsonl`, or `--file <path>`. `--cwd` and `--state` select local history. Remote flags are `--api` and `--key`, with `CIRVIX_API_URL` and `CIRVIX_API_KEY` as fallbacks.
 
 The run id is the point of this command in an incident: it hands you the thread
 to pull, not just the one bead you arrived holding.
@@ -357,7 +390,7 @@ Non-zero on change makes this usable as a CI gate against a candidate rule set.
 
 ```bash
 cirvix help        # exit 0
-cirvix version     # exit 0 — prints 0.1.0
+cirvix version     # exit 0 — prints the installed package version
 cirvix --version   # same
 cirvix nonsense    # prints help, exit 2
 ```

@@ -1,10 +1,9 @@
 # gitleaks configuration for the public engine repository.
 #
-# The test fixtures in packages/agent-control/test/secret-detect.test.mjs are
-# secret-SHAPED on purpose — that file is the test suite for the secret
-# detector, and every literal in it is a dummy (see the split-literal comments
-# in the file itself). The allowlist below is scoped to that one test file and
-# these exact rules; it does not weaken detection anywhere else in the repo.
+# Secret-shaped fixtures are intentionally used in tests. The current allowlist
+# excludes ALL Node and Python test paths, not a single file or selected rules.
+# Consequently this configured history scan cannot establish that historical
+# test literals were harmless. Review those separately with redacted output.
 
 title = "cirvix-agent-control public repo scan"
 

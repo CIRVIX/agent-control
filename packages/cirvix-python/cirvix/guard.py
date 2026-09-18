@@ -1,23 +1,18 @@
 """``guard.wrap`` — governing a Python agent that does not speak MCP.
 
-The MCP gateway governs everything an agent does, including tools added after
-you deployed it, because it sits on the wire. It also requires the agent to
-speak MCP. CrewAI, AutoGen, and LangGraph do not, so this is the boundary for
-them: wrap the tool collection, keep the same engine, the same rules, and the
-same decision record.
+The MCP gateway governs supported calls routed through it, not all agent
+activity. Python wrap governs only the returned wrappers registered with the
+executor; direct references remain outside that boundary.
 
-**The trade, stated rather than glossed.** You give up the property that makes
-the gateway worth deploying — it governs tools nobody told it about — because
-you are wrapping a list. An operator who believes ``wrap`` is equivalent to the
-gateway will not understand why a tool the agent reached directly was never
-evaluated.
-
-Enforcement semantics are identical to the Node SDK by construction: both run
-the shared conformance suite in ``packages/conformance``.
+The shared conformance suite covers policy evaluation, not identical runtime
+semantics. Python Guard intentionally denies required sanitization rather than
+executing an untransformed call. It has no result scrubber, built-in approval
+store, secret broker, or audit chain.
 """
 
 from __future__ import annotations
 
+import copy
 import inspect
 import os
 import re
@@ -26,7 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from .policy import VERDICT, Decision, evaluate
+from .canonical import expand_home, fold_path
+from .policy import DECISION, VERDICT, Decision, evaluate
 
 __all__ = [
     "CirvixDenied",
@@ -202,6 +198,10 @@ class Guard:
             self.rules,
             cwd=self.cwd,
         )
+        if decision.verdict == VERDICT.PERMIT and decision.decision != DECISION.ALLOW:
+            decision.verdict = VERDICT.DENY
+            decision.decision = DECISION.DENY
+            decision.reason = "The Python guard cannot enforce the required decision transformation."
         decision.decision_id = f"dec_{int(time.time() * 1000):x}{self._next_id:x}"
         self._next_id += 1
         self.stats["calls"] += 1
@@ -249,25 +249,23 @@ class Guard:
         return CirvixDenied(**fields)
 
     def inside_workspace(self, resource: str) -> bool:
-        if not resource:
-            return True
+        if not resource or "\x00" in resource:
+            return False
         if re.match(r"^[a-z][a-z0-9+.-]*://", resource, re.IGNORECASE):
             return False
-
-        def norm(value: str) -> str:
-            return str(value).replace("\\", "/").rstrip("/").lower()
-
-        root = norm(self.cwd or "")
-        absolute = resource if re.match(r"^([A-Za-z]:|/)", resource) else f"{self.cwd}/{resource}"
-        parts: list[str] = []
-        for segment in norm(absolute).split("/"):
-            if segment == "..":
-                if parts:
-                    parts.pop()
-            elif segment != ".":
-                parts.append(segment)
-        flat = "/".join(parts)
-        return flat == root or flat.startswith(root + "/")
+        try:
+            root = os.path.normcase(os.path.realpath(self.cwd or os.getcwd()))
+            candidates = (resource, expand_home(fold_path(resource)))
+            for candidate in candidates:
+                candidate = candidate.replace("\\", "/")
+                if not candidate or "\x00" in candidate:
+                    return False
+                absolute = os.path.normcase(os.path.realpath(os.path.join(root, candidate)))
+                if os.path.commonpath((root, absolute)) != root:
+                    return False
+            return True
+        except (OSError, ValueError):
+            return False
 
     def is_external(self, resource: str) -> bool:
         if not str(resource).lower().startswith(("http://", "https://")):
@@ -305,10 +303,11 @@ def wrap(tools: Any, guard: Guard | None = None, **options: Any) -> Any:
     the framework's ``await`` would receive a coroutine-returning wrapper it
     does not expect.
     """
+    name = options.pop("name", None)
     active = guard or Guard(**options)
 
     if callable(tools) and not isinstance(tools, (Mapping, list, tuple)):
-        return _wrap_callable(tools, options.get("name") or getattr(tools, "__name__", "tool"), active)
+        return _wrap_callable(tools, name or getattr(tools, "__name__", "tool"), active)
 
     if isinstance(tools, Mapping):
         return {
@@ -319,19 +318,16 @@ def wrap(tools: Any, guard: Guard | None = None, **options: Any) -> Any:
     if isinstance(tools, (list, tuple)):
         wrapped = []
         for tool in tools:
-            if callable(tool) and not hasattr(tool, "__dict__"):
-                wrapped.append(_wrap_callable(tool, getattr(tool, "__name__", "tool"), active))
-                continue
-            attr = next((a for a in CALLABLE_ATTRS if callable(getattr(tool, a, None))), None)
-            if attr is None:
-                wrapped.append(tool)
-                continue
+            attrs = [a for a in CALLABLE_ATTRS if callable(getattr(tool, a, None))]
             name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
-            # The tool object is mutated in place only after being copied, so a
-            # framework holding the original list does not find it governed as a
-            # side effect of us reading it.
+            if callable(tool):
+                wrapped.append(_wrap_callable(tool, name, active))
+                continue
+            if not attrs:
+                raise TypeError("Cannot govern a tool without a supported callable entrypoint.")
             clone = _shallow_clone(tool)
-            setattr(clone, attr, _wrap_callable(getattr(tool, attr), name, active))
+            for attr in attrs:
+                setattr(clone, attr, _wrap_callable(getattr(clone, attr), name, active))
             wrapped.append(clone)
         return type(tools)(wrapped) if isinstance(tools, tuple) else wrapped
 
@@ -339,28 +335,32 @@ def wrap(tools: Any, guard: Guard | None = None, **options: Any) -> Any:
 
 
 def _shallow_clone(tool: Any) -> Any:
-    try:
-        clone = object.__new__(type(tool))
-        clone.__dict__.update(getattr(tool, "__dict__", {}))
-        return clone
-    except TypeError:
-        # Some framework tools use __slots__ or a custom __new__. Governing the
-        # original is better than refusing to govern it at all; the caller is
-        # told by the docstring that this case mutates.
-        return tool
+    clone = copy.copy(tool)
+    if clone is tool:
+        raise TypeError("Cannot govern a tool that cannot be copied independently.")
+    return clone
 
 
 def _wrap_callable(fn: Callable[..., Any], name: str, guard: Guard) -> Callable[..., Any]:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError) as error:
+        raise TypeError("Cannot govern a callable without an inspectable signature.") from error
+
     def prepare(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Mapping[str, Any]:
-        # Frameworks call tools with keyword arguments, with a single mapping,
-        # or positionally. Only the first two carry anything a policy can read;
-        # pretending otherwise would evaluate against an empty resource and
-        # report the result as if it meant something.
-        if kwargs:
-            return kwargs
-        if len(args) == 1 and isinstance(args[0], Mapping):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        if len(args) == 1 and isinstance(args[0], Mapping) and not kwargs and len(bound.arguments) == 1:
             return args[0]
-        return {"input": args[0]} if args else {}
+        prepared = dict(bound.arguments)
+        for key, parameter in signature.parameters.items():
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                extra = prepared.pop(key, {})
+                prepared.update({k: v for k, v in extra.items() if k not in prepared})
+            elif parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                if prepared.pop(key, ()):
+                    raise TypeError("Cannot infer resources from variadic positional arguments.")
+        return prepared
 
     if inspect.iscoroutinefunction(fn):
 

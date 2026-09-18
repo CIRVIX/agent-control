@@ -41,6 +41,7 @@ import { fileURLToPath } from "node:url";
 
 import { Pipeline } from "../src/core/pipeline.mjs";
 import { Guard } from "../src/core/guard.mjs";
+import { DECISION } from "../src/core/decisions.mjs";
 import { Meter } from "../src/core/meter.mjs";
 import { STARTER_RULES } from "../src/core/policy.mjs";
 import { TIERS } from "../src/core/entitlements.mjs";
@@ -71,8 +72,13 @@ test("Pipeline: a supplied licence and meter deny the call after the allowance",
   let firstDenied = null;
   for (let i = 1; i <= FREE_ALLOWANCE + 5; i++) {
     const d = verdictOf(
-      await pipeline.submit({ agent: "probe", action: "http.get", resource: `https://example.com/${i}` }),
+      await pipeline.submit({ tool: "fetch_url", arguments: { url: `https://example.com/${i}` } }),
     );
+    assert.notEqual(d.rule, "invalid-request");
+    if (i > FREE_ALLOWANCE) {
+      assert.equal(d.rule, "quota-exhausted");
+      assert.equal(d.verdict, "deny");
+    }
     if (d.rule === "quota-exhausted" && firstDenied === null) firstDenied = i;
   }
 
@@ -111,7 +117,7 @@ test("neither core meters when no licence or meter is supplied", async () => {
 
   for (let i = 1; i <= FREE_ALLOWANCE + 5; i++) {
     const p = verdictOf(
-      await pipeline.submit({ agent: "probe", action: "http.get", resource: `https://example.com/${i}` }),
+      await pipeline.submit({ tool: "fetch_url", arguments: { url: `https://example.com/${i}` } }),
     );
     const { decision: g } = await guard.authorize({ tool: "fetch_url", args: { url: `https://example.com/${i}` } });
     assert.notEqual(p.rule, "quota-exhausted", "an embedding caller metering nothing is supported");
@@ -126,7 +132,7 @@ test("a refused call is not counted against the allowance", async () => {
   const pipeline = new Pipeline({ rules: STARTER_RULES, cwd, agent: "probe", licence: LICENCE, meter });
 
   for (let i = 1; i <= FREE_ALLOWANCE + 20; i++) {
-    await pipeline.submit({ agent: "probe", action: "http.get", resource: `https://example.com/${i}` });
+    await pipeline.submit({ tool: "fetch_url", arguments: { url: `https://example.com/${i}` } });
   }
 
   assert.equal(
@@ -247,5 +253,47 @@ test("the CLI actually shows the prompts, and only on stderr", () => {
   assert.ok(!/process\.stdout/.test(notices), "notices must never touch stdout");
   for (const call of cli.match(/commercialNotices\(\{[\s\S]{0,240}?\}\)/g) ?? []) {
     assert.match(call, /process\.stderr\.write/, "every notice sink must be stderr");
+  }
+});
+/*
+ * THE TWO CORES MUST AGREE ON WHAT MAY BE ASKED ABOUT AT ALL.
+ *
+ * This is the same defect class the file's header describes, in the one place
+ * it had not been checked: request validation. `Pipeline` refused a call with
+ * no tool name as `invalid-request`, while `Guard` — handed the identical
+ * object — derived the literal action `tool.`, matched it against a wildcard
+ * permit and answered `permit`. A policy author reading `permit *` would not
+ * expect it to authorize a call that names no tool.
+ *
+ * The MCP gateway checks its parameters before either core sees them, so this
+ * was not reachable over that transport. It was reachable through the SDK, and
+ * the two cores disagreeing is the condition this file exists to catch.
+ */
+test("both cores refuse a call with no usable tool name or unusable arguments", async () => {
+  const permitAll = [{ name: "allow-all", effect: "permit", actions: ["*"], resources: ["*"] }];
+  const unusable = [
+    null,
+    undefined,
+    {},
+    { tool: "" },
+    { tool: "   " },
+    { tool: null },
+    { tool: 42 },
+    { tool: "read_file", arguments: [] },
+  ];
+
+  for (const input of unusable) {
+    const guard = new Guard({ rules: permitAll, cwd: process.cwd(), agent: "probe" });
+    const pipeline = new Pipeline({ rules: permitAll, cwd: process.cwd(), agent: "probe" });
+    const g = (await guard.authorize(input)).decision;
+    const p = (await pipeline.submit(input)).decision;
+
+    assert.equal(g.decision, DECISION.DENY, `Guard must refuse ${JSON.stringify(input)}`);
+    assert.equal(p.decision, DECISION.DENY, `Pipeline must refuse ${JSON.stringify(input)}`);
+    assert.equal(g.rule, "invalid-request", "one vocabulary for both cores");
+    assert.equal(p.rule, "invalid-request", "one vocabulary for both cores");
+    const shadow = await new Pipeline({ rules: permitAll, mode: "audit" }).submit(input);
+    assert.equal(shadow.decision.decision, DECISION.DENY);
+    assert.equal(shadow.event.enforced, true);
   }
 });

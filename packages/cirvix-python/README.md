@@ -66,13 +66,11 @@ silently disagree are worse than one engine and an honest gap.** An agent
 denied by the Node gateway and permitted here is a bypass nobody would find
 until it mattered.
 
-What makes it safe is `packages/conformance/policy-conformance.json`. Both
-engines load that file and must produce identical verdicts, rules, canonical
-resources, and rule traces across 44 cases — forbid short-circuiting, hold
-outranking permit, default deny, glob semantics, path traversal, URL
-normalization, every comparator, and the fail-closed behaviour for unknown
-ones. Neither language gets a private copy, and changing behaviour means
-changing the fixture first, in a commit a reviewer can see.
+Both evaluators use `packages/conformance/policy-conformance.json` for covered
+verdicts, rules, canonical resources and traces. This fixture does not establish
+runtime feature parity: Python Guard denies required sanitization before sync
+or async execution, whereas Node has transformation support. Python returns
+permitted tool results unchanged; it has no result scrubber.
 
 It has already earned its keep: writing it surfaced a bug where the Node engine
 canonicalized `/etc/passwd` to `C:/etc/passwd` on Windows, so a rule written
@@ -106,10 +104,11 @@ move that way without surprising a reviewer.
 
 ## What `wrap` does not do
 
-The MCP gateway governs everything an agent does, **including tools added after
-you deployed it**, because it sits on the wire. `wrap` governs a list. You keep
-the same engine, rules, decision records, and audit chain; you give up coverage
-of tools you did not enumerate.
+The MCP gateway governs supported calls actually routed through it. `wrap`
+governs only returned wrappers registered with the executor, not originals or
+other tools. Python provides an optional `on_decision` callback, not a built-in
+audit chain or approval store. A hold prevents execution but does not enqueue
+or release a human approval automatically.
 
 If your agent speaks MCP — Claude Code, Cursor, or anything else — use the
 gateway instead:
@@ -120,7 +119,9 @@ cirvix gateway --servers ~/.cursor/mcp.json
 
 ## Status
 
-Pre-release. The policy engine, `guard.wrap`, and the testing helpers work
-today. Not yet in this package: secret-handle brokering and telemetry shipping,
-both of which the Node SDK has — until then, point Python agents at the gateway
-if you need those.
+Pre-release. Python provides the policy evaluator, `guard.wrap`, and testing
+helpers. It lacks sanitization/result scrubbing, secret-handle brokering,
+built-in approval release, audit-chain persistence, and telemetry shipping.
+Required sanitization is denied rather than silently ignored. Route supported
+MCP calls through a correctly configured gateway when those capabilities are
+needed; routing does not establish unrestricted security parity.

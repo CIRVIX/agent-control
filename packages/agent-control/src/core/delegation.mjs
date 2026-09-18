@@ -644,7 +644,7 @@ export function applyDelegation(decision, { broker, presented, agent, action, re
    * later reads. And a delegation can never turn a denial into a permit, which
    * is the property that makes it safe to accept a token at all.
    */
-  if (isForwarded(decision.decision) && !scopePermits(resolved.scope, { action, resource })) {
+  if ((isForwarded(decision.decision) || decision.decision === DECISION.REQUIRE_APPROVAL || decision.verdict === "hold") && !scopePermits(resolved.scope, { action, resource })) {
     decision.decision = DECISION.DENY;
     decision.verdict = "deny";
     decision.rule = "delegation-out-of-scope";

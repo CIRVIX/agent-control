@@ -64,8 +64,7 @@ The decision's `resource` field is the canonical form actually matched.
 
 ### A `when` condition never fires
 
-**An unknown operator fails closed** — the condition does not match, so a typo
-silently narrows the rule instead of widening it. Valid operators are `eq`,
+Raw evaluation treats an unknown comparator as non-matching, which can suppress a forbid too; validate rules rather than treating that behavior as safe. Valid operators are `eq`,
 `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, `matches`, `exists`, `contains`,
 `supersetOf`.
 
@@ -95,10 +94,7 @@ No upstream servers were configured.
   No upstream MCP servers configured. Pass --servers <file>.
 ```
 
-`--servers` accepts `mcpServers` (Claude Code, Cursor, Windsurf) or `servers`
-(VS Code). Only **stdio** entries are loaded — an entry without a `command` is
-skipped, as is any entry named `cirvix` (pointing the gateway at a governed
-config would make it proxy itself).
+`--servers` accepts `mcpServers`, `servers`, or a bare map. Entries use stdio `command` or HTTP `url`; an entry named `cirvix` is skipped. Keep upstream definitions separate from the client gateway-only map and remove direct upstream routes.
 
 ### A tool disappeared from `tools/list`
 
@@ -116,11 +112,11 @@ until it is re-approved. Check the gateway's stderr.
 Without `--api` and `--key` the gateway enforces locally and writes only to
 `.cirvix/audit.jsonl`. That is a valid mode, not a failure.
 
-With them, decisions spool to the state directory and ship on the daemon's
-interval. A short-lived session flushes on shutdown — but only on a clean one.
-`SIGKILL` leaves the spool for the next daemon start in that state directory.
+With them, decision snapshots and spool append/drain operations are serialized within the daemon instance. Shutdown attempts a final batch and returns `false` if backlog remains or delivery fails. This is not a cross-process lock or crash-durability guarantee; inspect backlog and independent local audit records. See [Operations](./operations.md#current-local-operations-and-recovery).
 
 ## Control plane
+
+> Historical external/private-product procedures only. The server, auth/tenant database, SSO/SCIM and console referenced in this and the following Console section are absent and unverified. These variables/routes do not configure the local runtime. See [Deployment](./deployment.md).
 
 ### `/v1/secrets` returns 503, or the routes 404
 
@@ -285,6 +281,4 @@ from "the tool did not run".
   rendered summary.
 - `cirvix why <decision-id>` explains one decision completely, including every
   rule considered.
-- The engine is deterministic and pure. If a decision surprises you,
-  `cirvix check` with the same action, resource, `--env` and `--cwd` will
-  reproduce it exactly.
+- The evaluator is deterministic for the same full request and rules. `check` supplies only a minimal context; it cannot reproduce risk, arguments, taint, broker, approvals, missions, delegation or metering outcomes from action/resource alone.

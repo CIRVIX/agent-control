@@ -1,6 +1,6 @@
 # Examples
 
-Working code. Every file here runs against the packages in this repository.
+Repository examples and integration templates. The policy tests use local source; MCP/CI templates require real paths, dependencies and independently configured services. Demo output is fixture behavior, not proof of a compromised live model or end-to-end framework compatibility. See [Quickstart](../quickstart.md) for self-contained wrappers and explicit audit wiring.
 
 | File | Shows |
 |---|---|

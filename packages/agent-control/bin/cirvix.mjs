@@ -59,83 +59,79 @@ const VERSION = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ).version;
 
-const HELP = `
-  ${bold("cirvix")} ${dim("· runtime governance for AI agents")}
+export function getHelpText() {
+  return `
+  ${cyan(bold("◆ CIRVIX"))} ${bold(`v${VERSION}`)} ${dim("· runtime authorization for AI agents")}
 
   ${bold("USAGE")}
-    cirvix <command> [options]
+    ${dim("$")} cirvix <command> [options]
+    ${dim("$")} cirvix console --eval "<tool> <resource>" [--json]
 
-  ${bold("GETTING STARTED")}
-    console               Interactive runtime authorization (the product UI)
-    onboard               10-second guided first run
-    init                  Detect agents and MCP servers, write a policy, start protecting
-    init --apply          Safely wire detected agents with pre-integration backup
-    init --dry-run        Preview agent configuration changes without modifying files
-    init --rollback [id]  Revert agent configurations to pre-integration state
-    status                Runtime, policy, servers, blocked, approvals, P99 overhead
-    doctor                diagnose this installation: policy, state, daemon, control plane
-    login / logout        link this machine to your CIRVIX control plane (browser or --key)
-    upgrade               Today's usage against your plan, and what lifts the limit
-    demo                  Watch an injected exfiltration attempt get stopped, live
-    protect [path]        Discover, analyse, apply policy and prove it decides
-    passport [agent]      What an agent is, by what it has actually done
-    prove <decision-id>   Sign a decision into a portable proof artifact
-    verify <proof>        Check a proof offline: signature, chain, integrity
-    scan                  Inventory what is ungoverned on this machine
-    theme                 Change appearance (dark|light|midnight|high-contrast|monochrome)
+  ${bold("GET STARTED")}
+    onboard               Interactive setup wizard for this workspace
+    init                  Detect agents & MCP servers, generate policy, start protecting
+    status                Runtime health, policy state, active servers, decision metrics
+    demo                  Watch Cirvix intercept and block a dangerous request live
+    console               Interactive policy preview & authorization console
 
-  ${bold("ENFORCEMENT")}
-    gateway               Run the MCP gateway — intercepts and enforces
-    runtime               Run the local control socket — any agent, any language
-    daemon                Run the endpoint service — policy sync + telemetry
+  ${bold("PROTECT")}
+    protect [path]        Scan, analyze, apply policy, and verify enforcement
+    gateway               Run the MCP gateway — intercepts and enforces upstream tool calls
+    runtime               Run the local domain socket server — language agnostic
+    daemon                Run background service for policy synchronization & telemetry
 
   ${bold("POLICY")}
-    policy check          Parse and validate the rule set
-    policy test           Run the test cases the policy declares
-    policy explain        Why would this call be decided that way
-    policy list           Show the active rules
-    check                 Evaluate a single tool call against the policy set
+    policy check          Parse and validate rule set syntax and constraints
+    policy test           Run declared test cases against policy rules
+    policy explain        Simulate and explain why a hypothetical call is decided
+    policy list           Display active policy rules and match conditions
 
   ${bold("HISTORY")}
-    logs                  Recent decisions
-    logs --last 50        The last N
-    logs --risk high      Only high and critical
-    logs --tree <id>      One decision, as an execution tree
-    replay <id>           Re-decide a recorded call under a candidate policy
-    why <decision-id>     Explain one decision from the control plane
-    audit verify          Recompute the decision chain and report any break
+    logs                  Inspect recent decisions (--last 50, --risk high, --tree <id>)
+    replay <id>           Re-evaluate a recorded call under a candidate policy
+    audit verify          Cryptographically verify the hash chain of recorded decisions
 
-  ${bold("APPROVALS & SECRETS")}
-    approvals             Calls waiting on a human
-    approve <id> --by <who>
-    deny <id> --by <who>
-    vault load            Move credential env vars behind handles
+  ${bold("APPROVALS / SECRETS")}
+    approvals             List calls currently held and waiting for human review
+    approve <id>          Approve a held call (--by <who>)
+    deny <id>             Deny a held call (--by <who>)
+    vault load            Store credential environment variables behind secure handles
+
+  ${bold("ADVANCED")}
+    scan                  Inventory ungoverned tools, configs, and agents on this machine
+    doctor                Diagnostic self-check: policy, socket, daemon, and permissions
+    check                 Evaluate a single tool call directly against policy
+    why <id>              Explain decision logic from local history or control plane
+    kill                  Emergency freeze: suspend active agent sessions
+    shadow                Run candidate policy alongside active rules in shadow mode
+    redteam               Adversarial simulation against active policy
+    passport              Inspect or sign agent authorization passports
+    prove                 Generate cryptographic proofs for compliance audit
+    login / logout        Link local machine with Cirvix Cloud control plane
+    upgrade               Inspect current usage and license plan limits
 
   ${bold("OPTIONS")}
-    --json                Machine-readable output
-    --sarif <file>        Write SARIF 2.1.0 for code-scanning upload
-    --deep                Include MCP command lines in scan output
-    --policy <file>       Rule set to evaluate against ${dim("(default ./cirvix.policy)")}
-    --cwd <dir>           Workspace root (default: current directory)
-    --state <dir>         State directory ${dim("(default ./.cirvix)")}
-    --fail-on <level>     Exit non-zero at high|medium|low findings
-    --mode <enforce|audit>  audit records decisions and blocks nothing
+    --eval "<tool> <res>" Preview policy decision without executing or recording
+    -v, --verbose         Display full forensic details, identity, and timing
+    --json                Format command output as machine-readable JSON
+    --sarif <file>        Write SARIF 2.1.0 report for code-scanning / CI
+    --policy <file>       Rule set path ${dim("(default ./cirvix.policy)")}
+    --cwd <dir>           Workspace root directory ${dim("(default current directory)")}
+    --state <dir>         Local state directory ${dim("(default ./.cirvix)")}
+    --mode <enforce|audit> audit mode records decisions without blocking
+    --fail-on <level>     Exit non-zero when findings meet severity: high|medium|low
 
-  ${bold("GATEWAY / DAEMON")}
-    --servers <file>      MCP server map (same shape as an editor's mcp.json)
-    --api <url>           Control-plane URL
-    --key <cvx_…>         API key ${dim("(or set CIRVIX_API_KEY)")}
+  ${bold("TRY IT (PREVIEW ONLY)")}
+    ${dim("$")} cirvix console --eval "fs.read README.md"
+    ${dim("$")} cirvix console --eval "fs.read .env"
 
-  ${bold("EXAMPLES")}
-    ${dim("$")} cirvix init
-    ${dim("$")} cirvix demo
-    ${dim("$")} cirvix policy test
-    ${dim("$")} cirvix policy explain --tool shell.exec --command "rm -rf /"
-    ${dim("$")} cirvix gateway --servers ~/.cursor/mcp.json
-    ${dim("$")} cirvix logs --risk high --last 20
-    ${dim("$")} cirvix replay req_8a91 --policy policies/proposed.policy
-    ${dim("$")} cirvix audit verify --file .cirvix/audit.jsonl
+    ${dim("console --eval previews the authorization decision.")}
+    ${dim("No action is executed by preview; nothing is recorded.")}
 `;
+}
+
+const HELP = getHelpText();
+
 
 /**
  * A read against the control plane.
@@ -180,15 +176,26 @@ async function controlPlane(flags) {
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
+  const booleans = new Set(["json", "help", "version", "verbose", "v", "deep", "fast", "no-animation", "fail-on-risk", "sign", "badge", "http", "diff", "strict", "source", "force", "apply", "dry-run", "list", "watch", "follow", "w", "status", "browser", "all", "vault"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === "-v") {
+      flags.verbose = true;
+      continue;
+    }
     if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith("--")) flags[key] = true;
-      else {
-        flags[key] = next;
-        i++;
+      const eq = a.indexOf("=");
+      const key = a.slice(2, eq === -1 ? undefined : eq);
+      const next = eq === -1 ? argv[i + 1] : a.slice(eq + 1);
+      if (booleans.has(key)) {
+        if (eq !== -1) throw new Error(`--${key} does not accept a value.`);
+        flags[key] = true;
+      } else if (next === undefined || next.startsWith("--")) {
+        if (key !== "rollback") throw new Error(`--${key} requires a value.`);
+        flags[key] = true;
+      } else {
+        flags[key] = key === "arg" ? [...(flags[key] ?? []), next] : next;
+        if (eq === -1) i++;
       }
     } else positional.push(a);
   }
@@ -301,32 +308,81 @@ async function main() {
   const sub = positional[1];
   const cwd = flags.cwd ? String(flags.cwd) : process.cwd();
 
+  if (flags.help) {
+    process.stdout.write(HELP + "\n");
+    return 0;
+  }
+
   if (flags.version || command === "version") {
     process.stdout.write(VERSION + "\n");
     return 0;
   }
 
+  // Non-interactive preview: `cirvix --eval "<tool> <resource>"`.
+  // Prints what policy would decide and exits. Never launches the TUI,
+  // never touches the network/audit/vault, never executes anything.
+  if (typeof flags.eval === "string") {
+    const { consolePreview } = await import("../src/commands/console.mjs");
+    const { code, output, error } = await consolePreview({
+      cwd, json: Boolean(flags.json), evalInput: flags.eval,
+      policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+      verbose: Boolean(flags.verbose || flags.v),
+    });
+    if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
+    process.stdout.write(output + "\n");
+    return code;
+  }
+
   // BARE `cirvix`:
-  //   first run in a workspace  -> onboarding (what CIRVIX is, three commands)
-  //   returning, interactive    -> the full live terminal
-  //   returning, piped/CI       -> the measured digest + next steps (no animation)
+  // Provide a clean first-run / home experience.
+  // Never unexpectedly throw the user into the dense monitoring dashboard.
+  // The interactive console is explicitly accessible through `cirvix console`.
   if (positional.length === 0 && !flags.json && !flags.help) {
-    let firstRun = false;
-    try { await access(join(cwd, ".cirvix")); } catch { firstRun = true; }
-    if (!firstRun) {
-      const { canLaunchInteractive } = await import("../src/commands/interactive.mjs");
-      if (canLaunchInteractive(flags, positional)) {
-        const rules = await loadRules(flags.policy, cwd);
-        const { interactive } = await import("../src/commands/interactive.mjs");
-        await interactive({ cwd, flags, rules });
-        return 0;
-      }
-    }
     await welcome({ cwd });
     return 0;
   }
 
   switch (command) {
+    case "onboard": {
+      await welcome({ cwd });
+      return 0;
+    }
+
+    case "console": {
+      // `cirvix console` — the evaluation preview surface.
+      //
+      // With --eval: print one hypothetical decision and exit. No TUI, no
+      // network, no audit write, no tool execution — safe in scripts and CI.
+      // Without --eval on a TTY: launch the existing full-screen terminal.
+      // Without --eval and without a TTY: print local digest instead of
+      // hanging on stdin. Unknown subcommands are usage errors, not previews.
+      if (sub !== undefined && !sub.startsWith("-")) {
+        process.stdout.write(HELP + "\n");
+        return 2;
+      }
+      const evalInput = typeof flags.eval === "string" ? flags.eval : null;
+      if (evalInput !== null) {
+        const { consolePreview } = await import("../src/commands/console.mjs");
+        const { code, output, error } = await consolePreview({
+          cwd, json: Boolean(flags.json), evalInput,
+          policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+          verbose: Boolean(flags.verbose || flags.v),
+        });
+        if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
+        process.stdout.write(output + "\n");
+        return code;
+      }
+      const { canLaunchInteractive } = await import("../src/commands/interactive.mjs");
+      if (canLaunchInteractive(flags, positional.slice(1))) {
+        const rules = await loadRules(flags.policy, cwd);
+        const { interactive } = await import("../src/commands/interactive.mjs");
+        await interactive({ cwd, flags, rules });
+        return 0;
+      }
+      await welcome({ cwd });
+      return 0;
+    }
+
     case "protect": {
       /* Shares policy resolution with `runtime` and `gateway`. A protect that
          read policy differently from the runtime would be proving a decision
@@ -450,6 +506,7 @@ async function main() {
       const stateDir = String(flags.state ?? join(cwd, ".cirvix"));
       await mkdir(stateDir, { recursive: true }).catch(() => {});
       const chain = await new AuditChain(join(stateDir, "audit.jsonl")).open();
+      const approvals = await new ApprovalStore(join(stateDir, "approvals.jsonl")).open();
 
       // If a control plane is configured, the daemon supplies policy and
       // receives telemetry. Without one the gateway still enforces, from the
@@ -481,6 +538,7 @@ async function main() {
         servers,
         rules: daemon?.currentRules().length ? daemon.currentRules() : rules,
         audit: chain,
+        approvals,
         cwd,
         environment: String(flags.env ?? "local"),
         licence: gwLicence,
@@ -587,7 +645,7 @@ async function main() {
           }
           resolve();
         };
-        process.stdin.on("end", () => void shutdown());
+        if (!httpServer) process.stdin.on("end", () => void shutdown());
         process.on("SIGINT", () => void shutdown());
         process.on("SIGTERM", () => void shutdown());
       });
@@ -691,8 +749,30 @@ async function main() {
         process.stderr.write(red("  why needs a decision id.\n"));
         return 2;
       }
-      const api = await controlPlane(flags);
-      const d = await api("GET", `/v1/decisions/${encodeURIComponent(decisionId)}`);
+      let d;
+      const apiUrl = flags.api ?? process.env.CIRVIX_API_URL;
+      const apiKey = flags.key ?? process.env.CIRVIX_API_KEY;
+      if (apiUrl && apiKey) {
+        const api = await controlPlane(flags);
+        d = await api("GET", `/v1/decisions/${encodeURIComponent(decisionId)}`);
+      } else {
+        const stateDir = stateDirFor(flags, cwd);
+        const file = String(flags.file ?? join(stateDir, "audit.jsonl"));
+        const records = await journal.read(file);
+        const record = journal.find(records, decisionId);
+        if (!record) {
+          process.stderr.write(
+            red(`  No decision with id "${decisionId}" found in ${file}.\n  Pass --api and --key to query a remote control plane.\n`),
+          );
+          return 2;
+        }
+        d = {
+          ...record,
+          verdict: record.verdict ?? (record.decision === DECISION.ALLOW ? "permit" : record.decision === DECISION.REQUIRE_APPROVAL ? "hold" : "deny"),
+          rule: record.rule ?? record.policy,
+          ts: record.ts ?? record.timestamp,
+        };
+      }
 
       if (flags.json) {
         process.stdout.write(JSON.stringify(d, null, 2) + "\n");
@@ -842,7 +922,7 @@ async function main() {
         process.stderr.write(red("  Only `audit verify` is available.\n"));
         return 2;
       }
-      const file = String(flags.file ?? ".cirvix/audit.jsonl");
+      const file = String(flags.file ?? join(stateDirFor(flags, cwd), "audit.jsonl"));
       const chain = new AuditChain(file);
       const res = await chain.verify();
       if (flags.json) {
@@ -1135,6 +1215,7 @@ async function main() {
         stateDir: stateDirFor(flags, cwd),
         // `--fast` for CI and for anyone who has seen it once.
         pace: flags.fast ? 0 : Number(flags.pace ?? 700),
+        verbose: Boolean(flags.verbose || flags.v),
       });
       if (output) process.stdout.write(output + "\n");
       return 0;
@@ -1216,10 +1297,10 @@ async function main() {
         }
         if (flags.json) {
           process.stdout.write(JSON.stringify(record, null, 2) + "\n");
-          return record.decision === DECISION.DENY ? 1 : 0;
+          return 0;
         }
         process.stdout.write("\n" + journal.renderTree(record) + "\n\n");
-        return record.decision === DECISION.DENY ? 1 : 0;
+        return 0;
       }
 
       const selected = journal.query(records, {

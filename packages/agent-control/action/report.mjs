@@ -28,6 +28,7 @@ const medium = counts.medium ?? 0;
 const low = counts.low ?? 0;
 
 const failOn = (process.env.CIRVIX_FAIL_ON ?? "high").toLowerCase();
+if (failOn !== "never" && !Object.hasOwn(GATE, failOn)) throw new Error("Invalid CIRVIX_FAIL_ON. Use high, medium, low, or never.");
 const watched = GATE[failOn] ?? [];
 const blocking = watched.reduce((n, level) => n + (counts[level] ?? 0), 0);
 const passed = failOn === "never" || blocking === 0;

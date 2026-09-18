@@ -356,7 +356,10 @@ const CONSTRAINTS = {
     const max = Number(rule.maxUsd ?? rule.max ?? Infinity);
     const already = Number(mission?.usage?.spendUsd ?? 0);
     const incoming = Number(call.costUsd ?? 0);
-    if (already + incoming > max + 1e-9) {
+    if (!Number.isFinite(incoming) || incoming < 0 || !Number.isFinite(already) || already < 0 || Number.isNaN(max) || max < 0) {
+      return { id: "spend.invalid", reason: "Spend and budget must be non-negative valid amounts.", escape: ESCAPE.CONSTRAINT_VIOLATION };
+    }
+    if (!Number.isFinite(already + incoming) || already + incoming > max) {
       return {
         id: "spend.exceeded",
         reason:
@@ -371,10 +374,12 @@ const CONSTRAINTS = {
   /** Tool calls per window. A runaway loop is a security event, not just a bill. */
   rate(rule, call, mission, now) {
     const max = Number(rule.maxPerMinute ?? rule.max ?? Infinity);
-    if (!Number.isFinite(max)) return null;
     const windowMs = Number(rule.windowMs ?? 60_000);
+    if (Number.isNaN(max) || max < 0 || !Number.isFinite(windowMs) || windowMs <= 0) {
+      return { id: "rate.invalid", reason: "Rate limits require a non-negative maximum and positive finite window.", escape: ESCAPE.CONSTRAINT_VIOLATION };
+    }
     const recent = (mission?.usage?.calls ?? []).filter((t) => now - t < windowMs);
-    if (recent.length >= max) {
+    if (recent.length + 1 > max || retainedCalls(mission, now).length >= MAX_MISSION_CALLS) {
       return {
         id: "rate.exceeded",
         reason: `${recent.length} calls in the last ${Math.round(windowMs / 1000)}s; this mission allows ${max}.`,
@@ -435,7 +440,7 @@ export function evaluateConstraints(constraints, call, mission, now = Date.now()
 
   for (const [key, rule] of Object.entries(constraints ?? {})) {
     if (rule == null || rule === false) continue;
-    const evaluator = CONSTRAINTS[key];
+    const evaluator = Object.hasOwn(CONSTRAINTS, key) ? CONSTRAINTS[key] : null;
     if (!evaluator) {
       unknown.push(key);
       continue;
@@ -455,9 +460,9 @@ export function evaluateConstraints(constraints, call, mission, now = Date.now()
 /**
  * Evaluates one call against one mission.
  *
- * Pure: it reads the mission and reports. It does not mutate usage counters —
- * `MissionRegistry.record` does that, and only for a call that actually went
- * through, so a denied call cannot consume the budget it was denied for.
+ * Pure: it reads the mission and reports. The orchestration paths hold a shared
+ * mission lease and call `recordMissionUsage` only when authorization succeeds.
+ * This assessment alone does not reserve allowance or authorize external work.
  *
  * @param {object} call    { agent, action, resource, tool, destination,
  *                           environment, costUsd, delegating }
@@ -528,7 +533,7 @@ export function assessAuthority(call = {}, mission = null, { now = Date.now() } 
       ESCAPE.MISSION_VIOLATION,
     );
   }
-  if (mission.agent && call.agent && mission.agent !== call.agent) {
+  if (mission.agent && mission.agent !== call.agent) {
     /* A mission belongs to one agent. Another agent presenting it is trying to
        borrow authority, which is the delegation attack in its simplest form. */
     return deny(
@@ -580,8 +585,14 @@ export function assessAuthority(call = {}, mission = null, { now = Date.now() } 
 
   /* Per-capability conditions are ANDed with the mission's. A capability may
      tighten its own use; it may never loosen the mission's. */
-  const merged = { ...(mission.constraints ?? {}), ...(live.conditions ?? {}) };
-  const constraints = evaluateConstraints(merged, { ...call, ...requested }, mission, now);
+  const missionConstraints = evaluateConstraints(mission.constraints, { ...call, ...requested }, mission, now);
+  const capabilityConstraints = evaluateConstraints(live.conditions, { ...call, ...requested }, mission, now);
+  const constraints = {
+    checked: [...new Set([...missionConstraints.checked, ...capabilityConstraints.checked])],
+    unknown: [...new Set([...missionConstraints.unknown, ...capabilityConstraints.unknown])],
+    violations: [...missionConstraints.violations, ...capabilityConstraints.violations],
+    ok: missionConstraints.ok && capabilityConstraints.ok,
+  };
   base.constraints = constraints;
 
   if (!constraints.ok) {
@@ -642,7 +653,7 @@ export function applyAuthority(decision, assessment) {
     ...(assessment.escape ? { escape: assessment.escape } : {}),
   };
 
-  if (!assessment.authorized && isForwarded(decision.decision)) {
+  if (!assessment.authorized && (isForwarded(decision.decision) || decision.decision === DECISION.REQUIRE_APPROVAL || decision.verdict === "hold")) {
     decision.decision = DECISION.DENY;
     decision.verdict = "deny";
     decision.rule = `authority-${assessment.code}`;
@@ -811,6 +822,73 @@ export function lintMission(mission) {
  * carries only what the current process needs to decide. Keeping the store
  * behind a small interface is what lets both share this file.
  */
+/* One non-queued authorization per shared mission object, across both Node
+ * orchestration paths. Weak keys do not retain completed missions. There is no
+ * timeout that could unlock an authorization still running inside a broker.
+ * This is process-local, not a distributed or restart-persistent transaction.
+ */
+const missionLocks = new WeakSet();
+const MAX_MISSION_CALLS = 4096;
+
+export function acquireMission(mission) {
+  if (!mission) return { acquired: true, release() {} };
+  if (missionLocks.has(mission)) return { acquired: false, release() {} };
+  missionLocks.add(mission);
+  return { acquired: true, release() { missionLocks.delete(mission); } };
+}
+
+/** Capture once from host-owned context; never coerce request data into money.
+ * Missing cost stays zero for compatibility. Embedders must provide a trusted
+ * estimate for spend enforcement; this code cannot discover vendor pricing.
+ */
+export function captureMissionCost(ctx) {
+  const cost = ctx.costUsd;
+  return cost === undefined ? 0 : cost;
+}
+
+export function missionAllowanceRefusal(mission, costUsd, lease) {
+  if (!mission) return null;
+  if (!lease.acquired) return { rule: "authority-mission-busy", reason: "Another authorization is using this mission; retry after it finishes." };
+  const spend = mission.usage?.spendUsd ?? 0;
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd) || costUsd < 0 ||
+      typeof spend !== "number" || !Number.isFinite(spend) || spend < 0 || !Number.isFinite(spend + costUsd)) {
+    return { rule: "authority-spend-invalid", reason: "Trusted mission cost must be a finite non-negative number." };
+  }
+  if ([mission.constraints, ...(mission.capabilities ?? []).map((c) => c.conditions)].some((c) => c?.rate) &&
+      retainedCalls(mission, Date.now()).length >= MAX_MISSION_CALLS) {
+    return { rule: "authority-rate-capacity", reason: "Mission rate history is full; retry after its window expires." };
+  }
+  return null;
+}
+
+function retainedCalls(mission, now) {
+  const rules = [mission.constraints, ...(mission.capabilities ?? []).map((c) => c.conditions)];
+  const windows = rules.map((c) => c?.rate).filter(Boolean).map((r) => Number(r.windowMs ?? 60_000));
+  // Retain the longest capability window, not just the window used by this call.
+  const windowMs = windows.length ? Math.max(...windows) : 60_000;
+  return (mission.usage?.calls ?? []).filter((t) => now - t < windowMs);
+}
+
+/** Authorization consumption, NOT a measurement of external tool execution.
+ * Commit only immediately before returning a successful authorization. Audit,
+ * broker, approval and callback failures release the lease without consuming.
+ * An external execution failure does not refund an authorization already issued.
+ * At most 4096 timestamps are retained; configured rate limits fail closed at
+ * that ceiling until history expires, rather than forgetting live usage.
+ */
+export function recordMissionUsage(mission, { costUsd = 0, now = Date.now() } = {}) {
+  const amount = costUsd;
+  const spend = mission.usage?.spendUsd ?? 0;
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0 ||
+      !Number.isFinite(spend) || spend < 0 || !Number.isFinite(spend + amount)) throw new Error("Invalid mission spend.");
+  const calls = retainedCalls(mission, now);
+  const hasRate = [mission.constraints, ...(mission.capabilities ?? []).map((c) => c.conditions)].some((c) => c?.rate);
+  if (hasRate && calls.length >= MAX_MISSION_CALLS) throw new Error("Mission rate history is full.");
+  calls.push(now);
+  mission.usage = { spendUsd: spend + amount, calls: calls.slice(-MAX_MISSION_CALLS) };
+  return mission.usage;
+}
+
 export class MissionRegistry {
   #missions = new Map();
   #byAgent = new Map();
@@ -863,21 +941,15 @@ export class MissionRegistry {
   }
 
   /**
-   * Records what a call consumed.
-   *
-   * Only called for a call that actually went through. A denied call must not
-   * consume budget or rate — otherwise an attacker could exhaust a mission's
-   * allowance using calls that were refused anyway, turning every constraint
-   * into a denial-of-service against the agent's real work.
+   * Legacy accounting entry point for trusted embedders. Not an authorization
+   * gate: callers must assess and coordinate their own external work. It cannot
+   * update an allowance currently leased by Pipeline or Guard.
    */
   record(missionId, { costUsd = 0, now = Date.now() } = {}) {
     const m = this.#missions.get(missionId);
     if (!m) return null;
-    m.usage.spendUsd += Number(costUsd) || 0;
-    m.usage.calls.push(now);
-    /* Bounded: only the rate window is ever read. */
-    if (m.usage.calls.length > 4096) m.usage.calls = m.usage.calls.slice(-2048);
-    return m.usage;
+    if (missionLocks.has(m)) throw new Error("Mission authorization is in progress.");
+    return recordMissionUsage(m, { costUsd, now });
   }
 
   /** Every refusal is an attempt worth keeping. */

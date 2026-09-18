@@ -13,26 +13,29 @@ package has none.
 ## Quick start
 
 ```python
+import os
 from cirvix import guard, CirvixDenied, CirvixHeld, STARTER_RULES
 
+def read_file(path):
+    return f"Fixture read: {path}"
+
 tools = guard.wrap(
-    my_tools,
+    {"read_file": read_file},
     agent="support-triage",
     environment=os.environ.get("CIRVIX_ENV", "local"),
     rules=STARTER_RULES,
 )
 
+print(tools["read_file"](path="src/index.py"))
 try:
-    crew.kickoff()
+    tools["read_file"](path=".env.production")
 except CirvixHeld as err:
-    print(err.approvers)     # ["platform-oncall"] — a person can release this
-    raise
+    print(err.approvers)
 except CirvixDenied as err:
-    print(err.policy)        # "deny-dotenv-read"
-    print(err.remediation)   # 'secrets.get("STRIPE_KEY")'
-    print(err.decision_id)   # pass to `cirvix why`
-    raise
+    print(err.policy, err.remediation, err.decision_id)
 ```
+
+The example invokes the returned wrappers directly and reads no files. Register those returned tools with your framework; wrapping and then calling a pre-existing crew/executor with its original tools does not govern it. Decision IDs are not automatically persisted or discoverable by the Node CLI.
 
 > **`rules` is the option, not `policy_dir`.** `wrap` forwards its keyword
 > arguments to `Guard(**options)`, which takes an in-memory rule sequence. To
@@ -56,11 +59,7 @@ tools = guard.wrap(my_tools, agent="support-triage", rules=rules)
 wrapper that calls the Node one over a socket. Decisions are made in-process,
 with no network on the enforcement path.
 
-Two engines that can silently disagree about a security decision are worse than
-one engine and an honest gap: an agent denied by the Node gateway and permitted
-by the Python SDK is a bypass nobody would find until it mattered. That is
-prevented by [`packages/conformance/policy-conformance.json`](../packages/conformance/policy-conformance.json)
-— 44 cases both suites load from the same file, neither allowed a private copy.
+The Python and Node suites load the same policy cases rather than maintaining private copies. The fixture constrains evaluator behavior on covered inputs; it does not establish runtime parity.
 
 The fixture earns its keep. It immediately caught a real Windows path-
 canonicalization bug in the *Node* engine that no single-language test suite
@@ -78,18 +77,13 @@ guard.wrap(tools, guard=None, **options)
 | `list` / `tuple` of tool objects | Each **shallow-copied** with its callable attribute replaced |
 | A single callable | Wrapped; name from `name=` or `__name__` |
 
-For tool objects, the first of `func`, `_run`, `run`, `invoke`, `call`,
-`execute`, `handler` that is callable is the one wrapped. (The Node SDK's order
-differs — `func`, `invoke`, `call`, `execute`, `handler`, `_call`, `run` —
-because the frameworks in each ecosystem differ.)
+For sequence tool objects, every supported callable among `func`, `_run`, `run`, `invoke`, `call`, `execute` and `handler` is wrapped. A tool without a supported entrypoint is rejected. Node has a separate shape contract; neither list establishes blanket framework compatibility.
 
 **Async is preserved.** An async tool stays async — otherwise the framework's
 `await` receives a coroutine-returning wrapper it does not expect.
 `__name__`, `__doc__` and `__wrapped__` are all set on the governed callable.
 
-A tool using `__slots__` or a custom `__new__` cannot be shallow-copied. Those
-are governed **in place**: governing the original is better than refusing to
-govern it at all, and the docstring says so.
+Sequence tool objects must support an independent `copy.copy`; returning the original object is rejected rather than silently governing it in place. Callables require an inspectable signature. Positional/keyword arguments and defaults are bound before authorization; nonempty variadic positional arguments are rejected when their resources cannot be inferred.
 
 ## `Guard`
 
@@ -212,13 +206,20 @@ import the one you mean.
 ## What `wrap` does not do
 
 - **It does not govern tools you did not hand it.** A tool the agent reaches
-  directly is never evaluated. The [gateway](./cli.md#cirvix-gateway) does not
-  have this limitation because it sits on the wire.
+  directly is never evaluated. The [gateway](./cli.md#cirvix-gateway) governs only MCP calls actually routed through it, not arbitrary activity.
 - **It does not broker secrets.** The Python `Guard` has no `secrets` parameter.
   A Python agent that needs handle substitution and return-path redaction routes
   its tool calls through the gateway, which does.
 - **It does not write an audit chain.** The Python `Guard` has no `audit`
   parameter. Use `on_decision` to forward records wherever you keep them, or run
   the gateway.
+- **It cannot sanitize.** The evaluator can return `sanitize`, but Python Guard
+  converts a required transformation to a denial before sync or async execution.
+  This fail-closed capability difference is retained for the release candidate;
+  it is not Node runtime parity. Node has transformation support, while Python
+  has neither argument transformation nor result scrubbing. Shared evaluator
+  fixtures do not prove equivalent wrapper enforcement.
+- **It has no built-in approval store or grant-release path.** `CirvixHeld`
+  prevents execution; it does not enqueue or release an approval automatically.
 - **It does not reach the network.** No telemetry is shipped and no policy is
   pulled. Both are the daemon's job.

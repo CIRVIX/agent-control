@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cirvix.policy import evaluate  # noqa: E402
 
-
 def locate_fixture(test_file: Path) -> Path:
     test_file = test_file.resolve()
     candidates = (

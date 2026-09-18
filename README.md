@@ -1,73 +1,51 @@
 # Cirvix AgentControl
 
-**Every tool call an AI agent makes is evaluated against policy before it runs,
-and the decision is recorded either way.**
+Local policy evaluation and enforcement for **tool calls routed through the MCP gateway or returned SDK wrappers**. It does not intercept all activity on a machine.
 
-Apache 2.0. Zero runtime dependencies. Node and Python.
+Apache-2.0. No declared runtime dependencies. Node 20+; Python 3.9+.
 
-```bash
-npx @cirvix_ai/agent-control scan
-```
-
-Read-only. No account, no signup, no telemetry. It reports which agent runtimes
-on this machine are ungoverned, which MCP servers they can reach, and which
-credential files are readable from agent context right now.
-
-**Try it in the browser first** — no account there either:
-the [sandbox](https://www.cirvix.com/sandbox.html),
-the [flagship demo](https://www.cirvix.com/flagship-demo.html), and the
-[MCP demo](https://www.cirvix.com/mcp-demo.html) run the same decisions client-side.
-
-Prefer to watch before running anything?
-
-<!-- EMBED-SLOT: 90s hero demo video — drop the URL here at launch (script: launch-assets/video-scripts.md) -->
-
-[DEMO VIDEO — 90 seconds, agent reads .env, gets denied, remediation shown] ·
-shot list and script: `launch-assets/video-scripts.md` in the site repo.
-
----
-
-## Install in 30 seconds
+## Quickstart
 
 ```bash
-npx @cirvix_ai/agent-control scan
+npm install @cirvix_ai/agent-control
 ```
 
-Then decide a single call and read the reasoning:
+Run this ESM example from your project. The tool below is deliberately an in-memory fixture, not a filesystem reader:
+
+```js
+import { guard, CirvixDenied, STARTER_RULES } from "@cirvix_ai/agent-control";
+
+const tools = guard.wrap(
+  { read_file: async ({ path }) => `Fixture read: ${path}` },
+  { agent: "pr-triage", rules: STARTER_RULES },
+);
+
+console.log(await tools.read_file({ path: "src/index.mjs" }));
+try {
+  await tools.read_file({ path: ".env.production" });
+} catch (err) {
+  if (!(err instanceof CirvixDenied)) throw err;
+  console.log(err.policy, err.decisionId);
+}
+```
+
+The first call runs; the second is denied before the fixture is invoked. When integrating a framework, register the **returned** tools with its executor, not the originals. The Node SDK does not persist an audit chain unless an `audit` sink is supplied; Python uses an `on_decision` callback instead. See [Quickstart](./docs/quickstart.md), [Node SDK](./docs/sdk-node.md), and [Python SDK](./docs/sdk-python.md).
+
+For a hypothetical decision without executing or recording a tool call:
 
 ```bash
 npx @cirvix_ai/agent-control check --action fs.read --resource .env.production
 ```
 
-```
-  DENY  fs.read .env.production
-  rule    deny-dotenv-read
-  reason  Reading .env files is denied outside an approved secrets flow. This is
-          the single most common path from a prompt injection to a live credential.
-  fix     Request the value as a handle: secrets.get("STRIPE_KEY")
-```
+With starter rules this exits `1` (deny). `check` exits `0` for both permit and hold, so exit status alone is not an execution authorization. An existing workspace policy can change the result.
 
-To govern an agent rather than one call, wrap its tools. The call cannot leave
-without being decided, so there is no verdict to forget to check:
+Optional inventory:
 
 ```bash
-npm install @cirvix_ai/agent-control     # or:  pip install cirvix
+npx @cirvix_ai/agent-control scan
 ```
 
-```js
-import { guard, CirvixDenied, STARTER_RULES } from "@cirvix_ai/agent-control";
-
-const tools = guard.wrap(myTools, { agent: "pr-triage", rules: STARTER_RULES });
-
-try {
-  await agent.invoke(input);
-} catch (err) {
-  if (err instanceof CirvixDenied) {
-    console.log(err.policy, err.remediation, err.decisionId);
-  }
-  throw err;
-}
-```
+The scanner examines known runtime configurations and credential-path accessibility, including locations outside the workspace. Configuration detection is heuristic, not proof of routed execution or an exhaustive inventory. The scan itself is local; `npx` may download a package, and `--sarif` writes a report. Do not run discovery where home/configuration inspection is unauthorized.
 
 Requires Node 20+ or Python 3.9+.
 
@@ -138,90 +116,54 @@ reading a credential was never something that agent was permitted to do.
 
 ## What is here
 
-| Package | What it is | Runtime deps |
-|---|---|---|
-| [`packages/agent-control`](./packages/agent-control) | Policy engine, MCP gateway, local control socket, audit chain, secret broker, scanner, and the `cirvix` CLI | **none** |
-| [`packages/cirvix-python`](./packages/cirvix-python) | A second implementation of the same engine, plus `guard.wrap` for Python agents | **none** |
-| [`packages/conformance`](./packages/conformance) | Shared cases both engines must pass | — |
+| Component | Available implementation |
+|---|---|
+| [`packages/agent-control`](./packages/agent-control) | ESM policy engine and DSL, MCP gateway/transports, Guard/wrappers, local socket/Pipeline, audit and approval stores, vault, reporting primitives, scanner/adapters, CLI |
+| [`packages/cirvix-python`](./packages/cirvix-python) | Native policy evaluator, synchronous/asynchronous tool wrappers, testing helpers; not the full Node runtime |
+| [`packages/conformance`](./packages/conformance) | Shared policy fixtures and Node delegation fixtures |
+| [`tools`](./tools), [`demo`](./demo), [`benchmarks`](./benchmarks) | Repository validation and local demonstration/performance harnesses; not hosted product services |
+| [Documentation](./docs/README.md) | Architecture, SDKs, policy, deployment limits, operational recovery, and release gates |
 
-Two implementations are held to one fixture. That fixture immediately found a
-real path-canonicalisation bug in the Node engine, which is the argument for
-having it.
+**Not shipped here:** a SaaS server, web frontend, tenant database/migrations, user authentication/RBAC, SSO/SCIM, billing checkout/webhooks, hosted retention, or enterprise deployment manifests. Client-side login, remote API calls, licence tables and organization fields do not implement these services. Ignored control-plane environment/database/dependency remnants are not deployable source. External/private product availability is unverified.
 
-**Documentation:** [`docs/`](./docs) — [quickstart](./docs/quickstart.md),
-[policy reference](./docs/policy.md), [CLI](./docs/cli.md),
-[Node SDK](./docs/sdk-node.md), [Python SDK](./docs/sdk-python.md).
+## Enforcement and operational limits
 
-## Two behaviours to know before writing rules
+- Default deny; a matching explicit forbid outranks hold and permit. JSON rules and the Node DSL are described in [Policy](./docs/policy.md).
+- The gateway governs routed MCP calls only. Direct upstream entries, editor built-ins, arbitrary subprocesses, and unwrapped callables remain outside its boundary.
+- Guard and Pipeline are separate orchestration paths. Optional exported modules are not automatically enabled on every path. In particular, the standalone kill command does not control another running process; the sandbox helper is not OS isolation.
+- Local approval records name a reviewer; they are not authenticated dual-key signatures. An approval authorizes a retry, not an automatically resumed or exactly-once external transaction.
+- A configured audit sink records authorization, not successful execution. The SHA-256 chain detects internal inconsistencies, not complete deletion, truncation or rewritten history without a trusted external checkpoint. Local signed proofs are not independent compliance evidence.
+- Secret brokering requires explicit wiring. Values exist in process memory and downstream tools; redaction is not a universal information-flow guarantee. Host permissions and destination controls remain necessary.
+- No automatic rollback of tool effects, managed disaster recovery, audit rotation, or demonstrated high-availability deployment is supplied. See [Deployment](./docs/deployment.md) and [Operations](./docs/operations.md).
 
-**No matching rule means deny.** The absence of a rule is never read as
-permission. This is irritating on day one, and the list of permits you end up
-writing is the useful artefact — most people discover their agent has a shell
-they had not thought about.
+Cirvix does not prevent prompt injection or compensate for permissive policy. No SOC 2, ISO 27001 or FedRAMP certification is established here.
 
-**An explicit deny is terminal.** No later rule lifts it. Policy whose meaning
-depends on file ordering is policy nobody reasons about correctly at 3am.
+## Security evidence
 
-## What it does not do
+[`SECURITY.md`](./SECURITY.md) includes historical reviews, including private control-plane material absent from this checkout. It is not proof of current hosted-service security. Historical corpus totals and zero-bypass counts are not a guarantee about arbitrary agents or configurations. Use current, scoped test output and [Security](./docs/security.md) to interpret the evidence.
 
-Stated here rather than left for you to discover:
+The PR-title example under `docs/examples` is a scripted policy demonstration with fixtures, not a live model attack reproduction. It does not establish that a model was compromised or that a third-party service was protected.
 
-- **It does not prevent prompt injection.** It constrains what an injected
-  agent is able to do. The sanitiser is a mitigation; the policy engine is the
-  control.
-- **Root on the endpoint is out of scope.** Resolved secret material sits in
-  process memory for the life of a request.
-- **It cannot save you from a permissive policy.** `resources: ["**"]` on a
-  filesystem write says yes to everything, and it will.
-- **No SOC 2, ISO 27001 or FedRAMP.** It produces evidence for those audits and
-  does not assert an outcome — the report vocabulary has no word for "pass",
-  enforced by a test.
-- **Audit retention is not tiered.** Nothing prunes, on any plan.
+## Development and release
 
-The full threat model, including what is deliberately outside it:
-<https://www.cirvix.com/threat-model.html>
+From the repository root:
 
-## Security
+```bash
+npm test
+npm run verify:version
+npm run verify:license
+npm run verify:public
+npm run verify:package
+```
 
-[`SECURITY.md`](./SECURITY.md) holds the threat model and two adversarial
-reviews, published with what they broke:
+Run Python tests from `packages/cirvix-python`:
 
-- The first found and fixed **eight real vulnerabilities**, including an
-  admin→owner privilege escalation and an unauthenticated denial of service.
-- A later consistency oracle — which checks the decision against what the
-  process *actually did*, with a real MCP subprocess's access log as ground
-  truth — found **twelve more** that every unit test had passed. One was
-  `matchGlob("**/*")` returning `false`: a fail-open, in both engines.
+```bash
+python -m unittest discover -s tests -v
+```
 
-Current corpus: **11,629 attack cases, 0 false negatives, 0 policy bypasses.**
-
-Report anything new to the address in
-[`security.txt`](https://www.cirvix.com/.well-known/security.txt).
+`npm test` includes adversarial fixtures and subprocess/transport integration tests; review their access requirements before running them in a restricted environment. No lint/typecheck script or Node compilation build is configured. Python packaging uses `python -m build`; Node distribution uses `npm pack`. See [Developer guide](./docs/developer.md) for command scope and the current release gate; do not infer a release pass from a subset of tests.
 
 ## Licence
 
-**Apache 2.0** — see [LICENSE](./LICENSE), [NOTICE](./packages/agent-control/NOTICE),
-and [LICENSING.md](./LICENSING.md) for which parts of the product this covers.
-
-The engine is the part that decides whether your agent's call runs. A security
-control you are not permitted to read is one you are asked to take on faith,
-which is a strange thing to ask of the person whose job is not extending faith
-to software. Apache rather than MIT for the patent grant, which is not
-decorative in this category.
-
-The multi-tenant control plane — shared policy distribution, team vault, SSO and
-SCIM, approvals workflow, hosted audit retention, compliance evidence — is a
-separate, proprietary product and is not in this repository. Coordination
-between people is a different problem from deciding one call, and only the
-second one needs to be secret.
-
-## Development
-
-```bash
-cd packages/agent-control && npm test
-cd packages/cirvix-python && python -m unittest discover -s tests
-```
-
-The zero-dependency rule is permanent. The
-[conformance fixture](./packages/conformance) must be changed *before* engine
-behaviour is. Read [`docs/developer.md`](./docs/developer.md) first.
+Apache-2.0 — [LICENSE](./LICENSE), [NOTICE](./packages/agent-control/NOTICE), and [LICENSING.md](./LICENSING.md). The separately described proprietary control plane is not part of this source distribution.

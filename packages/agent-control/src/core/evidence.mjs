@@ -29,7 +29,22 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./audit.mjs";
 
-export const EVIDENCE_VERSION = 1;
+export const EVIDENCE_VERSION = 2;
+
+/**
+ * Digest format_versions. Packs carry `digestFormat` so a verifier can tell
+ * whether it is looking at a current pack or a legacy one — and refuse rather
+ * than silently reinterpret.
+ *
+ * v1: digest over the canonical form with `digest` spread as `undefined`.
+ *     Stable for any object that survives JSON round-trip (the only shape a
+ *     stored pack can have), but its in-memory semantics depended on how the
+ *     canonicalizer spelled `undefined`.
+ * v2: digest over the canonical form with the digest-bearing fields DELETED
+ *     before hashing. Deletion is unambiguous: no canonicalizer option can
+ *     change what "the object without this key" means.
+ */
+export const DIGEST_FORMAT = Object.freeze({ V1_LEGACY: 1, V2_EXPLICIT: 2 });
 
 /**
  * Coverage vocabulary. Deliberately has no "pass" and no "compliant".
@@ -72,8 +87,10 @@ const CONTROLS = [
 
 /** Fields that may appear on a decision inside a pack. Everything else is dropped. */
 const DECISION_FIELDS = [
-  "decision_id", "ts", "agent", "action", "tool", "resource", "destination",
-  "verdict", "decision", "rule", "reason", "risk", "environment", "run_id", "hash", "prev_hash",
+  "decision_id", "request_id", "ts", "timestamp", "agent", "action", "tool", "resource", "destination",
+  "command", "verdict", "decision", "rule", "policy", "reason", "risk", "risk_signals", "environment",
+  "run_id", "hash", "prev_hash", "authority", "delegation", "approval_id", "approved_by",
+  "secrets_brokered", "secrets_detected", "context", "latency_ms", "stages",
 ];
 
 function slimDecision(record) {
@@ -137,6 +154,7 @@ export function buildEvidencePack({
 
   const pack = {
     v: EVIDENCE_VERSION,
+    digestFormat: DIGEST_FORMAT.V2_EXPLICIT,
     kind: "evidence_pack",
     generatedAt: now(),
     scope: { agent, org, from, to },
@@ -163,8 +181,19 @@ export function buildEvidencePack({
       "evidence is attached.",
   };
 
-  pack.digest = "sha256:" + createHash("sha256").update(canonicalJson({ ...pack, digest: undefined })).digest("hex");
+  pack.digest = digestPackV2(pack);
   return pack;
+}
+
+/** v2 digest: hash the canonical form with digest-bearing fields removed. */
+export function digestPackV2(pack) {
+  const { digest: _dropDigest, digestFormat: _dropFormat, ...body } = pack;
+  return "sha256:" + createHash("sha256").update(canonicalJson(body)).digest("hex");
+}
+
+/** v1 digest: the legacy `{ ...pack, digest: undefined }` spelling. */
+export function digestPackV1(pack) {
+  return "sha256:" + createHash("sha256").update(canonicalJson({ ...pack, digest: undefined })).digest("hex");
 }
 
 /** The human-readable report. Plain text so it survives every pipeline. */
@@ -205,8 +234,26 @@ export function renderEvidenceReport(pack) {
  *
  * A pack that has been edited after generation fails here. The digest is over
  * the canonical form minus itself, so it is stable across serialisation.
+ *
+ * Format handling is explicit, not guessed:
+ * - v2 (digestFormat 2, or a pack that carries no format marker but verifies
+ *   under v2): verified with the deletion-based digest.
+ * - legacy v1 packs (v: 1, no digestFormat): verified with the legacy digest.
+ * - anything else: refused with an explicit version reason — never silently
+ *   reinterpreted under the wrong hash.
  */
 export function verifyEvidencePack(pack) {
-  const expected = "sha256:" + createHash("sha256").update(canonicalJson({ ...pack, digest: undefined })).digest("hex");
-  return { ok: expected === pack.digest, expected, actual: pack.digest };
+  if (!pack || typeof pack !== "object" || Array.isArray(pack)) {
+    return { ok: false, expected: null, actual: null, reason: "not an evidence pack" };
+  }
+  const format = pack.digestFormat ?? (pack.v === 1 ? DIGEST_FORMAT.V1_LEGACY : null);
+  if (format === DIGEST_FORMAT.V2_EXPLICIT || (format === null && typeof pack.digest === "string")) {
+    const expected = digestPackV2(pack);
+    return { ok: expected === pack.digest, expected, actual: pack.digest, format: DIGEST_FORMAT.V2_EXPLICIT };
+  }
+  if (format === DIGEST_FORMAT.V1_LEGACY) {
+    const expected = digestPackV1(pack);
+    return { ok: expected === pack.digest, expected, actual: pack.digest, format: DIGEST_FORMAT.V1_LEGACY };
+  }
+  return { ok: false, expected: null, actual: pack.digest ?? null, reason: `unsupported evidence digest format (v=${pack.v ?? "?"}, digestFormat=${pack.digestFormat ?? "?"})` };
 }

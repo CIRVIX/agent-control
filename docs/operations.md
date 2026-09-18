@@ -1,5 +1,45 @@
 # Operations guide
 
+## Current local operations and recovery
+
+These are limitations verified from the public runtime source, not a managed-service runbook. No RPO/RTO, crash-consistency, multi-process audit safety, or successful restore drill is established by this review.
+
+### State and ownership
+
+| State | What is implemented | Recovery consequence |
+|---|---|---|
+| `<state>/audit.jsonl` | Full-file JSONL reads and one in-memory append queue per AuditChain instance | Use a single writer. No process-shared lock, automatic rotation or explicit fsync barrier. `open()` verifies loaded history before extending it; read-error handling remains a final-review checkpoint. |
+| `<state>/approvals.jsonl` | Replayed request/decision history, file-creation lock for transitions | A crashed writer can leave `.lock`; transactions time out after about five seconds, with no automatic stale-lock reclamation. Do not remove a lock while a writer is active. |
+| `<state>/policy.json`, `endpoint.json`, `spool.jsonl` | Daemon cache, remote identity, telemetry backlog | Record snapshots and append/drain operations are serialized within one daemon instance. Backup is not atomic across files; no multi-process spool coordination or crash-durability guarantee is supplied. |
+| Socket token | Generated at runtime startup | Clients must acquire the current token; do not expose it or reuse stale session state. |
+| Vault | In-memory by default; explicit SDK `seal`/`unseal` available | Restart loses unsaved handles/use/revocation state. The CLI does not automatically save or restore a sealed vault. Protect the passphrase separately; no escrow or key migration is supplied. |
+| Mission budgets, session taint, kill rules and profile state | Feature-specific local/in-memory objects unless explicitly persisted by an embedder | Do not assume restart preserves enforcement history. Local kill CLI state does not reach another process. |
+| Proof signing keys | Local state used by `prove` | Preserve trusted public-key history independently. A local key signs local claims, not independent evidence. |
+
+### Before upgrade or recovery
+
+1. Stop new agent work and quiesce all state writers. Record the exact package version, policy/configuration revision, state paths and trusted audit checkpoint externally. No built-in coordinated snapshot is supplied.
+2. Back up the complete relevant state, policy and upstream configuration using an operator-approved secure process. Keep secret-bearing files and key material protected; backups themselves may contain sensitive arguments and metadata.
+3. Verify that the expected audit file exists, is readable and contains the expected record count/head before trusting `audit verify`. `AuditChain.read()` catches read errors as an empty list; an empty chain can report success. A valid prefix does not establish that the tail was retained.
+4. Restore only in an isolated environment with outbound execution disabled. Validate policy, expected decisions, approval history and credential revocations before reconnecting an executor. Do not replay historical calls as real transactions.
+5. Reconcile in-flight approvals and external effects manually. A grant can be consumed before brokering, audit or tool execution fails; an authorization record does not establish whether a side effect occurred. There is no transaction spanning approval, audit and upstream execution, automatic compensation or exactly-once retry guarantee.
+6. Preserve evidence of corruption. Restore a trusted complete snapshot or start a separately identified chain with an externally recorded continuity boundary; do not silently edit/re-hash history or concatenate independently generated chains. Restore compatibility and rollback of state formats must be tested per release.
+
+### Operational controls that are not automatic
+
+- `init` configures; it does not start enforcement. `runtime` requires a cooperating socket client. `gateway` requires all relevant MCP calls to be routed through it. Neither is a process-wide network/filesystem firewall.
+- `cirvix kill` only mutates the command process's in-memory singleton. For an actual emergency, use your authorized supervisor to stop/quarantine the executor and provider-side credential revocation. No fleet kill delivery is shipped.
+- Gateway policy is selected at construction. Daemon refresh replaces its cached policy object; the CLI does not reassign the running gateway's rules. Treat policy updates as requiring a controlled restart until live reload is implemented and tested. Empty remote rules currently fall back to local rules at startup, not an explicit remote deny-all deployment.
+- Daemon initialization awaits a sync attempt, and optional registration/run calls can also wait on remote timeouts. Offline mode does not mean zero startup delay. Shutdown queues a final spool batch (up to 500 lines) and returns whether it emptied the backlog; remaining records produce `false`, and malformed spool lines are skipped. Inspect that result and backlog rather than equating process exit with full delivery.
+- Local file stores have no public `/metrics` exporter, central alert delivery, automated retention or certified HA deployment. Monitor process health, disk space, state readability, chain count/head, unresolved approvals and failed remote syncs using your own infrastructure.
+- `AgentSandbox` is a helper, not OS confinement. Memory limits are not enforced and child processes inherit the environment. Use separately reviewed OS/container isolation where required.
+
+See [Deployment](./deployment.md) for supported local entry points and [Developer guide](./developer.md) for release evidence.
+
+## Historical external control-plane operations
+
+> Historical external/private control-plane guide. This checkout does not ship the server, metrics routes, database migrations or deployment manifests described below. Do not treat these procedures as verified public-package operations. See [Deployment](./deployment.md).
+
 Running a Cirvix control plane: what to watch, what to back up, how to upgrade,
 and where it stops scaling.
 
@@ -212,8 +252,7 @@ when anything changed makes this usable as a CI gate.
 4. Treat host access as compromised until shown otherwise — a broken chain means
    something wrote to the database outside the API.
 
-The chain does not prevent destruction. Someone with disk access can delete the
-file. What it guarantees is that doing so is *visible*.
+The chain does not prevent destruction. Deletion, tail truncation or recomputation is not necessarily visible to a verifier without a trusted external checkpoint and expected record count.
 
 ## Retention
 

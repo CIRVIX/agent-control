@@ -362,7 +362,11 @@ export function extractResource(args) {
 export function extractDestination(args, resource) {
   for (const candidate of [args?.url, args?.uri, args?.endpoint, args?.href, resource]) {
     if (typeof candidate === "string" && /^https?:\/\//i.test(candidate)) {
-      return canonicalUrl(candidate) ?? candidate;
+      const canonical = canonicalUrl(candidate);
+      if (canonical && /^https?:\/\/[^/]*:.*:/.test(canonical) && !canonical.includes("[")) {
+        return new URL(candidate).toString();
+      }
+      return canonical ?? candidate;
     }
   }
   return null;
@@ -470,6 +474,7 @@ export function policyContext(call) {
     risk: call.risk,
     tool: call.tool,
     command: call.command,
+    arguments: call.arguments ?? {},
     secrets: { detected: call.secretsDetected },
   };
 }
@@ -486,7 +491,7 @@ export function policyRequest(call) {
 
 /* -------------------------------------------------------------------------- */
 
-function isInsideWorkspace(cwd, resource) {
+export function isInsideWorkspace(cwd, resource) {
   if (!resource) return true;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(resource)) return false;
   const norm = (s) => String(s).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -501,7 +506,7 @@ function isInsideWorkspace(cwd, resource) {
   return flat === root || flat.startsWith(root + "/");
 }
 
-function classifyEgress(target) {
+export function classifyEgress(target) {
   if (typeof target !== "string" || !/^https?:\/\//i.test(target)) return "none";
   let host;
   try {
@@ -509,7 +514,8 @@ function classifyEgress(target) {
   } catch {
     return "external";
   }
-  if (/^(localhost|127\.|0\.0\.0\.0|::1)/.test(host)) return "none";
+  host = canonicalHost(host) ?? host;
+  if (host === "localhost" || host === "0.0.0.0" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host)) return "none";
   if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host)) return "internal";
   if (/\.(internal|local|localdomain|test|invalid)$/.test(host)) return "internal";
   return "external";

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { CirvixDenied, CirvixHeld, Guard, guard, wrap } from "../src/core/guard.mjs";
 import { evaluate, expectNoLoosening, loadPolicy } from "../src/testing.mjs";
 import { HANDLE_PREFIX } from "../src/core/secrets.mjs";
+import { KillSwitchEngine } from "../src/core/kill-switch.mjs";
 
 const CWD = "/workspace";
 
@@ -42,13 +43,12 @@ test("an object of named functions is governed and keeps its shape", async () =>
   const tools = wrap(
     {
       read_file: async ({ path }) => `contents of ${path}`,
-      unrelated: "not a function",
     },
     options(),
   );
 
   assert.equal(typeof tools.read_file, "function");
-  assert.equal(tools.unrelated, "not a function", "a non-function value was mangled");
+  assert.throws(() => wrap({ unrelated: "not a function" }, options()), TypeError);
   assert.equal(await tools.read_file({ path: "/workspace/app.ts" }), "contents of /workspace/app.ts");
 });
 
@@ -75,12 +75,151 @@ test("an array of tool objects is governed without losing its metadata", async (
   assert.notEqual(original[0].func, tool.func);
 });
 
+test("all known tool entrypoints enforce decisions and use transformed arguments", async () => {
+  const keys = ["func", "invoke", "call", "execute", "handler", "_call", "run"];
+  const seen = [];
+  const original = { name: "read_file", marker: "original", schema: { type: "object" } };
+  for (const key of keys) {
+    original[key] = async function (args) {
+      seen.push({ key, args, marker: this.marker });
+      return "ok";
+    };
+  }
+  const secrets = {
+    substitute: async (args) => ({ ok: true, value: { ...args, label: "transformed" } }),
+    redact: (payload) => ({ payload, findings: [] }),
+  };
+  const [tool] = wrap([original], options({ secrets }));
+  assert.equal(tool.schema, original.schema);
+  for (const key of keys) {
+    assert.notEqual(tool[key], original[key]);
+    await assert.rejects(() => tool[key]({ path: "/workspace/.env" }), CirvixDenied);
+    assert.equal(seen.length, keys.indexOf(key));
+    await tool[key]({ path: "/workspace/readme.txt", label: "input" });
+    assert.deepEqual(seen.at(-1), { key, args: { path: "/workspace/readme.txt", label: "transformed" }, marker: "original" });
+  }
+});
+
+test("inherited and nonenumerable entrypoints retain their receiver and are governed", async () => {
+  class Reader {
+    #value = "fixture";
+    constructor() { this.name = "read_file"; }
+    async invoke() { return this.#value; }
+    async run() { return this.#value; }
+  }
+  const original = new Reader();
+  Object.defineProperty(original, "execute", { value: async () => "fixture", enumerable: false });
+  const { read_file: tool } = wrap({ read_file: original }, options());
+  for (const key of ["invoke", "run", "execute"]) {
+    await assert.rejects(() => tool[key]({ path: "/workspace/.env" }), CirvixDenied);
+    assert.equal(await tool[key]({ path: "/workspace/readme.txt" }), "fixture");
+  }
+  assert.equal(Object.getPrototypeOf(tool), null);
+  assert.equal(original.name, "read_file");
+});
+
+test("unsupported collection and tool shapes are rejected without invoking accessors", () => {
+  let accessed = false;
+  const accessor = { name: "read_file", get invoke() { accessed = true; return async () => "fixture"; } };
+  const unknown = { name: "read_file", invoke: async () => "fixture", stream: async () => "fixture" };
+  for (const tools of [null, 42, new Map(), [null], ["read_file"], [{}], Array(1), [accessor], [unknown], [{ invoke: async () => "fixture" }], [{ name: "read_file", invoke: 42 }], { read_file: {} }]) {
+    assert.throws(() => wrap(tools, options()), TypeError);
+  }
+  const collection = Object.defineProperty({}, "read_file", { get() { accessed = true; return async () => "fixture"; } });
+  assert.throws(() => wrap(collection, options()), TypeError);
+  assert.equal(accessed, false);
+});
+
+test("ambiguous argument shapes are rejected before authorization and execution", async () => {
+  const g = new Guard(options());
+  let executed = 0;
+  const tool = wrap(async () => { executed++; }, { guard: g, name: "read_file" });
+  for (const args of [[{}, {}], ["readme.txt"], [null], [undefined], [[]], [new Date()], [new (class Arguments {})()]]) {
+    await assert.rejects(() => tool(...args), TypeError);
+  }
+  assert.equal(g.stats.calls, 0);
+  assert.equal(executed, 0);
+  await tool(Object.assign(Object.create(null), { path: "/workspace/readme.txt" }));
+  assert.equal(executed, 1);
+});
+
+test("zero argument calls are governed and preserve transformed arguments", async () => {
+  const received = [];
+  const fn = async (...args) => { received.push(args); return "ok"; };
+  const g = new Guard(options());
+  await wrap(fn, { guard: g, name: "read_file" })();
+  assert.deepEqual(received, [[]]);
+  assert.equal(g.stats.calls, 1);
+  const secrets = {
+    substitute: async (args) => { assert.deepEqual(args, {}); return { ok: true, value: { label: "transformed" } }; },
+    redact: (payload) => ({ payload, findings: [] }),
+  };
+  await wrap(fn, options({ name: "read_file", secrets }))();
+  assert.deepEqual(received[1], [{ label: "transformed" }]);
+  await assert.rejects(() => wrap(fn, options({ name: "read_file", rules: [] }))(), CirvixDenied);
+  assert.equal(received.length, 2);
+});
+
+test("invalid transformed argument shapes never reach the tool", async () => {
+  let executed = false;
+  for (const value of [null, [], "fixture", new Date()]) {
+    const secrets = { substitute: async () => ({ ok: true, value }) };
+    const tool = wrap(async () => { executed = true; }, options({ name: "read_file", secrets }));
+    await assert.rejects(() => tool({ path: "/workspace/readme.txt" }), TypeError);
+  }
+  assert.equal(executed, false);
+});
+
 test("a bare function is governed and keeps its name", async () => {
   // Frameworks introspect `fn.name` to build their registry; an anonymous
   // wrapper would silently rename every tool.
   const governed = wrap(async ({ path }) => `read ${path}`, options({ name: "read_file" }));
   assert.equal(governed.name, "read_file");
   assert.equal(await governed({ path: "/workspace/a.ts" }), "read /workspace/a.ts");
+});
+
+test("Guard enforces frozen agents and unavailable freeze checks", async () => {
+  const killSwitch = new KillSwitchEngine();
+  killSwitch.arm({ scope: "agent", target: "pr-triage" });
+  const input = { tool: "read_file", args: { path: "/workspace/readme.txt" } };
+  assert.equal((await new Guard(options({ killSwitch })).authorize(input)).decision.rule, "emergency-kill-switch");
+  for (const evaluate of [() => null, () => ({ killed: "false" }), () => { throw new Error("offline"); }]) {
+    assert.equal((await new Guard(options({ killSwitch: { evaluate } })).authorize(input)).decision.rule, "kill-switch-unavailable");
+  }
+});
+
+test("Guard rechecks freezes after asynchronous brokering", async () => {
+  const killSwitch = new KillSwitchEngine();
+  const secrets = { substitute: async (value) => {
+    killSwitch.arm({ scope: "agent", target: "pr-triage" });
+    return { ok: true, value };
+  } };
+  const result = await new Guard(options({ killSwitch, secrets })).authorize({ tool: "read_file", args: { path: "/workspace/readme.txt" } });
+  assert.equal(result.decision.rule, "emergency-kill-switch");
+});
+
+test("Guard approval fingerprints retain server and environment", async () => {
+  const fingerprints = [];
+  const approvals = { findGrant: (fingerprint) => { fingerprints.push(fingerprint); return null; }, request: async () => ({ id: "pending", state: "pending" }) };
+  const rules = [{ name: "review", effect: "hold", actions: ["fs.read"] }];
+  for (const [server, environment] of [["files", "local"], ["files", "production"], ["other", "local"]]) {
+    await new Guard(options({ rules, approvals, environment })).authorize({ tool: "read_file", server, args: { path: "/workspace/readme.txt" } });
+  }
+  assert.equal(new Set(fingerprints).size, 3);
+});
+
+test("Guard uses canonical workspace and egress classifications", () => {
+  const g = new Guard(options());
+  assert.equal(g.insideWorkspace("~/readme.txt"), false);
+  assert.equal(g.insideWorkspace("/workspace/readme.txt"), true);
+  assert.equal(g.isExternal("http://127.0.0.1"), false);
+  assert.equal(g.isExternal("http://[::1]"), false);
+  assert.equal(g.isExternal("https://service.example"), true);
+});
+
+test("Guard refuses unresolved mission references", async () => {
+  const result = await new Guard(options({ mission: "missing", missions: { get: () => null } })).authorize({ tool: "read_file", args: { path: "/workspace/readme.txt" } });
+  assert.equal(result.decision.rule, "authority-mission-unavailable");
 });
 
 test("guard.wrap is the documented entry point", () => {
@@ -246,7 +385,7 @@ test("every decision reaches the telemetry sink, permitted or not", async () => 
 
 test("handles are substituted on the way out and scrubbed on the way back", async () => {
   const handle = `${HANDLE_PREFIX}${"a".repeat(32)}`;
-  const REAL = "rk_" + "live_51H8xKzQ2eZvKYlo2C";
+  const REAL = "rk_" + "live_GGGGGGGGGGGGGGGGGG";
 
   // A stand-in broker with the same surface as SecretsClient.
   const resolved = new Map();

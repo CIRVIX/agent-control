@@ -132,8 +132,8 @@ export function summarize(records) {
   for (const r of records) {
     if (r.malformed) continue;
     const d = r.decision ?? toDecision(r.verdict);
-    if (d in counts) counts[d]++;
-    if (r.risk in risks) risks[r.risk]++;
+    if (Object.hasOwn(counts, d)) counts[d]++;
+    if (Object.hasOwn(risks, r.risk)) risks[r.risk]++;
     if (typeof r.latency_ms === "number") latencies.push(r.latency_ms);
     if (r.agent) agents.add(r.agent);
     if (r.policy ?? r.rule) {

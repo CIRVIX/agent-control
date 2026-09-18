@@ -27,9 +27,12 @@ const GENESIS = "sha256:" + "0".repeat(64);
 
 /** Deterministic serialization — sorted keys, all the way down. */
 export function canonicalJson(value) {
+  if (value === undefined) return undefined;
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const keys = Object.keys(value).sort();
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? "null" : canonicalJson(v))).join(",")}]`;
+  const keys = Object.keys(value)
+    .filter((k) => value[k] !== undefined)
+    .sort();
   return `{${keys
     .map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`)
     .join(",")}}`;
@@ -51,14 +54,16 @@ export class AuditChain {
     this.#path = path;
   }
 
-  /** Reads the tail so appends continue an existing chain rather than forking it. */
   async open() {
+    await this.flush();
     const records = await this.read();
-    const last = records[records.length - 1];
-    if (last) {
-      this.#seq = last.seq;
-      this.#prev = last.hash;
+    const verified = this.#verifyRecords(records);
+    if (!verified.ok) {
+      throw new Error(`The audit log failed verification (${verified.reason}). Refusing to extend it.`);
     }
+    const last = records[records.length - 1];
+    this.#seq = last?.seq ?? 0;
+    this.#prev = last?.hash ?? GENESIS;
     return this;
   }
 
@@ -66,8 +71,9 @@ export class AuditChain {
     let text = "";
     try {
       text = await readFile(this.#path, "utf8");
-    } catch {
-      return [];
+    } catch (err) {
+      if (err.code === "ENOENT") return [];
+      throw err;
     }
     return text
       .split("\n")
@@ -102,9 +108,10 @@ export class AuditChain {
    * Found by the consistency oracle under twenty concurrent calls.
    */
   async append(entry, ts) {
+    const snapshot = JSON.parse(JSON.stringify(entry));
     const queued = this.#tail.then(
-      () => this.#appendSerially(entry, ts),
-      () => this.#appendSerially(entry, ts),
+      () => this.#appendSerially(snapshot, ts),
+      () => this.#appendSerially(snapshot, ts),
     );
     // The queue must not break on one failed write, so the tail swallows the
     // rejection. Callers still see it — `queued` is what they await.
@@ -125,10 +132,10 @@ export class AuditChain {
   async #appendSerially(entry, ts) {
     const seq = this.#seq + 1;
     const record = {
-      seq,
-      ts: ts ?? new Date().toISOString(),
-      prev_hash: this.#prev,
       ...entry,
+      seq,
+      ts: ts ?? entry.ts ?? new Date().toISOString(),
+      prev_hash: this.#prev,
     };
     record.hash = hashRecord(record);
 
@@ -150,6 +157,17 @@ export class AuditChain {
    */
   async verify() {
     const records = await this.read();
+    return this.#verifyRecords(records);
+  }
+
+  /**
+   * Shared chain walker. Note the limit stated in the header: a hash chain
+   * binds each record to its predecessor, so removal of the FINAL records
+   * leaves a chain that still verifies from genesis to its new tail. Only an
+   * externally published checkpoint head makes truncation visible; that is
+   * what `prove` is for.
+   */
+  #verifyRecords(records) {
     let prev = GENESIS;
 
     for (let i = 0; i < records.length; i++) {

@@ -105,10 +105,11 @@ export class BaseAgentAdapter {
    * Checks if an MCP server definition belongs to CIRVIX.
    */
   isCirvixServer(name, def) {
-    if (name === "cirvix") return true;
-    if (typeof def?.command === "string" && def.command.includes("cirvix")) return true;
-    if (Array.isArray(def?.args) && def.args.some((a) => typeof a === "string" && a.includes("cirvix"))) return true;
-    return false;
+    const command = String(def?.command ?? "").replaceAll("\\", "/").split("/").pop();
+    const args = Array.isArray(def?.args) ? def.args : [];
+    if (!args.includes("gateway")) return false;
+    if (/^cirvix(?:\.cmd|\.exe)?$/i.test(command)) return true;
+    return /^(?:npx|npm)(?:\.cmd)?$/i.test(command) && args.some((arg) => /^@cirvix_ai\/agent-control(?:@[^\s]+)?$/.test(arg));
   }
 
   /**

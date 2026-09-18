@@ -1,5 +1,7 @@
 # Administrator guide
 
+> Historical external/private control-plane guide. Tenant roles, SSO/SCIM, central billing and alert delivery described below are not shipped in this checkout. Local approval records are not this authenticated tenant workflow. See [Deployment](./deployment.md).
+
 For whoever owns a Cirvix tenant: roles, access, policy governance, secrets,
 alerting, and audit evidence.
 
@@ -327,10 +329,7 @@ curl -s $CIRVIX_API/v1/audit/verify -H "authorization: Bearer $TOKEN"
 # {"ok":true,"records":43675}
 ```
 
-Verification proves records were not altered after they were written. It does
-not attest to their content, and it does not prevent destruction — someone with
-disk access can delete the file. The chain guarantees that doing so is
-*visible*.
+Verification checks internal chain consistency. It does not attest to truthful content, completeness or successful execution. Deletion, truncation or recomputation is not necessarily visible without a trusted external head/count checkpoint. The public AuditChain can treat unreadable/missing files as empty; this historical API response does not establish local recovery.
 
 The control plane sweeps every tenant's chain and raises a `critical` alert on a
 break. Tamper-evidence is only useful if someone is told.

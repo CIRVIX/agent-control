@@ -182,7 +182,7 @@ export class SecretsClient {
    *
    * @returns {Promise<Substitution>}
    */
-  async substitute(args, { destination } = {}) {
+  async substitute(args, { destination, subject = this.agent } = {}) {
     const handles = [...findHandles(args)];
     if (handles.length === 0) return { ok: true, value: args, substituted: [] };
 
@@ -201,7 +201,7 @@ export class SecretsClient {
     const replacements = new Map();
     const names = [];
     for (const handle of handles) {
-      const resolved = await this.#resolve(handle, destination);
+      const resolved = await this.#resolve(handle, destination, subject);
       if (!resolved.ok) {
         this.stats.refused++;
         return {
@@ -226,11 +226,11 @@ export class SecretsClient {
     return { ok: true, value, substituted: names };
   }
 
-  async #resolve(handle, destination) {
+  async #resolve(handle, destination, subject) {
     const { status, payload } = await this.#api("/v1/secrets/resolve", {
       handle,
       destination,
-      agent: this.agent,
+      agent: subject,
     });
 
     if (status !== 200 || typeof payload.value !== "string") {

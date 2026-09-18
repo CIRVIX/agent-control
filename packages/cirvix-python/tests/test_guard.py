@@ -404,5 +404,135 @@ class WorkspaceRootDefault(unittest.TestCase):
         self.assertEqual(tools["read_file"](path="src/index.ts"), "<src/index.ts>")
 
 
+class FailClosedWrapping(unittest.TestCase):
+    def test_sanitization_requires_an_enforcer(self) -> None:
+        rules = [
+            {"name": "allow", "effect": "permit"},
+            {"name": "clean", "effect": "sanitize", "sanitize": {"strategies": ["redact"]}},
+        ]
+        for asynchronous in (False, True):
+            with self.subTest(asynchronous=asynchronous):
+                calls = []
+
+                def read_file(path):
+                    calls.append(path)
+
+                async def async_read_file(path):
+                    calls.append(path)
+
+                records = []
+                active = Guard(rules=rules, on_decision=records.append)
+                governed = wrap(async_read_file if asynchronous else read_file, guard=active)
+                with self.assertRaises(CirvixDenied):
+                    result = governed(path="sample.txt")
+                    if asynchronous:
+                        asyncio.run(result)
+                self.assertEqual(calls, [])
+                self.assertEqual(records[0]["verdict"], "deny")
+                self.assertEqual(active.stats["permitted"], 0)
+
+    def test_callable_sequences_enforce_default_deny(self) -> None:
+        calls = []
+
+        def read_file(path):
+            calls.append(path)
+
+        for collection in ([read_file], (read_file,)):
+            governed = wrap(collection, guard=Guard())
+            self.assertIsInstance(governed, type(collection))
+            with self.assertRaises(CirvixDenied):
+                governed[0](path="sample.txt")
+        self.assertEqual(calls, [])
+
+    def test_explicit_name_without_guard(self) -> None:
+        governed = wrap(lambda: "ok", name="sample", rules=[{"name": "allow", "effect": "permit"}])
+        self.assertEqual(governed.__name__, "sample")
+        self.assertEqual(governed(), "ok")
+
+    def test_argument_binding_includes_positional_and_default_resources(self) -> None:
+        rules = [{"name": "sample-only", "effect": "permit", "resources": ["sample.txt"]}]
+        calls = []
+
+        def read_file(label, path="other.txt", **options):
+            calls.append(path)
+            return path
+
+        governed = wrap(read_file, guard=Guard(rules=rules))
+        self.assertEqual(governed("label", "sample.txt", verbose=True), "sample.txt")
+        with self.assertRaises(CirvixDenied):
+            governed("sample.txt", verbose=True)
+        self.assertEqual(calls, ["sample.txt"])
+
+    def test_all_declared_tool_entrypoints_are_wrapped(self) -> None:
+        class Tool:
+            name = "read_file"
+
+            def func(self, path):
+                return "ok"
+
+            def invoke(self, path):
+                return "ok"
+
+        original = Tool()
+        [governed] = wrap([original], guard=Guard())
+        for entrypoint in (governed.func, governed.invoke):
+            with self.assertRaises(CirvixDenied):
+                entrypoint(path="sample.txt")
+        self.assertEqual(original.func(path="sample.txt"), "ok")
+
+    def test_mapping_argument_does_not_hide_a_default_resource(self) -> None:
+        calls = []
+
+        def read_file(options, path="other.txt"):
+            calls.append(path)
+
+        governed = wrap(read_file, guard=Guard(rules=[
+            {"name": "sample-only", "effect": "permit", "resources": ["sample.txt"]},
+        ]))
+        with self.assertRaises(CirvixDenied):
+            governed({"path": "sample.txt"})
+        self.assertEqual(calls, [])
+
+    def test_unknown_tool_shapes_are_rejected(self) -> None:
+        with self.assertRaises(TypeError):
+            wrap([object()], guard=Guard())
+
+    def test_noncopyable_tool_is_not_mutated(self) -> None:
+        class Tool:
+            def __copy__(self):
+                return self
+
+            def func(self):
+                return "ok"
+
+        original = Tool()
+        with self.assertRaises(TypeError):
+            wrap([original], guard=Guard())
+        self.assertEqual(original.func(), "ok")
+
+    def test_telemetry_failure_prevents_execution(self) -> None:
+        calls = []
+
+        def sink(record):
+            raise RuntimeError("sink unavailable")
+
+        governed = wrap(lambda: calls.append("ran"), guard=Guard(
+            rules=[{"name": "allow", "effect": "permit"}], on_decision=sink,
+        ))
+        with self.assertRaises(RuntimeError):
+            governed()
+        self.assertEqual(calls, [])
+
+    def test_missing_resource_is_not_inside_workspace(self) -> None:
+        self.assertFalse(Guard().inside_workspace(""))
+
+    def test_workspace_resolves_existing_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = Guard(cwd=str(root / "."))
+            self.assertTrue(active.inside_workspace(str(root / "sample.txt")))
+            self.assertFalse(active.inside_workspace(str(root.parent / "sample.txt")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

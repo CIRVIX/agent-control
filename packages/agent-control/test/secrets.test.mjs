@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 import { Gateway, destinationFor } from "../src/core/gateway.mjs";
 import { HANDLE_PREFIX, SecretsClient, findHandles, isHandle } from "../src/core/secrets.mjs";
+import { redact as redactDetected, scanString } from "../src/core/secret-detect.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MOCK = join(HERE, "fixtures", "mock-mcp-server.mjs");
@@ -12,7 +13,7 @@ const CWD = "/workspace";
 
 const HANDLE = `${HANDLE_PREFIX}${"a".repeat(32)}`;
 const OTHER_HANDLE = `${HANDLE_PREFIX}${"b".repeat(32)}`;
-const REAL = "rk_" + "live_51H8xKzQ2eZvKYlo2C";
+const REAL = "rk_" + "live_GGGGGGGGGGGGGGGGGG";
 
 /** Everything is permitted, so these tests isolate the broker from policy. */
 const PERMIT_ALL = [{ name: "allow-all", effect: "permit", actions: ["*"], resources: ["*"] }];
@@ -196,6 +197,32 @@ test("material this session resolved is caught coming back and swapped for its h
   assert.ok(!JSON.stringify(payload).includes(REAL));
   // The handle, not a placeholder — the run stays coherent.
   assert.match(payload.result.content[0].text, new RegExp(`used key ${HANDLE} ok`));
+});
+
+test("generic detection preserves a broker-restored authorization handle", async () => {
+  const { secrets, plane } = client();
+  const outgoing = await secrets.substitute(
+    { headers: { Authorization: `Bearer ${HANDLE}` } },
+    { destination: "https://api.stripe.com/v1/charges" },
+  );
+  assert.equal(outgoing.ok, true);
+  assert.equal(plane.calls[0].path, "/v1/secrets/resolve");
+  assert.ok(outgoing.value.headers.Authorization.includes(REAL));
+  const echoed = { text: JSON.stringify(outgoing.value) };
+  const restored = secrets.redact(echoed);
+  assert.equal(restored.findings.length, 1);
+  assert.ok(restored.payload.text.includes(HANDLE));
+  const detected = redactDetected(restored.payload);
+  assert.equal(detected.findings.length, 0);
+  assert.ok(detected.value.text.includes(HANDLE));
+  assert.ok(!detected.value.text.includes(REAL));
+});
+
+test("only complete canonical handles are exempt from generic detection", () => {
+  for (const handle of [HANDLE, "sec_handle_01"]) {
+    assert.equal(scanString(`Authorization: Bearer ${handle}`).length, 0);
+  }
+  assert.ok(scanString(`Authorization: Bearer ${HANDLE}z`).length > 0);
 });
 
 test("a payload with nothing to hide is returned unchanged", () => {

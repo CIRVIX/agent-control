@@ -15,9 +15,10 @@ exists to prevent.
         print(err.remediation)  # 'secrets.get("STRIPE_KEY")'
         print(err.decision_id)  # pass to `cirvix why`
 
-Enforcement is identical to the Node SDK and the MCP gateway, and that is not a
-claim resting on care: all three run the shared conformance suite in
-``packages/conformance/policy-conformance.json``.
+Python shares policy-evaluator fixtures with Node for covered inputs, not
+runtime feature parity. Guard denies required sanitization because it has no
+transformation engine; it does not scrub results or provide a built-in approval
+store or audit chain. Persist on_decision records explicitly for later lookup.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ try:
 except PackageNotFoundError:
     # Source checkouts are not installed distributions. The package metadata
     # and VERSION file are checked together by tools/check-version.mjs.
-    __version__ = "0.1.0"
+    __version__ = "0.2.2"
 
 __all__ = [
     "CirvixDenied",

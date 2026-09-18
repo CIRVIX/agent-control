@@ -23,15 +23,18 @@
  */
 
 import { canonicalizeResource, evaluate } from "./policy.mjs";
-import { canonicalUrl } from "./canonical.mjs";
 import { escalateForRisk, toDecision } from "./decisions.mjs";
 import { classify } from "./risk.mjs";
-import { classifyTool, extractCommand, publicToolName } from "./normalize.mjs";
-import { scan as scanSecrets } from "./secret-detect.mjs";
+import { classifyTool, extractCommand, publicToolName, extractResource, extractDestination, classifyEgress, isInsideWorkspace } from "./normalize.mjs";
+import { scan as scanSecrets, redact as redactSecrets } from "./secret-detect.mjs";
+import { stripInjection } from "./sanitize.mjs";
 import { applyDelegation } from "./delegation.mjs";
-import { assessAuthority, applyAuthority } from "./authority.mjs";
+import { assessAuthority, applyAuthority, acquireMission, captureMissionCost, missionAllowanceRefusal, recordMissionUsage } from "./authority.mjs";
 import { applyEntitlements } from "./entitlement-gate.mjs";
 import { SessionTaint, assessTrifecta, applyTrifecta } from "./trifecta.mjs";
+import { approvalFingerprint } from "./approvals.mjs";
+import { DECISION } from "./decisions.mjs";
+import { enforceKillSwitch } from "./kill-switch.mjs";
 
 /**
  * A refusal the agent can read and plan around.
@@ -117,24 +120,7 @@ export function actionForTool(server, tool) {
  * skipped.
  */
 export function resourceForCall(args) {
-  if (!args || typeof args !== "object") return "";
-  for (const key of [
-    "path",
-    "file",
-    "filename",
-    "filepath",
-    "uri",
-    "url",
-    "resource",
-    "target",
-    "query",
-    "sql",
-  ]) {
-    const v = args[key];
-    if (typeof v === "string" && v.length) return v;
-  }
-  const first = Object.values(args).find((v) => typeof v === "string" && v.length);
-  return typeof first === "string" ? first : "";
+  return extractResource(args);
 }
 
 /**
@@ -147,13 +133,7 @@ export function resourceForCall(args) {
  * reaches it through that one; two spellings of the destination is two policies.
  */
 export function destinationFor(resource, args) {
-  const candidates = [resource, args?.url, args?.uri, args?.endpoint, args?.href];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && /^https?:\/\//i.test(candidate)) {
-      return canonicalUrl(candidate) ?? candidate;
-    }
-  }
-  return null;
+  return extractDestination(args, resource) ?? null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -191,6 +171,8 @@ export class Guard {
     licence = null,
     meter = null,
     agents = null,
+    approvals = null,
+    killSwitch = null,
   } = {}) {
     this.rules = rules ?? [];
     this.agent = agent;
@@ -198,6 +180,8 @@ export class Guard {
     this.cwd = cwd;
     this.audit = audit;
     this.secrets = secrets;
+    this.approvals = approvals;
+    this.killSwitch = killSwitch;
     /** DelegationBroker, when agent-to-agent delegation is in use. */
     this.delegation = delegation;
     /** MissionRegistry, and/or a single mission this Guard always acts under. */
@@ -234,7 +218,11 @@ export class Guard {
    *
    * @returns {Promise<{decision:object, record:object, args:any}>}
    */
-  async authorize({ tool, server = null, args, arguments: callArguments, delegation = null, agent = null }) {
+  // ctx is supplied by the trusted embedder, never copied from tool arguments.
+  async authorize(input, ctx = {}) {
+    const costUsd = captureMissionCost(ctx);
+    const request = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+    let { tool, server = null, args, arguments: callArguments, delegation = null, agent = null, mission = null } = request;
     args = args ?? callArguments ?? {};
     const action = actionForTool(server, tool);
     const resource = resourceForCall(args);
@@ -278,8 +266,8 @@ export class Guard {
       environment: this.environment,
       path: { insideWorkspace: this.insideWorkspace(resource) },
       egress: {
-        external: this.isExternal(resource),
-        internal: false,
+        external: this.isExternal(destinationFor(resource, args) ?? resource),
+        internal: classifyEgress(destinationFor(resource, args) ?? resource) === "internal",
         allowlisted: false,
         destination: destinationFor(resource, args),
       },
@@ -292,7 +280,7 @@ export class Guard {
     };
 
     let decision = evaluate(
-      { agent: caller, action, resource, context },
+      { agent: caller, action, resource, context: { ...context, arguments: args } },
       this.rules,
       { cwd: this.cwd },
     );
@@ -305,6 +293,33 @@ export class Guard {
     // can never de-escalate one a rule made explicitly.
     const escalated = escalateForRisk(decision, classified, { floor: this.riskFloor });
     Object.assign(decision, escalated);
+
+    /*
+     * A CALL WITH NO TOOL NAME IS REFUSED HERE.
+     *
+     * `actionForTool(server, undefined)` yields the literal action `tool.`. A
+     * policy containing a wildcard permit — `permit *`, which the docs show —
+     * matches that string, so `guard.authorize({})` returned `permit` while
+     * `Pipeline` refused the identical input as `invalid-request`. Both cores
+     * are documented to answer the same question the same way; this was one of
+     * them answering a different one.
+     *
+     * The MCP gateway already rejects a nameless `tools/call` at its parameter
+     * check, so this is not a reachable bypass through that transport. It is
+     * reachable by an embedder using the SDK directly, and "there is no tool
+     * here" is not a call any policy can authorize.
+     */
+    const wellFormedTool = typeof tool === "string" && tool.trim().length > 0;
+    const wellFormedArgs = args == null || (typeof args === "object" && !Array.isArray(args));
+    if (!wellFormedTool || !wellFormedArgs) {
+      Object.assign(decision, {
+        decision: DECISION.DENY,
+        verdict: "deny",
+        rule: "invalid-request",
+        reason: "A tool call needs a non-empty string tool name and object arguments.",
+        enforced: true,
+      });
+    }
 
     /*
      * DELEGATION NARROWS HERE TOO, NOT ONLY IN THE PIPELINE.
@@ -342,14 +357,23 @@ export class Guard {
      * the console would show a boundary the runtime was not enforcing.
      *
      * `assessAuthority` is pure. It reads the mission and reports; it does not
-     * spend the budget. Usage is recorded below and only for a call that was
-     * actually permitted, so a refused call cannot exhaust the allowance it was
-     * refused under — otherwise every constraint doubles as a denial-of-service
-     * against the agent's real work.
+     * spend the budget. A shared mission lease protects its allowance through
+     * asynchronous approval, broker and audit work. Only a successful
+     * authorization is charged; external execution is outside this transaction.
+     * Charging a refused call would let a blocked agent exhaust its own mission,
+     * turning every constraint into a denial-of-service against the agent's work.
      */
-    const activeMission =
-      this.mission ?? (this.missions ? this.missions.forAgent(caller) : null);
+    let activeMission =
+      mission ?? this.mission ?? (this.missions ? this.missions.forAgent(caller) : null);
+    if (typeof activeMission === "string") {
+      activeMission = this.missions?.get(activeMission) ?? null;
+      if (!activeMission) Object.assign(decision, { decision: DECISION.DENY, verdict: "deny", rule: "authority-mission-unavailable", reason: "The requested mission could not be resolved." });
+    }
 
+    if (activeMission?.id && this.missions?.get(activeMission.id)) activeMission = this.missions.get(activeMission.id);
+    const missionLease = acquireMission(activeMission);
+    try {
+    const allowanceRefusal = missionAllowanceRefusal(activeMission, costUsd, missionLease);
     const authorityAssessment = assessAuthority(
       {
         agent: caller,
@@ -359,13 +383,14 @@ export class Guard {
         server,
         destination: destinationFor(decision.resource ?? resource, args),
         environment: this.environment,
-        costUsd: args?.costUsd ?? 0,
+        costUsd,
         delegating: Boolean(delegation),
       },
       activeMission,
     );
 
     const authorityContext = applyAuthority(decision, authorityAssessment);
+    if (allowanceRefusal) Object.assign(decision, allowanceRefusal, { decision: DECISION.DENY, verdict: "deny" });
 
     /*
      * An attempt is recorded whether or not authority is what refused it.
@@ -401,7 +426,7 @@ export class Guard {
       server,
       destination: destinationFor(decision.resource ?? resource, args),
       environment: this.environment,
-      egress: this.isExternal(decision.resource ?? resource) ? "external" : "none",
+      egress: classifyEgress(destinationFor(decision.resource ?? resource, args) ?? resource),
       timestamp: new Date().toISOString(),
       sql: typeof args?.sql === "string" ? args.sql : typeof args?.query === "string" ? args.query : null,
       secretsDetected: scanned.length,
@@ -434,9 +459,66 @@ export class Guard {
       }),
     );
 
+    const killContext = { agentId: caller, tool: publicToolName(action), rawTool: tool, session: this.runId, environment: this.environment, mcp: server };
+    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
+
     const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
     const decisionId = `dec_${Date.now().toString(36)}${(this.nextId++).toString(36)}`;
     decision.decisionId = decisionId;
+
+    if ((decision.verdict === "hold" || decision.decision === DECISION.REQUIRE_APPROVAL) && this.approvals) {
+      const callForFingerprint = {
+        agent: caller,
+        server,
+        environment: this.environment,
+        action,
+        resource: decision.resource ?? resource,
+        command: extractCommand(args),
+        delegation: delegationContext?.principals ?? null,
+        arguments: args,
+      };
+      const fingerprint = approvalFingerprint(callForFingerprint);
+
+      try {
+        const grant = this.approvals.findGrant(fingerprint);
+
+        if (grant) {
+          await this.approvals.consume(grant.id, decisionId);
+          decision.decision = DECISION.ALLOW;
+          decision.verdict = "permit";
+          decision.approvalId = grant.id;
+          decision.approvedBy = grant.decidedBy;
+          decision.reason = `Approved by ${grant.decidedBy}. ${decision.reason ?? ""}`.trim();
+        } else {
+          const approval = await this.approvals.request({
+            request_id: decisionId.replace(/^dec_/, "req_"),
+            agent: caller,
+            tool,
+            resource: decision.resource ?? resource,
+            risk: classified.level,
+            rule: decision.rule,
+            reason: decision.reason,
+            approvers: decision.approvers ?? [],
+            fingerprint,
+          });
+          decision.approvalId = approval.id;
+          if (approval.state === "denied") {
+            decision.decision = DECISION.DENY;
+            decision.verdict = "deny";
+            decision.reason = `Denied by ${approval.decidedBy}. ${decision.reason ?? ""}`.trim();
+          }
+        }
+      } catch (err) {
+        decision.decision = DECISION.DENY;
+        decision.verdict = "deny";
+        decision.rule = "approval-unavailable";
+        decision.reason = `This call needs human approval and the approval store is unavailable (${err.message}). Refused rather than held.`;
+        decision.remediation = "Check the approval log is writable, then retry.";
+      }
+    } else if (decision.verdict === "hold" || decision.decision === DECISION.REQUIRE_APPROVAL) {
+      decision.approvalId = decision.approvalId ?? `apr_${decisionId.slice(4)}`;
+    }
+
     this.stats.calls++;
     this.stats.latencyTotal += latencyMs;
 
@@ -446,23 +528,39 @@ export class Guard {
     let outgoing = args;
     let brokered = [];
     if (this.secrets && decision.verdict === "permit") {
-      const substitution = await this.secrets.substitute(args, {
-        destination: destinationFor(decision.resource, args),
-        // See the matching note in `Pipeline`: possession of a handle is not
-        // authority to spend it.
-        subject: caller,
-      });
-      if (substitution.ok) {
+      let substitution;
+      try {
+        substitution = await this.secrets.substitute(args, {
+          destination: destinationFor(decision.resource, args),
+          subject: caller,
+        });
+      } catch {
+        substitution = { ok: false, reason: "The secret broker is unavailable." };
+      }
+      if (substitution?.ok === true && substitution.value !== undefined) {
         outgoing = substitution.value;
-        brokered = substitution.substituted;
+        brokered = Array.isArray(substitution.substituted) ? substitution.substituted : [];
       } else {
+        substitution = substitution?.ok === false
+          ? substitution
+          : { ok: false, reason: "The secret broker returned an invalid response." };
         decision.verdict = "deny";
-        decision.rule = "secret-broker";
+        decision.decision = DECISION.DENY;
+        decision.rule = substitution.outcome === "revoked" ? "credential-revoked" : "secret-broker";
         decision.reason = substitution.reason;
-        decision.remediation =
-          "Request a handle scoped to this destination, or add the destination to the secret's allowlist.";
+        decision.remediation = substitution.outcome === "revoked"
+          ? "This credential was revoked. Request a fresh credential handle."
+          : "Request a handle scoped to this destination, or add the destination to the secret's allowlist.";
       }
     }
+
+    if (decision.decision === DECISION.SANITIZE &&
+        (decision.sanitize ?? []).some((s) => s.targets.includes("arguments"))) {
+      outgoing = redactSecrets(outgoing).value;
+    }
+
+    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
+    if (decision.verdict !== "permit") outgoing = args;
 
     const record = {
       decision_id: decisionId,
@@ -490,6 +588,8 @@ export class Guard {
       context,
       considered: decision.considered?.slice(0, 200),
       ...(decision.riskEscalated ? { risk_escalated: true } : {}),
+      ...(decision.approvalId ? { approval_id: decision.approvalId } : {}),
+      ...(decision.approvedBy ? { approved_by: decision.approvedBy } : {}),
       // Who authorized this must be answerable after the fact, on every surface
       // — not only the one that happened to record it.
       ...(delegationContext ? { delegation: delegationContext } : {}),
@@ -513,19 +613,37 @@ export class Guard {
         : {}),
     };
 
-    if (this.audit) await this.audit.append(record);
+    if (this.audit) {
+      try {
+        await this.audit.append(record);
+      } catch {
+        record.audit_write_failed = true;
+        if (decision.verdict === "permit") {
+          Object.assign(decision, {
+            decision: DECISION.DENY,
+            verdict: "deny",
+            rule: "audit-unavailable",
+            reason: "The decision could not be recorded, so the call was refused.",
+            remediation: "Check the audit log path is writable, then retry.",
+          });
+          Object.assign(record, {
+            decision: decision.decision,
+            verdict: decision.verdict,
+            rule: decision.rule,
+            policy: decision.rule,
+            reason: decision.reason,
+          });
+          outgoing = args;
+        }
+      }
+    }
     this.onDecision({ kind: "decision", ...record });
 
     if (decision.verdict === "deny") this.stats.denied++;
     else if (decision.verdict === "hold") this.stats.held++;
     else {
       this.stats.permitted++;
-      // Budget and rate are consumed by calls that HAPPEN. See the note above
-      // `assessAuthority`: charging a refused call would let a blocked agent
-      // exhaust its own mission.
-      if (this.missions && activeMission) {
-        this.missions.record(activeMission.id, { costUsd: args?.costUsd ?? 0 });
-      }
+      // The successful authorization is charged below, just before return.
       this.taint.observeCall(trifectaCall, true);
       // Any successful read of secret-shaped material taints the session. A
       // brokered substitution deliberately does not: the agent never held the
@@ -535,13 +653,27 @@ export class Guard {
       }
     }
 
+    if (activeMission && decision.verdict === "permit") recordMissionUsage(activeMission, { costUsd });
     return { decision, record, args: outgoing };
+    } finally {
+      missionLease.release();
+    }
   }
 
   /** Scans a result for material this session resolved, and puts handles back. */
-  scrub(payload) {
-    if (!this.secrets) return { payload, findings: [] };
-    const result = this.secrets.redact(payload);
+  scrub(payload, decision = {}) {
+    const swept = this.secrets ? this.secrets.redact(payload) : null;
+    const detected = redactSecrets(swept ? swept.payload : payload);
+    const result = {
+      payload: detected.value,
+      findings: [...(swept?.findings ?? []), ...(swept?.detected ?? []), ...detected.findings],
+    };
+    if (decision.decision === DECISION.SANITIZE &&
+        (decision.sanitize ?? []).some((s) => s.targets.includes("result"))) {
+      const stripped = stripInjection(result.payload);
+      result.payload = stripped.value;
+      result.findings.push(...stripped.findings);
+    }
     if (result.findings.length) {
       this.stats.leaks += result.findings.length;
       this.log(`leak caught on the return path: ${result.findings.map((f) => f.name).join(", ")}`);
@@ -570,28 +702,11 @@ export class Guard {
   }
 
   insideWorkspace(resource) {
-    if (!resource) return true;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(resource)) return false;
-    const norm = (s) => s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-    const abs = /^([A-Za-z]:|\/)/.test(resource) ? resource : `${this.cwd}/${resource}`;
-    const parts = [];
-    for (const seg of norm(abs).split("/")) {
-      if (seg === "..") parts.pop();
-      else if (seg !== ".") parts.push(seg);
-    }
-    const flat = parts.join("/");
-    const root = norm(this.cwd);
-    return flat === root || flat.startsWith(root + "/");
+    return isInsideWorkspace(this.cwd, canonicalizeResource(resource, this.cwd));
   }
 
   isExternal(resource) {
-    if (!/^https?:\/\//i.test(resource)) return false;
-    try {
-      const host = new URL(resource).hostname;
-      return !/^(localhost|127\.|::1|0\.0\.0\.0|.*\.internal|.*\.local)$/i.test(host);
-    } catch {
-      return true;
-    }
+    return classifyEgress(resource) === "external";
   }
 }
 
@@ -624,27 +739,22 @@ export function wrap(tools, options = {}) {
   }
 
   if (Array.isArray(tools)) {
-    return tools.map((tool) => {
+    return Array.from(tools, (tool) => {
       if (typeof tool === "function") return wrapCallable(tool, tool.name ?? "tool", guard);
-      const key = CALLABLE_KEYS.find((k) => typeof tool?.[k] === "function");
-      if (!key) return tool;
-      const name = tool.name ?? tool.title ?? "tool";
-      // A shallow copy with the callable replaced, rather than a mutation:
-      // frameworks hold references to the tool objects they were given, and
-      // mutating them governs the caller's array as a side effect of reading
-      // ours.
-      return Object.assign(Object.create(Object.getPrototypeOf(tool) ?? Object.prototype), tool, {
-        [key]: wrapCallable(tool[key].bind(tool), name, guard),
-      });
+      return wrapToolObject(tool, null, guard);
     });
   }
 
-  if (tools && typeof tools === "object") {
+  if (isPlainObject(tools)) {
     return Object.fromEntries(
-      Object.entries(tools).map(([name, value]) => [
-        name,
-        typeof value === "function" ? wrapCallable(value, name, guard) : value,
-      ]),
+      Reflect.ownKeys(tools).map((name) => {
+        const descriptor = Object.getOwnPropertyDescriptor(tools, name);
+        if (typeof name !== "string" || !Object.hasOwn(descriptor, "value")) {
+          throw new TypeError("Tool collections require string names and data properties.");
+        }
+        const value = descriptor.value;
+        return [name, typeof value === "function" ? wrapCallable(value, name, guard) : wrapToolObject(value, name, guard)];
+      }),
     );
   }
 
@@ -653,19 +763,59 @@ export function wrap(tools, options = {}) {
 
 const CALLABLE_KEYS = ["func", "invoke", "call", "execute", "handler", "_call", "run"];
 
+function wrapToolObject(tool, collectionName, guard) {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+    throw new TypeError("Each tool must be a function or an object with supported callable entrypoints.");
+  }
+  const descriptors = new Map();
+  for (let current = tool; current && current !== Object.prototype; current = Object.getPrototypeOf(current)) {
+    for (const key of Reflect.ownKeys(current)) {
+      if (key === "constructor" && current !== tool) continue;
+      if (!descriptors.has(key)) descriptors.set(key, Object.getOwnPropertyDescriptor(current, key));
+    }
+  }
+  const callables = [];
+  for (const [key, descriptor] of descriptors) {
+    if (!Object.hasOwn(descriptor, "value")) throw new TypeError("Tool accessors require an explicit adapter.");
+    if (typeof descriptor.value === "function") {
+      if (!CALLABLE_KEYS.includes(key)) throw new TypeError("Unsupported callable entrypoint; provide an explicit adapter.");
+      callables.push([key, descriptor.value]);
+    } else if (CALLABLE_KEYS.includes(key)) {
+      throw new TypeError("Callable entrypoints must be functions.");
+    }
+  }
+  if (!callables.length) throw new TypeError("Tool object has no supported callable entrypoint.");
+  const name = collectionName ?? descriptors.get("name")?.value ?? descriptors.get("title")?.value;
+  if (typeof name !== "string" || !name.trim()) throw new TypeError("Tool objects require a nonempty name.");
+  const copy = Object.create(null);
+  for (const [key, descriptor] of descriptors) {
+    if (!CALLABLE_KEYS.includes(key)) Object.defineProperty(copy, key, descriptor);
+  }
+  for (const [key, fn] of callables) {
+    Object.defineProperty(copy, key, {
+      value: wrapCallable(fn.bind(tool), name, guard),
+      enumerable: descriptors.get(key).enumerable,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return copy;
+}
+
 function wrapCallable(fn, name, guard) {
+  if (typeof name !== "string" || !name.trim()) throw new TypeError("Tools require a nonempty name.");
   const governed = async (...callArgs) => {
-    // Frameworks call tools with a single argument object, or positionally.
-    // Only the first form carries anything a policy can read, and pretending
-    // otherwise would evaluate a positional call against an empty resource and
-    // report the result as if it meant something.
-    const args = callArgs.length === 1 && isPlainObject(callArgs[0]) ? callArgs[0] : { input: callArgs[0] };
+    if (callArgs.length > 1 || (callArgs.length === 1 && !isPlainObject(callArgs[0]))) {
+      throw new TypeError("Governed tools accept zero arguments or one plain argument object.");
+    }
+    const args = callArgs.length ? callArgs[0] : {};
 
     const { decision, args: outgoing } = await guard.authorize({ tool: name, args });
     if (decision.verdict !== "permit") throw guard.toError(decision);
+    if (!isPlainObject(outgoing)) throw new TypeError("Authorization must return a plain argument object.");
 
-    const result = await fn(...(callArgs.length === 1 && isPlainObject(callArgs[0]) ? [outgoing] : callArgs));
-    return guard.scrub(result).payload;
+    const result = await fn(...(callArgs.length || Reflect.ownKeys(outgoing).length ? [outgoing] : []));
+    return guard.scrub(result, decision).payload;
   };
 
   // Frameworks introspect `fn.name` to build their tool registry, and an
@@ -675,7 +825,9 @@ function wrapCallable(fn, name, guard) {
 }
 
 function isPlainObject(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (!value || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /** The documented entry point: `guard.wrap(tools, { … })`. */

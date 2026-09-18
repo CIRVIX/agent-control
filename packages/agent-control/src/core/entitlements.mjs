@@ -39,7 +39,7 @@
  */
 
 /** Ordered least → most capable. Used for `atLeast` comparisons. */
-export const TIER_ORDER = ["free", "starter", "pro", "team", "enterprise"];
+export const TIER_ORDER = ["free", "lite", "starter", "pro", "team", "enterprise"];
 
 /**
  * `decisionsPerDay` is per SEAT for tiers where `perSeat` is true, and
@@ -89,6 +89,30 @@ export const TIERS = {
     agents: 1,
     seatsIncluded: 1,
     auditRetentionHours: 12,
+    persistentSecrets: false,
+    secretTtlHours: 2,
+    approvals: false,
+    attestation: false,
+    shareableReplay: false,
+    policyPacks: 2,
+    sharedPolicy: false,
+    customPolicies: false,
+  },
+  lite: {
+    id: "lite",
+    name: "Lite",
+    // The $29 entry tier: five times Free's daily volume with a longer local
+    // window, but no paid capabilities. Every figure sits between Free and
+    // Starter on purpose — a cheaper tier that outranks a dearer one on any
+    // axis silently un-sells that tier, so Lite is volume + retention only:
+    // no persistent secrets, no replay, no approvals, no attestation, no
+    // shared policy. The upgrade story stays one sentence: Starter adds
+    // persistent secrets, replay and 3x the daily volume.
+    decisionsPerDay: 500,
+    perSeat: false,
+    agents: 2,
+    seatsIncluded: 1,
+    auditRetentionHours: 24 * 3,
     persistentSecrets: false,
     secretTtlHours: 2,
     approvals: false,

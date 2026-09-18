@@ -37,12 +37,12 @@ import * as passportCmd from "../src/commands/passport.mjs";
 import { init as initCmd } from "../src/commands/init.mjs";
 import { status as statusCmd } from "../src/commands/status.mjs";
 import { upgrade as upgradeCmd } from "../src/commands/upgrade.mjs";
-import { AgentRegistry, Meter, readLicence } from "../src/core/meter.mjs";
+import { AgentRegistry, Meter, readLicence, syncLicence } from "../src/core/meter.mjs";
 import { commercialNotices } from "../src/core/notices.mjs";
 import { demo as demoCmd } from "../src/commands/demo.mjs";
 import { welcome } from "../src/commands/welcome.mjs";
 import { doctor } from "../src/commands/doctor.mjs";
-import { login, logout } from "../src/commands/login.mjs";
+import { login, logout, readCredentials } from "../src/commands/login.mjs";
 
 /**
  * Read from the manifest, never written down twice.
@@ -1178,6 +1178,32 @@ async function main() {
       if (flags.seats) rest.push("--seats", String(flags.seats));
       await upgradeCmd(rest, { cwd });
       return 0;
+    }
+
+    case "sync": {
+      const creds = await readCredentials();
+      const apiUrl = flags.api ?? flags.url ?? process.env.CIRVIX_API_URL ?? creds?.controlPlaneUrl;
+      const apiKey = flags.key ?? process.env.CIRVIX_API_KEY ?? creds?.apiKey;
+      if (!apiUrl || !apiKey) {
+        process.stderr.write(
+          red("  Sync requires control plane credentials. Pass --api <url> and --key <cvx_...>, or run cirvix login.\n"),
+        );
+        return 2;
+      }
+      try {
+        const result = await syncLicence({ apiUrl, apiKey, cwd });
+        if (flags.json) {
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+          return 0;
+        }
+        process.stdout.write(
+          `\n  ${green("✓")} Synchronized license: ${bold(result.tier)} (${result.seats} seat${result.seats === 1 ? "" : "s"}) · status: ${result.status}\n\n`,
+        );
+        return 0;
+      } catch (err) {
+        process.stderr.write(red(`  Sync failed: ${err.message}\n`));
+        return 1;
+      }
     }
 
     case "status": {

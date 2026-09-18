@@ -66,6 +66,7 @@ export function readLicence(cwd = process.cwd()) {
     tier: tier.id,
     seats: Number(raw.seats) > 0 ? Number(raw.seats) : (tier.seatsIncluded ?? 1),
     customerId: raw.customerId ?? null,
+    token: raw.token ?? null,
     source: "file",
   };
 }
@@ -78,10 +79,70 @@ export function writeLicence(licence, cwd = process.cwd()) {
     tier: tier.id,
     seats: Number(licence.seats) > 0 ? Number(licence.seats) : (tier.seatsIncluded ?? 1),
     customerId: licence.customerId ?? null,
+    ...(licence.token ? { token: licence.token } : {}),
     updated: new Date().toISOString(),
   };
   writeFileSync(join(dir, LICENCE_FILE), JSON.stringify(body, null, 2) + "\n", "utf8");
   return body;
+}
+
+/**
+ * Synchronizes local runtime license with the hosted control plane subscription.
+ *
+ * Calls GET /v1/subscription/license.
+ * If status is 'active' or 'trialing', writes updated tier/seats to .cirvix/licence.json.
+ * If status is cancelled, expired, past_due, or unpaid, fails closed to Free.
+ */
+export async function syncLicence({
+  apiUrl,
+  apiKey,
+  cwd = process.cwd(),
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (!apiUrl || !apiKey) {
+    throw new Error("syncLicence requires apiUrl and apiKey.");
+  }
+  const base = String(apiUrl).replace(/\/+$/, "");
+  const res = await fetchImpl(`${base}/v1/subscription/license`, {
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      accept: "application/json",
+      connection: "close",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Sync failed with HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const payload = await res.json();
+  const sub = payload.subscription ?? payload;
+  const current = readLicence(cwd);
+
+  const isActive = sub.status === "active" || sub.status === "trialing";
+  const targetTier = isActive ? sub.plan : DEFAULT_TIER;
+  const targetSeats = isActive ? (Number(sub.seats) || 1) : 1;
+
+  const written = writeLicence(
+    {
+      tier: targetTier,
+      seats: targetSeats,
+      customerId: sub.orgId ?? sub.org_id ?? payload.claims?.orgId ?? sub.customerId ?? current.customerId,
+      token: payload.license ?? null,
+    },
+    cwd,
+  );
+
+  return {
+    ok: true,
+    previousTier: current.tier,
+    tier: written.tier,
+    seats: written.seats,
+    status: sub.status,
+    syncedAt: written.updated,
+  };
 }
 
 /**

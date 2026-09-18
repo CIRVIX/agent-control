@@ -35,6 +35,7 @@ import { Meter, readLicence } from "../core/meter.mjs";
  */
 export const PRICING = {
   free: { monthly: 0, annual: 0 },
+  lite: { monthly: 29, annual: 290 },
   starter: { monthly: 79, annual: 790 },
   pro: { monthly: 199, annual: 1990 },
   team: { monthly: 349, annual: 3490, perSeat: true, minSeats: 3 },

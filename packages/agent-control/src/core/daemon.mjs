@@ -28,6 +28,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname, platform } from "node:os";
 import { dirname, join } from "node:path";
+import { writeLicence } from "./meter.mjs";
 
 const VERSION = JSON.parse(
   readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
@@ -143,6 +144,7 @@ export class Daemon {
       if (!this.endpointId) await this.#register();
       const hb = await this.#heartbeat();
       if (hb?.policyStale) await this.#pullPolicy();
+      await this.#syncLicense();
       await this.#drainSpool();
       this.online = true;
       this.#attempt = 0;
@@ -266,6 +268,34 @@ export class Daemon {
     this.policy = policy;
     await this.#atomicWrite(this.policyPath, JSON.stringify(policy, null, 2));
     this.log(`policy updated to v${policy.version} (${policy.rules.length} rules)`);
+  }
+
+  async #syncLicense() {
+    try {
+      const res = await this.#api("GET", "/v1/subscription/license");
+      if (res?.subscription) {
+        const sub = res.subscription;
+        const isActive = sub.status === "active" || sub.status === "trialing";
+        const targetTier = isActive ? sub.plan : "free";
+        const targetSeats = isActive ? (Number(sub.seats) || 1) : 1;
+        writeLicence(
+          {
+            tier: targetTier,
+            seats: targetSeats,
+            customerId: sub.orgId ?? null,
+            token: res.license ?? null,
+          },
+          dirname(this.stateDir),
+        );
+      }
+    } catch {
+      // Best-effort: licence sync failure never interrupts enforcement.
+    }
+  }
+
+  /** Explicitly triggers a licence/entitlement synchronization from control-plane. */
+  async syncLicense() {
+    return this.#syncLicense();
   }
 
   /* -- telemetry ---------------------------------------------------------- */

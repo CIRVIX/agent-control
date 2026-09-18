@@ -323,14 +323,20 @@ async function main() {
   // never touches the network/audit/vault, never executes anything.
   if (typeof flags.eval === "string") {
     const { consolePreview } = await import("../src/commands/console.mjs");
-    const { code, output, error } = await consolePreview({
-      cwd, json: Boolean(flags.json), evalInput: flags.eval,
-      policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
-      verbose: Boolean(flags.verbose || flags.v),
-    });
-    if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
-    process.stdout.write(output + "\n");
-    return code;
+    let res;
+    try {
+      res = await consolePreview({
+        cwd, json: Boolean(flags.json), evalInput: flags.eval,
+        policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+        verbose: Boolean(flags.verbose || flags.v),
+      });
+    } catch (err) {
+      process.stderr.write(red(`  ${err.message}\n`));
+      return 2;
+    }
+    if (res.error) { process.stderr.write(red(`  ${res.error}\n`)); return res.code; }
+    process.stdout.write(res.output + "\n");
+    return res.code;
   }
 
   // BARE `cirvix`:
@@ -360,17 +366,33 @@ async function main() {
         process.stdout.write(HELP + "\n");
         return 2;
       }
+      if (typeof flags.theme === "string") {
+        const { setTheme } = await import("../src/core/theme.mjs");
+        try {
+          setTheme(flags.theme);
+          process.env.CIRVIX_THEME = flags.theme;
+        } catch (err) {
+          process.stderr.write(red(`  ${err.message}\n`));
+          return 2;
+        }
+      }
       const evalInput = typeof flags.eval === "string" ? flags.eval : null;
       if (evalInput !== null) {
         const { consolePreview } = await import("../src/commands/console.mjs");
-        const { code, output, error } = await consolePreview({
-          cwd, json: Boolean(flags.json), evalInput,
-          policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
-          verbose: Boolean(flags.verbose || flags.v),
-        });
-        if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
-        process.stdout.write(output + "\n");
-        return code;
+        let res;
+        try {
+          res = await consolePreview({
+            cwd, json: Boolean(flags.json), evalInput,
+            policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+            verbose: Boolean(flags.verbose || flags.v),
+          });
+        } catch (err) {
+          process.stderr.write(red(`  ${err.message}\n`));
+          return 2;
+        }
+        if (res.error) { process.stderr.write(red(`  ${res.error}\n`)); return res.code; }
+        process.stdout.write(res.output + "\n");
+        return res.code;
       }
       const { canLaunchInteractive } = await import("../src/commands/interactive.mjs");
       if (canLaunchInteractive(flags, positional.slice(1))) {
@@ -1155,30 +1177,6 @@ async function main() {
       return 0;
     }
 
-    /* ------------------------------------------------------------ console */
-    case "console": {
-      if (typeof flags.theme === "string") {
-        const { setTheme } = await import("../src/core/theme.mjs");
-        try {
-          setTheme(flags.theme);
-          process.env.CIRVIX_THEME = flags.theme;
-        } catch (err) {
-          process.stderr.write(red(`  ${err.message}\n`));
-          return 2;
-        }
-      }
-      const loaded = await loadPolicy(flags.policy, cwd);
-      const { consoleCmd } = await import("../src/commands/console.mjs");
-      await consoleCmd({
-        cwd,
-        rules: loaded.rules,
-        policyFilePresent: Boolean(loaded.path),
-        mode: flags.mode === "audit" ? MODE.AUDIT : MODE.ENFORCE,
-        evalText: typeof flags.eval === "string" ? flags.eval : null,
-        once: Boolean(flags.once ?? flags.eval),
-      });
-      return 0;
-    }
 
     case "theme": {
       const { setTheme, THEME_NAMES } = await import("../src/core/theme.mjs");

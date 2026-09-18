@@ -56,6 +56,7 @@ export function renderAuthPreviewCard({
   width = 62,
   verbose = false,
   env = "local",
+  policyFilePresent = null,
 }) {
   const ch = boxChars();
   const g = glyphs();
@@ -106,10 +107,24 @@ export function renderAuthPreviewCard({
   // Human-readable reason
   let reason = decision.reason;
   if (!reason) {
-    if (isDeny) reason = "No rule permits this call. The policy set is default-deny: an action must be explicitly allowed.";
+    if (isDeny) {
+      if (policyFilePresent === false && !decision.rule) {
+        reason = "No policy file found. Run 'cirvix init' in this workspace to create one, then retry. No rule permits this call. The policy set is default-deny: an action must be explicitly allowed.";
+      } else if (policyFilePresent === true && !decision.rule) {
+        reason = "No rule permits this call. The policy set is default-deny: an action must be explicitly allowed. Add a permit rule to cirvix.policy.";
+      } else {
+        reason = "No rule permits this call. The policy set is default-deny: an action must be explicitly allowed.";
+      }
+    }
     else if (isAllow) reason = "Call matches an explicit allow rule.";
     else if (isHold) reason = "Operation requires manual authorization.";
     else if (isSanitize) reason = "Fetched content is data. Instructions inside it are not addressed to the model.";
+  } else if (isDeny && !decision.rule && decision.explicit === false) {
+    if (policyFilePresent === false) {
+      reason = "No policy file found. Run 'cirvix init' in this workspace to create one, then retry. " + reason;
+    } else if (policyFilePresent === true) {
+      reason = reason + " Add a permit rule to cirvix.policy.";
+    }
   }
 
   // Inner decision card lines
@@ -150,11 +165,15 @@ export function renderAuthPreviewCard({
   ];
 
   // Check remediation
-  let remediation = null;
-  if (isDeny && (resource.includes(".env") || decision.rule?.includes("dotenv"))) {
+  let remediation = decision.remediation ?? null;
+  if (!remediation) {
+    if (isDeny && (resource.includes(".env") || decision.rule?.includes("dotenv"))) {
+      remediation = 'secrets.get("STRIPE_KEY")';
+    } else if (isHold) {
+      remediation = "cirvix approvals --review";
+    }
+  } else if (isDeny && (resource.includes(".env") || decision.rule?.includes("dotenv"))) {
     remediation = 'secrets.get("STRIPE_KEY")';
-  } else if (isHold) {
-    remediation = "cirvix approvals --review";
   }
 
   const lines = [
@@ -223,19 +242,57 @@ export async function consolePreview({
   agent = "local",
   env = "local",
   verbose = false,
+  policyFilePresent = null,
 } = {}) {
   const parsed = parseEvalInput(evalInput);
   if (!parsed.ok) return { code: 2, output: null, error: parsed.error };
   let rules = STARTER_RULES;
+  let resolvedPath = null;
+  const { loadPolicyFile } = await import("./policy.mjs");
   if (policy) {
-    const { loadPolicyFile } = await import("./policy.mjs");
-    rules = (await loadPolicyFile(policy, { cwd })).rules;
+    const loaded = await loadPolicyFile(policy, { cwd });
+    rules = loaded.rules;
+    resolvedPath = policy;
+  } else {
+    for (const candidate of ["cirvix.policy", "cirvix.policy.json", ".cirvix/policy.json"]) {
+      const p = (await import("node:path")).join(cwd, candidate);
+      try {
+        await (await import("node:fs/promises")).access(p);
+        const loaded = await loadPolicyFile(p, { cwd });
+        rules = loaded.rules;
+        resolvedPath = p;
+        break;
+      } catch {}
+    }
   }
+  const isPresent = policyFilePresent ?? Boolean(resolvedPath);
+
+  const { normalize } = await import("../core/normalize.mjs");
+  const isPathLike = (s) => typeof s === "string" && (s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.startsWith("~") || s.includes("/") || s.includes("\\") || /\.[a-z0-9]+$/i.test(s));
+  const isUrlLike = (s) => typeof s === "string" && /^https?:\/\//i.test(s);
+
+  let args = {};
+  if (isUrlLike(parsed.resource)) {
+    args.url = parsed.resource;
+  } else if (isPathLike(parsed.resource) || /read|write|file|cat|stat|delete/i.test(parsed.tool)) {
+    args.path = parsed.resource;
+  } else {
+    args.command = parsed.resource;
+  }
+  const norm = normalize({
+    tool: parsed.tool,
+    arguments: args,
+    raw_tool: parsed.tool,
+    resource: parsed.resource,
+    agent,
+    environment: env,
+  });
+
   const inside = isInsideWorkspace(cwd, parsed.resource);
   const decision = evaluate(
     {
       agent,
-      action: parsed.tool,
+      action: norm.action,
       resource: parsed.resource,
       context: {
         environment: env,
@@ -256,6 +313,7 @@ export async function consolePreview({
     decision,
     verbose,
     env,
+    policyFilePresent: isPresent,
   }) + "\n";
 
   return { code: 0, output };

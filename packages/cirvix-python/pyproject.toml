@@ -40,7 +40,10 @@ packages = ["cirvix"]
 # The conformance fixture ships with the source distribution so the suite that
 # proves this engine agrees with the Node one can be run by anyone auditing it,
 # not only by us.
-include = ["/cirvix/*.py", "/tests/*.py", "/README.md", "/LICENSE", "/NOTICE", "/pyproject.toml", "/check_artifacts.py"]
+include = ["cirvix", "tests", "README.md", "hatch_build.py"]
 
 [tool.hatch.build.targets.sdist.force-include]
-"../conformance/policy-conformance.json" = "conformance/policy-conformance.json"
+"../conformance/policy-conformance.json" = "tests/fixtures/policy-conformance.json"
+
+[tool.hatch.build.targets.sdist.hooks.custom]
+path = "hatch_build.py"

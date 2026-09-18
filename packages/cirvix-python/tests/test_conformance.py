@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,10 +21,57 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cirvix.policy import evaluate  # noqa: E402
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = PACKAGE_ROOT / "conformance" / "policy-conformance.json"
-if not FIXTURE.is_file():
-    FIXTURE = PACKAGE_ROOT.parent / "conformance" / "policy-conformance.json"
+def locate_fixture(test_file: Path) -> Path:
+    test_file = test_file.resolve()
+    candidates = (
+        test_file.parents[2] / "conformance" / "policy-conformance.json",
+        test_file.parent / "fixtures" / "policy-conformance.json",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"Conformance fixture not found; tried: {candidates}")
+
+
+FIXTURE = locate_fixture(Path(__file__))
+
+
+class FixtureLocator(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.test_file = self.root / "cirvix-python" / "tests" / "test_conformance.py"
+        self.canonical = self.root / "conformance" / "policy-conformance.json"
+        self.bundled = self.test_file.parent / "fixtures" / "policy-conformance.json"
+
+    def write_fixture(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+    def test_checkout_uses_canonical_fixture(self) -> None:
+        self.write_fixture(self.canonical)
+        self.assertEqual(locate_fixture(self.test_file), self.canonical)
+
+    def test_extracted_sdist_uses_bundled_fixture(self) -> None:
+        self.write_fixture(self.bundled)
+        self.assertEqual(locate_fixture(self.test_file), self.bundled)
+
+    def test_canonical_takes_precedence_over_bundled_fixture(self) -> None:
+        self.write_fixture(self.canonical)
+        self.write_fixture(self.bundled)
+        self.assertEqual(locate_fixture(self.test_file), self.canonical)
+
+    def test_directory_is_not_a_fixture(self) -> None:
+        self.canonical.mkdir(parents=True)
+        self.write_fixture(self.bundled)
+        self.assertEqual(locate_fixture(self.test_file), self.bundled)
+
+    def test_missing_fixture_reports_both_locations(self) -> None:
+        with self.assertRaises(FileNotFoundError) as caught:
+            locate_fixture(self.test_file)
+        self.assertIn(self.canonical.as_posix(), str(caught.exception))
+        self.assertIn(self.bundled.as_posix(), str(caught.exception))
 
 
 def load_suite() -> dict:

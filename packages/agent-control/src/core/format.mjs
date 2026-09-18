@@ -1,14 +1,28 @@
 /**
- * Terminal formatting.
+ * Terminal formatting — thin compatibility layer over the semantic theme.
  *
- * Colour is suppressed when stdout is not a TTY, when `NO_COLOR` is set, or
- * when `TERM=dumb` — so piping to a file or a CI log produces clean text
- * rather than escape sequences. `FORCE_COLOR` overrides for the cases where a
- * CI runner does support colour but does not present as a TTY.
+ * New code should import from `theme.mjs` and use `colors.*` / `style(text,
+ * role)` so meaning stays in one place. This module keeps the historic names
+ * (`green`, `red`, `amber`, `blue`, `cyan`, `gray`, `white`, `bold`, `dim`,
+ * `plural`) working for the existing CLI, gateway logs, the `core/ui`
+ * primitives, and every test that already asserts on them.
  *
- * The palette mirrors the product's chroma rule: green means permitted, red
- * means denied, amber means held. Nothing decorative uses them.
+ * Mapping (the product's chroma rule — green means permitted, red denied,
+ * amber held, blue/cyan sanitized or informational, gray muted):
+ *   green → allow · red → block · amber → hold/warning · blue/cyan → sanitize
+ *   gray → muted · white → text
  */
+
+export { bold, dim, colors, style, setTheme, themeName, THEME_NAMES } from "./theme.mjs";
+import { style } from "./theme.mjs";
+
+export const green = (s) => style(s, "allow");
+export const red = (s) => style(s, "block");
+export const amber = (s) => style(s, "hold");
+export const blue = (s) => style(s, "sanitize");
+export const cyan = (s) => style(s, "sanitize");
+export const gray = (s) => style(s, "muted");
+export const white = (s) => style(s, "text");
 
 const forced = process.env.FORCE_COLOR === "1" || process.env.FORCE_COLOR === "true";
 const disabled =
@@ -17,22 +31,9 @@ const disabled =
     process.env.TERM === "dumb" ||
     !process.stdout.isTTY);
 
-const wrap = (open, close) => (s) =>
-  disabled ? String(s) : `[${open}m${s}[${close}m`;
-
-export const bold = wrap(1, 22);
-export const dim = wrap(2, 22);
-export const red = wrap(31, 39);
-export const green = wrap(32, 39);
-export const amber = wrap(33, 39);
-export const blue = wrap(34, 39);
-export const cyan = wrap(36, 39);
-export const gray = wrap(90, 39);
-export const white = wrap(97, 39);
-
 /** Strip ANSI escape sequences for width calculation and secret checks. */
 export function stripAnsi(s) {
-  return String(s).replace(/\u001b\[[0-9;]*m/g, "");
+  return String(s).replace(/\[[0-9;]*m/g, "");
 }
 
 /** Visible character width, ignoring ANSI. */

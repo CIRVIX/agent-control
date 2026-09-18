@@ -222,6 +222,74 @@ class SessionState(unittest.TestCase):
 
 
 class PolicyTesting(unittest.TestCase):
+    def test_readme_evaluate_import_supports_documented_keywords(self) -> None:
+        from cirvix.testing import evaluate
+
+        rules = [
+            {
+                "name": "hold-production-deploys",
+                "effect": "hold",
+                "agents": ["deploy-bot"],
+                "actions": ["k8s.apply"],
+                "resources": ["**/production/checkout"],
+                "when": [{"path": "environment", "op": "eq", "value": "production"}],
+                "approvers": ["platform-oncall"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            policy_dir = Path(directory) / "policies"
+            policy_dir.mkdir()
+            (policy_dir / "deploy.policy").write_text(json.dumps(rules), encoding="utf-8")
+            decision = evaluate(
+                policy_dir=policy_dir,
+                agent="deploy-bot",
+                action="k8s.apply",
+                resource="production/checkout",
+                context={"environment": "production"},
+            )
+
+        self.assertEqual(decision.verdict, "hold")
+        self.assertEqual(decision.rule, "hold-production-deploys")
+        self.assertIn("platform-oncall", decision.approvers)
+
+    def test_top_level_evaluate_preserves_raw_positional_api(self) -> None:
+        from cirvix import evaluate as evaluate_raw
+        from cirvix.policy import evaluate as evaluate_policy
+
+        self.assertIs(evaluate_raw, evaluate_policy)
+        self.assertIsNot(evaluate_raw, evaluate)
+        decision = evaluate_raw(
+            {"agent": "deploy-bot", "action": "fs.read", "resource": "/workspace/app.ts"},
+            RULES,
+            CWD,
+        )
+        self.assertEqual(decision.verdict, "permit")
+        self.assertEqual(decision.rule, "allow-reads")
+        self.assertEqual(decision.resource, "/workspace/app.ts")
+
+    def test_keyword_and_raw_evaluate_preserve_denials(self) -> None:
+        from cirvix import evaluate as evaluate_raw
+
+        for rules, expected_rule in ((RULES, "deny-dotenv-read"), ([], None)):
+            with self.subTest(rule=expected_rule):
+                request = {
+                    "agent": "deploy-bot",
+                    "action": "fs.read",
+                    "resource": "/workspace/.env.production",
+                }
+                keyword = evaluate(**request, rules=rules, cwd=CWD)
+                raw = evaluate_raw(request, rules, CWD)
+                for decision in (keyword, raw):
+                    self.assertEqual(decision.verdict, "deny")
+                    self.assertEqual(decision.rule, expected_rule)
+                    self.assertEqual(decision.explicit, expected_rule is not None)
+                self.assertEqual(keyword.reason, raw.reason)
+                self.assertEqual(keyword.remediation, raw.remediation)
+                self.assertEqual(keyword.considered, raw.considered)
+                if expected_rule is not None:
+                    self.assertEqual(keyword.reason, RULES[0]["reason"])
+                    self.assertEqual(keyword.remediation, RULES[0]["remediation"])
+
     def test_evaluate_answers_a_policy_question(self) -> None:
         decision = evaluate(
             rules=RULES,

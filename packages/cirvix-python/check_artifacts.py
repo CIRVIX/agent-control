@@ -54,7 +54,19 @@ def check(directory: Path) -> None:
             metadata = contents.get(info + "METADATA", b"")
             license_prefix = info + "licenses/"
         else:
-            extras = {"README.md", "LICENSE", "NOTICE", "pyproject.toml", "PKG-INFO", "check_artifacts.py", "conformance/policy-conformance.json"}
+            fixture = root / "conformance" / "policy-conformance.json"
+            if not fixture.is_file():
+                fixture = root.parent / "conformance" / "policy-conformance.json"
+            fixture_member = "tests/fixtures/policy-conformance.json"
+            if (prefix + fixture_member) not in contents:
+                fixture_member = "conformance/policy-conformance.json"
+            if contents.get(prefix + fixture_member) != fixture.read_bytes():
+                raise ValueError("Shared conformance fixture missing or changed")
+            extras = {"README.md", "LICENSE", "NOTICE", "pyproject.toml", "PKG-INFO", fixture_member}
+            if (root / "hatch_build.py").is_file() and (prefix + "hatch_build.py") in contents:
+                extras.add("hatch_build.py")
+            if (prefix + "check_artifacts.py") in contents:
+                extras.add("check_artifacts.py")
             if vcs_member in contents:
                 source_ignore = None
                 for parent in (root, *root.parents):
@@ -69,11 +81,6 @@ def check(directory: Path) -> None:
                 extras.add(".gitignore")
             tests = {f"tests/{p.name}" for p in (root / "tests").glob("*.py")}
             allowed = {prefix + n for n in set(runtime) | extras | tests}
-            fixture = root / "conformance" / "policy-conformance.json"
-            if not fixture.is_file():
-                fixture = root.parent / "conformance" / "policy-conformance.json"
-            if contents.get(prefix + "conformance/policy-conformance.json") != fixture.read_bytes():
-                raise ValueError("Shared conformance fixture missing or changed")
             metadata = contents.get(prefix + "PKG-INFO", b"")
             license_prefix = prefix
         if set(names) != allowed:

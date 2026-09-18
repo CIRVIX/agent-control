@@ -19,6 +19,14 @@ The package metadata and `cirvix --version` report **0.2.1**.
   workspace it opens the legacy interactive screen only when its TTY/environment
   gates allow it; otherwise it prints a local status digest and next steps.
   Startup branding is not evidence that an enforcement runtime was started.
+- On an interactive terminal, bare `cirvix` opens with a short animated brand
+  plate (the wordmark draws, is swept once, and settles) before the digest. It is
+  bounded to under a second, any keypress ends it, and it changes nothing that
+  follows: the frame it rests on is the same plate the static header prints. It
+  is suppressed by `--fast`, `--no-animation`, `CIRVIX_NO_ANIM=1`,
+  `CIRVIX_REDUCED_MOTION=1`, `NO_COLOR`, `TERM=dumb`, CI, a non-TTY, or a
+  terminal narrower than the box — and when it is suppressed, nothing extra is
+  printed at all.
 - `cirvix console` previews what policy would decide. With `--eval "<tool>
   <resource>"` it prints one hypothetical decision and exits — no tool runs,
   nothing is recorded, no network is touched. Without `--eval` on a TTY it
@@ -36,6 +44,9 @@ The package metadata and `cirvix --version` report **0.2.1**.
   CI gate permits `FORCE_COLOR=1` to override CI when TTY requirements hold.
   Bare `cirvix --json` currently prints help, **not JSON**. For automation use
   explicit reporting commands such as `cirvix status --json`.
+- `CIRVIX_TRUECOLOR` overrides the colour depth the brand plate uses:
+  `1` truecolor, `0` or `256` the 256-colour cube, `16` the accent role. It
+  exists for terminals that advertise a depth they cannot render.
 
 ### `cirvix console`
 
@@ -82,6 +93,8 @@ Additional local commands include `init`, `status`, `doctor`, `runtime`, `protec
 | `--state <dir>` | `gateway`, `daemon` | Policy cache + telemetry spool (default `./.cirvix`) |
 | `--agent <name>` | `check`, `gateway` | Agent identity used in evaluation (default `local`) |
 | `--env <name>` | `check`, `gateway` | Environment context (default `local`) |
+| `--no-animation` | bare `cirvix`, `onboard`, `protect` | Print the resting output only — no animated frames |
+| `--fast` | bare `cirvix`, `onboard`, `protect`, `demo` | Pace 0: no animation and no step delays |
 
 ---
 

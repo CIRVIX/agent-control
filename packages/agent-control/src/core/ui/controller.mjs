@@ -9,7 +9,7 @@
 
 import { isInteractive } from "../format.mjs";
 
-export function shouldAnimate({ pace, json, force } = {}) {
+export function shouldAnimate({ pace, json, force, stream = process.stdout } = {}) {
   if (json) return false;
   if (pace === 0) return false;
   if (process.env.CIRVIX_NO_ANIM === "1") return false;
@@ -21,7 +21,7 @@ export function shouldAnimate({ pace, json, force } = {}) {
   if (process.env.CI !== undefined && process.env.FORCE_COLOR !== "1" && process.env.FORCE_COLOR !== "true") {
     return false;
   }
-  return isInteractive();
+  return isInteractive(stream);
 }
 
 /** Hide cursor, remember to show it on exit. */

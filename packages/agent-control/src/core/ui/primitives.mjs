@@ -5,6 +5,7 @@
  */
 
 import { bold, dim, stripAnsi, supportsUnicode } from "../format.mjs";
+import { gradient } from "../theme.mjs";
 import { boxChars, truncate, padVisible } from "./theme.mjs";
 
 /** CIRVIX ASCII logo (5 lines). Compact, premium, not gamey. */
@@ -74,7 +75,32 @@ export function panel({ title, lines = [], width = 58, heavy = false } = {}) {
 /**
  * Render the full brand header — logo boxed.
  */
-export function brandHeader({ width = 58 } = {}) {
+/**
+ * The wordmark rows, centred and padded to the panel's inner width.
+ *
+ * Exported because the launch sequence animates the *same* geometry: if the
+ * animation recomputed its own centring, the frame it lands on would drift from
+ * the static header the rest of the CLI prints, and the brand would look like
+ * two different brands depending on whether motion was enabled.
+ */
+export function logoRows(width = 58) {
+  return LOGO_LINES.map((l) => l.padStart(Math.floor((width + l.length) / 2)).padEnd(width));
+}
+
+/** The subtitle row, centred the same way. */
+export function subtitleRow(width = 58) {
+  return LOGO_SUBTITLE.padStart(Math.floor((width + LOGO_SUBTITLE.length) / 2)).padEnd(width);
+}
+
+/**
+ * The brand plate: the wordmark boxed.
+ *
+ * `accent` paints the wordmark with the brand ramp. It defaults to off so every
+ * existing caller (`init`, `protect`, the interactive screen) keeps printing
+ * exactly what it printed before; the launch sequence turns it on, because that
+ * is the screen where the brand is the point.
+ */
+export function brandHeader({ width = 58, accent = false } = {}) {
   const ch = boxChars();
   const useAscii = !supportsUnicode();
   const h = ch.h;
@@ -85,13 +111,11 @@ export function brandHeader({ width = 58 } = {}) {
   const lines = [];
   lines.push(`  ${top}`);
   lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
-  for (const l of LOGO_LINES) {
-    const padded = l.padStart(Math.floor((width + l.length) / 2)).padEnd(width);
-    lines.push(`  ${vert} ${padded} ${vert}`);
+  for (const padded of logoRows(width)) {
+    lines.push(`  ${vert} ${accent ? gradient(padded) : padded} ${vert}`);
   }
   lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
-  const sub = LOGO_SUBTITLE.padStart(Math.floor((width + LOGO_SUBTITLE.length) / 2)).padEnd(width);
-  lines.push(`  ${vert} ${dim(sub)} ${vert}`);
+  lines.push(`  ${vert} ${dim(subtitleRow(width))} ${vert}`);
   lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
   lines.push(`  ${bottom}`);
   return lines.join("\n");

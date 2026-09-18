@@ -8,6 +8,7 @@ export * from "./primitives.mjs";
 export * from "./decisions.mjs";
 export * from "./intercept.mjs";
 export * from "./live.mjs";
+export * from "./launch.mjs";
 
 import { shouldAnimate } from "./controller.mjs";
 import { brandHeader, panel } from "./primitives.mjs";

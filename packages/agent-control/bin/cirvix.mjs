@@ -113,6 +113,8 @@ export function getHelpText() {
   ${bold("OPTIONS")}
     --eval "<tool> <res>" Preview policy decision without executing or recording
     -v, --verbose         Display full forensic details, identity, and timing
+    --no-animation        Skip the launch animation on the home screen
+    --fast                Shorthand for no animation and no step pacing
     --json                Format command output as machine-readable JSON
     --sarif <file>        Write SARIF 2.1.0 report for code-scanning / CI
     --policy <file>       Rule set path ${dim("(default ./cirvix.policy)")}
@@ -343,14 +345,27 @@ async function main() {
   // Provide a clean first-run / home experience.
   // Never unexpectedly throw the user into the dense monitoring dashboard.
   // The interactive console is explicitly accessible through `cirvix console`.
+  //
+  // The brand plate plays here and only here — it needs a real terminal, it is
+  // bounded to under a second, and any keypress ends it. `--fast` (pace 0) and
+  // `--no-animation` both skip it, which is the same gate the animated commands
+  // already honour.
   if (positional.length === 0 && !flags.json && !flags.help) {
-    await welcome({ cwd });
+    await welcome({
+      cwd,
+      pace: flags.fast ? 0 : undefined,
+      animate: flags["no-animation"] ? false : undefined,
+    });
     return 0;
   }
 
   switch (command) {
     case "onboard": {
-      await welcome({ cwd });
+      await welcome({
+        cwd,
+        pace: flags.fast ? 0 : undefined,
+        animate: flags["no-animation"] ? false : undefined,
+      });
       return 0;
     }
 

@@ -14,9 +14,12 @@
  * zero to protected. RETURNING runs get a measured digest — every number here
  * comes from the journal and the runtime probe, never asserted.
  *
- * Output is plain (no animations of its own): this screen renders on every
- * launch, and a delay here would be paid on every launch. Anything animated
- * lives behind commands the user chose deliberately (demo, live).
+ * The screen itself renders plain and instantly: it runs on every launch, so a
+ * delay here would be paid on every launch. The one exception is the brand
+ * plate, which is owned by `core/ui/launch.mjs`, plays only in a real terminal,
+ * is bounded to under a second, is skipped by any keypress, and is skipped
+ * outright for `--fast`, `--no-animation`, `CIRVIX_NO_ANIM`, `NO_COLOR`,
+ * CI, a pipe, or a terminal too narrow to hold the box.
  */
 
 import { access, readFile } from "node:fs/promises";
@@ -25,6 +28,7 @@ import { join } from "node:path";
 
 import { bold, dim, green, gray, cyan, amber, red } from "../core/format.mjs";
 import { glyphs, boxChars } from "../core/ui/theme.mjs";
+import { launchBanner } from "../core/ui/launch.mjs";
 import { status as statusCmd } from "./status.mjs";
 import * as journal from "../core/journal.mjs";
 import { UdsClient, defaultEndpoint, tokenPath } from "../core/uds.mjs";
@@ -60,17 +64,14 @@ async function checkRuntime(stateDir) {
   }
 }
 
-export async function welcome({ cwd = process.cwd(), json = false, stdin = process.stdin, stdout = process.stdout } = {}) {
-  if (json) {
-    const st = await statusCmd({ cwd, json: true }).catch(() => null);
-    stdout.write(typeof st === "string" ? st : JSON.stringify({ command: "welcome", version: VERSION, cwd }) + "\n");
-    return 0;
-  }
-
-  const stateDir = join(cwd, ".cirvix");
-  const g = glyphs();
-  const ch = boxChars();
-
+/**
+ * Everything the home screen reports, read from local state only.
+ *
+ * Split out so the launch sequence can play *while* this runs: the runtime probe
+ * alone waits up to 800ms on a socket, and drawing over that wait rather than
+ * blocking through it is the difference between an opening and a hang.
+ */
+async function collectState({ cwd, stateDir }) {
   // Detect agents and MCP servers
   let fleet = { runtimes: [], mcpServers: [] };
   try {
@@ -82,18 +83,7 @@ export async function welcome({ cwd = process.cwd(), json = false, stdin = proce
   const hasPolicy = (await exists(join(cwd, "cirvix.policy"))) ||
                     (await exists(join(cwd, "cirvix.policy.json"))) ||
                     (await exists(join(stateDir, "policy.json")));
-  const isProtected = hasPolicy;
   const isRuntimeUp = await checkRuntime(stateDir);
-
-  const protectionBadge = isProtected ? green(bold("ACTIVE")) : amber(bold("NOT ACTIVE"));
-  const runtimeBadge = isRuntimeUp ? green(bold("● RUNNING")) : dim("○ STOPPED");
-
-  const detectedAgents = (fleet.runtimes ?? []).map((r) => r.label);
-  const agentText = detectedAgents.length > 0
-    ? `${detectedAgents.length} detected ${dim(`(${detectedAgents.join(", ")})`)}`
-    : dim("none detected");
-  const mcpCount = (fleet.mcpServers ?? []).length;
-  const mcpText = mcpCount > 0 ? `${mcpCount} configured` : dim("none configured");
 
   // Read quick activity summary if audit records exist
   let activitySummary = null;
@@ -108,10 +98,54 @@ export async function welcome({ cwd = process.cwd(), json = false, stdin = proce
     } catch {}
   }
 
-  const lines = [
-    "",
-    `  ${cyan(bold(g.diamond + " CIRVIX"))} ${bold(`v${VERSION}`)}`,
-    `  ${bold("AI AGENT RUNTIME GOVERNANCE")} ${dim("· Runtime authorization for AI agents.")}`,
+  return { fleet, hasPolicy, isRuntimeUp, activitySummary };
+}
+
+export async function welcome({
+  cwd = process.cwd(),
+  json = false,
+  stdin = process.stdin,
+  stdout = process.stdout,
+  pace,
+  animate,
+} = {}) {
+  if (json) {
+    const st = await statusCmd({ cwd, json: true }).catch(() => null);
+    stdout.write(typeof st === "string" ? st : JSON.stringify({ command: "welcome", version: VERSION, cwd }) + "\n");
+    return 0;
+  }
+
+  const stateDir = join(cwd, ".cirvix");
+  const g = glyphs();
+  const ch = boxChars();
+
+  // The launch plays while local state is read, not before it.
+  const statePromise = collectState({ cwd, stateDir });
+  const { animated } = await launchBanner({ stdout, stdin, pace, force: animate });
+  const { fleet, hasPolicy, isRuntimeUp, activitySummary } = await statePromise;
+
+  const isProtected = hasPolicy;
+
+  const protectionBadge = isProtected ? green(bold("ACTIVE")) : amber(bold("NOT ACTIVE"));
+  const runtimeBadge = isRuntimeUp ? green(bold("● RUNNING")) : dim("○ STOPPED");
+
+  const detectedAgents = (fleet.runtimes ?? []).map((r) => r.label);
+  const agentText = detectedAgents.length > 0
+    ? `${detectedAgents.length} detected ${dim(`(${detectedAgents.join(", ")})`)}`
+    : dim("none detected");
+  const mcpCount = (fleet.mcpServers ?? []).length;
+  const mcpText = mcpCount > 0 ? `${mcpCount} configured` : dim("none configured");
+
+  const lines = [""];
+  if (animated) {
+    // The plate above already carries the wordmark and the subtitle; repeating
+    // them here would print the brand twice in two different styles.
+    lines.push(`  ${bold(`v${VERSION}`)} ${dim("· Runtime authorization for AI agents.")}`);
+  } else {
+    lines.push(`  ${cyan(bold(g.diamond + " CIRVIX"))} ${bold(`v${VERSION}`)}`);
+    lines.push(`  ${bold("AI AGENT RUNTIME GOVERNANCE")} ${dim("· Runtime authorization for AI agents.")}`);
+  }
+  lines.push(
     "",
     `  ${dim("Protect your AI agents before they touch files,")}`,
     `  ${dim("credentials, APIs, or other tools.")}`,
@@ -123,7 +157,7 @@ export async function welcome({ cwd = process.cwd(), json = false, stdin = proce
     `  ${bold("Runtime:")}      ${runtimeBadge}`,
     `  ${bold("Agents:")}       ${agentText}`,
     `  ${bold("MCP Servers:")}  ${mcpText}`,
-  ];
+  );
 
   if (activitySummary) {
     lines.push(`  ${bold("Decisions:")}    ${dim(activitySummary)}`);

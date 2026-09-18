@@ -237,4 +237,137 @@ export function badgeForDecision(decision) {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Brand chroma                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The one non-state colour, as a ramp.
+ *
+ * `DESIGN.md` is explicit: the four saturated colours are runtime verdicts
+ * (permit / deny / hold / route) and "nothing decorative may use them". The
+ * launch sequence is decoration, so it draws its entire palette from here —
+ * deep → brand (#6f9bff) → highlight — and can never borrow green, red, or
+ * amber by accident.
+ *
+ * Keeping the ramp in this file is the same rule as the semantic roles above:
+ * no module outside `theme.mjs` hardcodes an ANSI sequence.
+ */
+export const BRAND = {
+  deep: [26, 68, 168],
+  base: [111, 155, 255],
+  highlight: [216, 230, 255],
+};
+
+/**
+ * What the terminal can actually render: `"truecolor"`, `"256"`, `"16"`, or
+ * `"none"`. A degraded answer is a correct answer — an animated brand that
+ * emits an unsupported SGR sequence renders as literal `[38;2;…` garbage in the
+ * logs of the people this tool is sold to.
+ */
+export function colorDepth() {
+  if (!colorEnabled()) return "none";
+  const forced = String(process.env.CIRVIX_TRUECOLOR ?? "");
+  // Explicit override, both directions: `1` for truecolor, `0`/`256` for the
+  // 256-colour cube, `16` for the accent role. Support needs an escape hatch —
+  // a terminal that claims a depth it cannot render is the case worth being
+  // able to work around without a release.
+  if (forced === "1" || forced === "truecolor" || forced === "24bit") return "truecolor";
+  if (forced === "16") return "16";
+  if (forced === "0" || forced === "256") return "256";
+  const colorterm = String(process.env.COLORTERM ?? "").toLowerCase();
+  if (colorterm.includes("truecolor") || colorterm.includes("24bit")) return "truecolor";
+  const term = String(process.env.TERM ?? "");
+  if (/\b(direct|truecolor)\b/.test(term)) return "truecolor";
+  // Windows Terminal, VS Code, and most modern emulators set COLORTERM above;
+  // anything that reaches here on Windows is a legacy console, which is 256-safe.
+  if (/256color/.test(term) || process.platform === "win32") return "256";
+  return "16";
+}
+
+function lerp(a, b, t) {
+  return Math.round(a + (b - a) * t);
+}
+
+/**
+ * RGB at position `t` (0..1) along the brand ramp.
+ * The first half runs deep → brand, the second brand → highlight, so a plain
+ * left-to-right gradient reads as lit from the right.
+ */
+export function brandAt(t) {
+  const clamped = Math.max(0, Math.min(1, Number(t) || 0));
+  const [from, to, local] = clamped <= 0.5
+    ? [BRAND.deep, BRAND.base, clamped * 2]
+    : [BRAND.base, BRAND.highlight, (clamped - 0.5) * 2];
+  return [
+    lerp(from[0], to[0], local),
+    lerp(from[1], to[1], local),
+    lerp(from[2], to[2], local),
+  ];
+}
+
+/** Nearest cell in the xterm 6×6×6 cube — the 256-colour fallback. */
+function to256([r, g, b]) {
+  const q = (v) => Math.max(0, Math.min(5, Math.round((v / 255) * 5)));
+  return 16 + 36 * q(r) + 6 * q(g) + q(b);
+}
+
+/** Blend two rgb triplets. Used to light the wordmark under the launch sweep. */
+export function mixRgb(from, to, t) {
+  const k = Math.max(0, Math.min(1, Number(t) || 0));
+  return [lerp(from[0], to[0], k), lerp(from[1], to[1], k), lerp(from[2], to[2], k)];
+}
+
+/**
+ * Paint one colour with the best sequence this terminal understands.
+ * On a 16-colour terminal the brand collapses to the `accent` role — still the
+ * brand family, never a verdict colour.
+ */
+export function paint(text, rgb) {
+  const s = String(text);
+  if (!colorEnabled()) return s;
+  const depth = colorDepth();
+  if (depth === "truecolor") return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${s}\x1b[39m`;
+  if (depth === "256") return `\x1b[38;5;${to256(rgb)}m${s}\x1b[39m`;
+  return style(s, "accent");
+}
+
+/**
+ * Paint a string as a brand gradient across its own length.
+ *
+ * Colours are quantised into `steps` bands and emitted run-by-run, so a 58-cell
+ * row costs a handful of escape sequences instead of one per character. That
+ * matters: this runs on the critical path of `cirvix` on an SSH session, and a
+ * per-character repaint is the difference between prompt and sluggish.
+ */
+export function gradient(text, { from = 0, to = 1, steps = 8 } = {}) {
+  const s = String(text);
+  const depth = colorDepth();
+  if (depth === "none") return s;
+  if (depth === "16") return style(s, "accent");
+
+  const span = Math.max(1, s.length - 1);
+  const stepFor = (i) => Math.min(steps - 1, Math.max(0, Math.floor(steps * (from + ((to - from) * i) / span))));
+
+  let out = "";
+  let run = "";
+  let runStep = null;
+  const flush = () => {
+    if (!run) return;
+    out += runStep === -1 ? run : paint(run, brandAt((runStep + 0.5) / steps));
+    run = "";
+  };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const step = ch.trim() === "" ? -1 : stepFor(i);
+    if (step !== runStep) {
+      flush();
+      runStep = step;
+    }
+    run += ch;
+  }
+  flush();
+  return out;
+}
+
 export { wrapAnsi };

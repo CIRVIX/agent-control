@@ -25,11 +25,6 @@ export const gray = (s) => style(s, "muted");
 export const white = (s) => style(s, "text");
 
 const forced = process.env.FORCE_COLOR === "1" || process.env.FORCE_COLOR === "true";
-const disabled =
-  !forced &&
-  (process.env.NO_COLOR !== undefined ||
-    process.env.TERM === "dumb" ||
-    !process.stdout.isTTY);
 
 /** Strip ANSI escape sequences for width calculation and secret checks. */
 export function stripAnsi(s) {
@@ -41,11 +36,20 @@ export function visibleWidth(s) {
   return stripAnsi(String(s)).length;
 }
 
-/** True when output should be decorated (TTY, not NO_COLOR, not dumb, not CI unless forced). */
-export function isInteractive() {
-  if (disabled) return false;
-  if (process.env.CI !== undefined && !forced) return false;
-  return Boolean(process.stdout.isTTY);
+/**
+ * True when output should be decorated (TTY, not NO_COLOR, not dumb, not CI
+ * unless forced).
+ *
+ * Takes the stream it is asked about and reads the environment live, because
+ * callers do not always render into `process.stdout`: the launch sequence
+ * animates whichever stream it was handed, and a stream that cannot animate
+ * must not be told it can.
+ */
+export function isInteractive(stream = process.stdout) {
+  const forcedNow = forced || process.env.FORCE_COLOR === "1" || process.env.FORCE_COLOR === "true";
+  if (!forcedNow && (process.env.NO_COLOR !== undefined || process.env.TERM === "dumb")) return false;
+  if (process.env.CI !== undefined && !forcedNow) return false;
+  return Boolean(stream.isTTY);
 }
 
 /** Whether unicode box-drawing is safe. ASCII fallback when TERM=dumb or CIRVIX_ASCII=1. */

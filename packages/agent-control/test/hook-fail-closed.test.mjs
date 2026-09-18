@@ -14,13 +14,20 @@ function invoke({ stdin, fail = null, state = null }) {
   else env.CIRVIX_HOOK_FAIL = fail;
   if (state === null) delete env.CIRVIX_STATE;
   else env.CIRVIX_STATE = state;
-  // Write stdin through the shell explicitly: PowerShell's spawnSync input
-  // piping swallows the payload, so the hook sees EOF and answers for the
-  // wrong scenario.
-  const script = `$input | & ${JSON.stringify(process.execPath)} ${JSON.stringify(hook)}`;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-    input: stdin, encoding: "utf8", env, timeout: 15000,
-  });
+  let result;
+  if (process.platform === "win32") {
+    // Write stdin through the shell explicitly: PowerShell's spawnSync input
+    // piping swallows the payload, so the hook sees EOF and answers for the
+    // wrong scenario.
+    const script = `$input | & ${JSON.stringify(process.execPath)} ${JSON.stringify(hook)}`;
+    result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      input: stdin, encoding: "utf8", env, timeout: 15000,
+    });
+  } else {
+    result = spawnSync(process.execPath, [hook], {
+      input: stdin, encoding: "utf8", env, timeout: 15000,
+    });
+  }
   assert.equal(result.error, undefined, String(result.error));
   assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr}`);
   return { stdout: String(result.stdout ?? ""), stderr: String(result.stderr ?? "") };

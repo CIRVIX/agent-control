@@ -13,13 +13,22 @@
 
 import { access, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { watch } from "node:fs";
+import { watch, readFileSync } from "node:fs";
+
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
+  } catch {
+    return "0.2.2";
+  }
+})();
 
 import { AuditChain } from "../core/audit.mjs";
 import { ApprovalStore } from "../core/approvals.mjs";
-import { bold, dim, green, red, amber, blue, cyan, plural } from "../core/format.mjs";
+import { bold, dim, green, red, amber, blue, cyan, gray, plural } from "../core/format.mjs";
 import { shouldAnimate } from "../core/ui/controller.mjs";
 import { brandHeader } from "../core/ui/primitives.mjs";
+import { glyphs, boxChars, padVisible, wordWrap } from "../core/ui/theme.mjs";
 import { MODE } from "../core/decisions.mjs";
 import * as journal from "../core/journal.mjs";
 import { collectMcpServers, detectRuntimes } from "../core/detect.mjs";
@@ -214,9 +223,13 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
   // Use a single write for the whole startup frame, then transition to TUI
   try { stdout.write("\x1b[2J\x1b[H"); } catch {}
   if (animated) {
-    // Build startup frame as ONE write, not incremental appends that would appear as multiple viewports
-    // We still animate steps but each step is a coalesced viewport update via the same alt-screen clear
-    let startup = "\n" + brandHeader({ width: 62 }) + "\n\n";
+    const g = glyphs();
+    const ch = boxChars();
+    const bannerW = 62;
+    let startup = "\n";
+    startup += `  ${gray(ch.tl + ch.h)} ${cyan(bold(g.diamond + " CIRVIX"))} ${bold("v" + PKG_VERSION)} ${gray(ch.h.repeat(Math.max(2, bannerW - 32)))} ${dim("CONSOLE")} ${gray(ch.tr)}\n`;
+    startup += `  ${gray(ch.v)} ${padVisible(dim("Runtime authorization for AI agents."), bannerW - 4)} ${gray(ch.v)}\n`;
+    startup += `  ${gray(ch.bl + ch.h.repeat(bannerW - 2) + ch.br)}\n\n`;
     startup += `  ${dim("Initializing runtime...")}\n`;
     try { stdout.write(startup); } catch {}
     const steps = [
@@ -227,23 +240,20 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
       "Audit chain ready",
     ];
     for (const s of steps) {
-      await sleep(120);
-      // Append one line to the existing viewport by moving cursor and writing line
-      // Instead of clearing, we just add a line — this is part of the startup sequence and is intentional
-      // But to keep ONE viewport, we redraw the whole startup frame each time
-      // Simpler: just write the line and keep viewport growing during startup (startup is transient)
-      try { stdout.write(`  ${green("✓")} ${dim(s)}\n`); } catch {}
+      await sleep(100);
+      try { stdout.write(`  ${green(g.check)} ${dim(s)}\n`); } catch {}
     }
-    await sleep(180);
-    try { stdout.write(`\n  ${green(bold("CIRVIX ● ONLINE"))}\n\n`); } catch {}
-    await sleep(260);
+    await sleep(140);
+    try { stdout.write(`\n  ${green(bold(g.bullet + " CIRVIX ONLINE"))}\n\n`); } catch {}
+    await sleep(200);
     // Clear startup and enter TUI — single viewport from here on
     try { stdout.write("\x1b[2J\x1b[H"); } catch {}
   } else {
     try {
-      stdout.write(`\n  ${bold("CIRVIX")} ${dim("· runtime governance")}\n\n`);
-      stdout.write(`  ${green(bold("CIRVIX ● ONLINE"))}\n\n`);
-      if (!flags.fast) await sleep(120);
+      const g = glyphs();
+      stdout.write(`\n  ${cyan(bold(g.diamond + " CIRVIX"))} ${bold("v" + PKG_VERSION)} ${dim("· runtime governance")}\n\n`);
+      stdout.write(`  ${green(bold(g.bullet + " CIRVIX ONLINE"))}\n\n`);
+      if (!flags.fast) await sleep(100);
       try { stdout.write("\x1b[2J\x1b[H"); } catch {}
     } catch {}
   }
@@ -290,42 +300,55 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
     // Build ONE frame and write it as a single atomic viewport update
     const cols = stdout.columns || process.stdout.columns || 80;
     const rows = stdout.rows || process.stdout.rows || 24;
-    const W = Math.max(20, Math.min(78, cols - 4));
+    const W = Math.max(48, Math.min(100, cols - 4));
     const innerW = Math.max(0, W - 4);
     let out = "";
     // Move to home and clear viewport — robust: hide cursor already, now clear
-    // \x1b[H = cursor home, \x1b[2J = erase display, \x1b[3J = erase scrollback (where supported)
     out += "\x1b[?25l"; // keep hidden during draw
     out += "\x1b[H\x1b[2J";
     out += "\x1b[3J";
     out += "\x1b[H";
 
-    // header
-    out += `  ${dim(`┌─ CIRVIX ${"─".repeat(Math.max(0, W - 10))}┐`)}\n`;
-    const runtimeStatus = statusData?.runtime?.running ? `${green(bold("● ONLINE"))}  ${dim("ENFORCE")}  ${dim(plural(statusData.rulesCount ?? 0, "RULE"))}` : `${dim("● STOPPED")}  ${dim("IDLE")}`;
-    out += `  ${dim("│")} ${bold("CIRVIX")} ${runtimeStatus} ${dim("│")}\n`;
+    // Header: Clear, truthful status
+    const isRunning = Boolean(statusData?.runtime?.running);
+    const runtimeBadge = isRunning ? green(bold("● RUNNING")) : dim("○ STOPPED");
+    const isEnforcing = isRunning ? green(bold("ENFORCING")) : dim("INACTIVE");
+    const rulesCount = statusData?.rulesCount ?? rules?.length ?? 0;
+    out += `  ${dim(`┌─ CIRVIX CONSOLE ${"─".repeat(Math.max(0, W - 18))}┐`)}\n`;
+    out += `  ${dim("│")} ${bold("CIRVIX")}  ${dim("Runtime:")} ${runtimeBadge}  ${dim("│")}  ${dim("Protection:")} ${isEnforcing}  ${dim("│")}  ${dim("Policy:")} ${dim(plural(rulesCount, "rule"))} ${dim("│")}\n`;
     out += `  ${dim("├" + "─".repeat(Math.max(0, W)) + "┤")}\n`;
 
     if (helpOpen) {
-      out += `\n  ${bold("CIRVIX HELP")}  ${dim("press Esc or ? to close")}\n\n`;
+      out += `\n  ${bold("CIRVIX HELP")}  ${dim("— press Esc or ? to close")}\n`;
+      out += `  ${dim("─".repeat(Math.max(0, W)))}\n\n`;
+      out += `  ${bold("NAVIGATION")}\n`;
       const helps = [
-        ["?", "show help"],
-        ["q", "quit"],
-        ["r", "refresh"],
-        ["l", "activity/logs"],
-        ["p", "policies"],
-        ["a", "audit"],
-        ["d", "demo"],
-        ["i", "interceptions"],
-        ["↑/↓", "navigate events"],
-        ["Enter", "inspect selected event"],
-        ["Esc", "close detail view"],
-        ["Ctrl+C", "exit cleanly"],
+        ["↑ / ↓", "Navigate security decisions"],
+        ["Enter", "Inspect selected decision in detail"],
+        ["Esc", "Close inspector / help / cancel typing"],
+        ["?", "Toggle this help screen"],
+        ["q", "Quit interactive console"],
+        ["r", "Refresh activity from journal"],
       ];
       for (const [k, d] of helps) out += `    ${cyan(k.padEnd(8))} ${dim(d)}\n`;
-      out += `\n  ${dim("Commands inside session:")} ${blue("status")} ${dim("·")} ${blue("logs")} ${dim("·")} ${blue("policy test")} ${dim("·")} ${blue("audit verify")} ${dim("·")} ${blue("demo")} ${dim("·")} ${blue("why <id>")}\n`;
+
+      out += `\n  ${bold("VIEWS")}\n`;
+      const views = [
+        ["l", "Security activity / decisions log"],
+        ["p", "Active policies & validation test suite"],
+        ["a", "Audit hash-chain integrity verification"],
+        ["d", "Run live attack simulation demo"],
+      ];
+      for (const [k, d] of views) out += `    ${cyan(k.padEnd(8))} ${dim(d)}\n`;
+
+      out += `\n  ${bold("CLI COMMANDS")}\n`;
+      out += `    ${blue("cirvix init")}       ${dim("Configure workspace protection")}\n`;
+      out += `    ${blue("cirvix demo")}       ${dim("Simulate an attack interception")}\n`;
+      out += `    ${blue("cirvix status")}     ${dim("Inspect runtime health and fleet")}\n`;
+      out += `    ${blue("cirvix logs")}       ${dim("Inspect recent decision records")}\n`;
+
       out += `\n  ${dim("─".repeat(Math.max(0, W)))}\n`;
-      out += `  ${dim("P50")} ${statusData?.stats?.latency?.p50 ?? "—"}ms  ${dim("P95")} ${statusData?.stats?.latency?.p95 ?? "—"}ms  ${dim("P99")} ${statusData?.stats?.latency?.p99 ?? "—"}ms   ${auditData?.ok ? green("Audit ✓ INTEGRITY OK") : red("Audit ✕ BROKEN")}\n`;
+      out += `  ${cyan("[Esc]")} ${dim("Return to console")}   ${cyan("[q]")} ${dim("Quit")}\n`;
       out += `  ${dim("└" + "─".repeat(Math.max(0, W)) + "┘")}\n`;
       out += `\n  ${dim("$")} ${inputBuf}${inputMode ? "█" : dim("_")}  ${message ? dim("— " + message) : ""}\n`;
       try { stdout.write(out); } catch {}
@@ -335,16 +358,67 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
     if (detailId) {
       const rec = events.find((e) => (e.request_id === detailId || e.decision_id === detailId)) || journal.find(events, detailId);
       if (rec) {
-        const tree = journal.renderTree(rec);
-        out += `\n${tree}\n\n`;
-        out += `  ${dim("[Esc] Back")}  ${dim("·")}  ${dim("↑/↓ navigate")}  ${isHoldRecord(rec) ? amber("[A] Approve [R] Reject") : ""}\n`;
-        out += `\n  ${dim("─".repeat(Math.max(0, W)))}\n`;
-        out += `  ${dim("$")} ${inputBuf}${inputMode ? "█" : dim("_")}\n`;
+        const dec = rec.decision ?? rec.verdict ?? "unknown";
+        const isBlock = dec === "deny";
+        const isHold = dec === "require_approval" || dec === "hold";
+        const isSan = dec === "sanitize";
+        const badgeLabel = isBlock ? "✕ BLOCKED (DENY)" : isHold ? "⏳ AWAITING APPROVAL" : isSan ? "↻ CONTENT SANITIZED" : "✓ ALLOWED";
+        const badgeTone = isBlock ? red : isHold ? amber : isSan ? blue : green;
+
+        let resultText = "Action was permitted by policy.";
+        if (isBlock) resultText = "No action was executed.";
+        else if (isHold) resultText = "Operation held. Requires human review.";
+        else if (isSan) resultText = "Untrusted instructions neutralized. Content safe.";
+
+        let sourceDesc = "Historical audit log";
+        if (rec.run_id?.startsWith("run_demo_") || rec.context?.demo) {
+          sourceDesc = "SECURITY DEMO — SIMULATED EVENT (no real action executed)";
+        } else if (isRunning) {
+          sourceDesc = "LIVE ACTIVITY (runtime enforcing)";
+        }
+
+        let humanReason = rec.reason;
+        if (!humanReason) {
+          if (isBlock) humanReason = "Action was prevented by active security policy rule.";
+          else if (isHold) humanReason = "Action requires human approval before proceeding.";
+          else if (isSan) humanReason = "Untrusted instructions detected in data were neutralized.";
+          else humanReason = "Action conforms to active workspace policy.";
+        }
+
+        out += `\n  ${bold("DECISION DETAILS")}\n`;
+        out += `  ${dim("─".repeat(Math.max(0, W)))}\n\n`;
+        out += `  ${badgeTone(bold(badgeLabel))}\n\n`;
+        out += `  ${bold("Agent:")}     ${rec.agent ?? "—"}\n`;
+        out += `  ${bold("Action:")}    ${cyan(rec.tool ?? rec.action ?? "—")}\n`;
+        out += `  ${bold("Target:")}    ${rec.resource ?? rec.command ?? rec.url ?? "—"}\n`;
+        out += `  ${bold("Risk:")}      ${String(rec.risk ?? "—").toUpperCase()}\n`;
+        out += `  ${bold("Policy:")}    ${rec.policy ?? rec.rule ?? "—"}\n\n`;
+        out += `  ${bold("Reason:")}\n`;
+        const wrapW = Math.max(30, W - 6);
+        for (const wr of wordWrap(humanReason, wrapW)) {
+          out += `    ${dim(wr)}\n`;
+        }
+        out += `\n`;
+        out += `  ${bold("Result:")}    ${dim(resultText)}\n`;
+        out += `  ${bold("Source:")}    ${dim(sourceDesc)}\n\n`;
+        out += `  ${dim("─".repeat(Math.max(0, W)))}\n`;
+        out += `  ${bold("FORENSICS")}\n`;
+        out += `  ${dim("Request ID:")}   ${rec.request_id ?? "—"}\n`;
+        out += `  ${dim("Decision ID:")}  ${rec.decision_id ?? "—"}\n`;
+        out += `  ${dim("Latency:")}      ${rec.latency_ms ?? "—"}ms\n`;
+        out += `  ${dim("Audit Chain:")}  ${auditData?.ok ? green("Verified in audit journal") : dim("Recorded")}\n\n`;
+        out += `  ${dim("─".repeat(Math.max(0, W)))}\n`;
+        const holdAction = isHoldRecord(rec) ? `  ${green("[A] Approve")}  ${red("[R] Reject")}  ` : "";
+        out += `  ${cyan("[Esc]")} ${dim("Back to decisions")}   ${cyan("[q]")} ${dim("Quit")}  ${holdAction}\n`;
+        out += `  ${dim("└" + "─".repeat(Math.max(0, W)) + "┘")}\n`;
+        out += `\n  ${dim("$")} ${inputBuf}${inputMode ? "█" : dim("_")}\n`;
         try { stdout.write(out); } catch {}
         return;
       } else {
         out += `\n  ${red("No decision with id " + detailId)}\n\n`;
-        out += `  ${dim("[Esc] Back")}\n`;
+        out += `  ${cyan("[Esc]")} ${dim("Back to decisions")}\n`;
+        out += `  ${dim("└" + "─".repeat(Math.max(0, W)) + "┘")}\n`;
+        out += `\n  ${dim("$")} ${inputBuf}${inputMode ? "█" : dim("_")}\n`;
         try { stdout.write(out); } catch {}
         return;
       }
@@ -370,60 +444,85 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
         out += `  ${red(bold("chain broken"))} ${auditData?.brokenAt ?? ""} ${auditData?.reason ?? ""}\n`;
       }
     } else if (view === "demo" && isRunningDemo) {
-      out += `\n  ${dim("Running demo...")} ${dim("(real pipeline, streaming)")}\n\n`;
+      out += `\n  ${dim("Running security demo...")} ${dim("(real pipeline, streaming)")}\n\n`;
     } else {
-      out += `\n  ${bold("ACTIVITY")}  ${dim("live — use ↑/↓ to navigate, Enter to inspect")}\n\n`;
+      // Activity View: Clearly communicate source of decisions
+      let sourceTitle = "ACTIVITY";
+      let sourceDesc = "RECENT RECORDED DECISIONS";
+      let sourceTag = dim("(historical audit log)");
+      if (isRunning) {
+        sourceTitle = "LIVE ACTIVITY";
+        sourceDesc = "ENFORCING IN REAL TIME";
+        sourceTag = green("● LIVE");
+      } else if (events.length > 0) {
+        const isDemo = events.every((e) =>
+          e.run_id?.startsWith("run_demo_") ||
+          e.context?.demo ||
+          (e.resource && (e.resource.includes("attacker.example.com") || e.resource.includes("169.254.169.254") || e.resource.includes(".aws/credentials")))
+        );
+        if (isDemo) {
+          sourceTitle = "SECURITY DEMO";
+          sourceDesc = "SIMULATED EVENTS (no real action executed)";
+          sourceTag = amber("◈ SIMULATION");
+        }
+      }
+
+      out += `\n  ${bold(sourceTitle)}  ${dim("—")}  ${bold(sourceDesc)}  ${sourceTag}\n`;
+
       if (events.length === 0) {
-        out += `  ${dim("no decisions yet — run")} ${blue("cirvix demo")} ${dim("or start gateway")}\n`;
+        out += `\n  ${dim("No security decisions yet.")}\n\n`;
+        out += `  ${dim("Cirvix is ready to inspect agent activity.")}\n\n`;
+        out += `  ${dim("Try:")}\n`;
+        out += `    ${cyan("cirvix demo")}       ${dim("Run a simulated attack demo")}\n`;
+        out += `    ${cyan("cirvix init")}       ${dim("Configure protection for this workspace")}\n\n`;
       } else {
-        const maxEvents = Math.max(2, Math.min(12, rows - 15));
+        const allowedCount = events.filter((e) => (e.decision ?? e.verdict) === "allow" || (e.decision ?? e.verdict) === "permit").length;
+        const sanitizedCount = events.filter((e) => (e.decision ?? e.verdict) === "sanitize").length;
+        const blockedCount = events.filter((e) => (e.decision ?? e.verdict) === "deny").length;
+        const holdCount = events.filter((e) => (e.decision ?? e.verdict) === "require_approval" || (e.decision ?? e.verdict) === "hold").length;
+        out += `  ${green("✓")} ${allowedCount} Allowed  ${dim("·")}  ${blue("↻")} ${sanitizedCount} Sanitized  ${dim("·")}  ${red("✕")} ${blockedCount} Blocked  ${dim("·")}  ${amber("⏳")} ${holdCount} Awaiting approval\n\n`;
+
+        const maxEvents = Math.max(2, Math.min(10, rows - 16));
         const start = Math.max(0, events.length - maxEvents);
         const slice = events.slice(start);
         for (let i = 0; i < slice.length; i++) {
           const e = slice[i];
           const idx = start + i;
           const isSel = idx === selected;
-          const dec = e.decision ?? "unknown";
+          const dec = e.decision ?? e.verdict ?? "unknown";
           const isBlock = dec === "deny";
-          const isHold = dec === "require_approval";
+          const isHold = dec === "require_approval" || dec === "hold";
           const isSan = dec === "sanitize";
-          const icon = isBlock ? red("✕") : isHold ? amber("●") : isSan ? amber("◇") : green("✓");
-          const label = isBlock ? red("BLOCK") : isHold ? amber("APPROVAL") : isSan ? amber("SANITIZE") : green("ALLOW");
+          const icon = isBlock ? red("✕") : isHold ? amber("⏳") : isSan ? blue("↻") : green("✓");
+          const label = isBlock ? red("BLOCKED") : isHold ? amber("APPROVAL") : isSan ? blue("SANITIZE") : green("ALLOWED");
           const risk = String(e.risk ?? "—").toUpperCase();
           const riskTone = risk === "CRITICAL" ? red(risk) : risk === "HIGH" ? amber(risk) : dim(risk);
           const time = String(e.ts ?? e.timestamp ?? "").slice(11, 19) || "—";
           const tool = String(e.tool ?? e.action ?? "—");
           const toolWidth = Math.max(8, Math.min(16, Math.floor(W * 0.2)));
-          const targetWidth = Math.max(10, W - 34 - toolWidth);
-          const target = String(e.resource ?? e.command ?? "").slice(-targetWidth);
-          const latency = `${e.latency_ms ?? "—"}ms`;
-          const line = `  ${dim(time)}  ${icon} ${label.padEnd(8)} ${riskTone.padEnd(10)} ${tool.slice(0, toolWidth).padEnd(toolWidth)} ${dim(target.padEnd(targetWidth))} ${dim(latency.padStart(6))}`;
+          const targetWidth = Math.max(10, W - 36 - toolWidth);
+          const target = String(e.resource ?? e.command ?? e.url ?? "").slice(-targetWidth);
+          const line = `  ${dim(time)}  ${icon} ${label.padEnd(9)} ${riskTone.padEnd(9)} ${tool.slice(0, toolWidth).padEnd(toolWidth)} ${dim(target.padEnd(targetWidth))}`;
           out += (isSel ? `${cyan("▶")} ` : "  ") + (isSel ? bold(line) : line) + "\n";
-          if (isSel && isBlock) {
-            out += `    ${dim("Policy:")} ${e.policy ?? e.rule ?? "—"}  ${dim("Agent:")} ${e.agent ?? "—"}\n`;
+          if (isSel) {
+            let whyText = e.reason ?? (isBlock ? "Blocked by security policy." : isHold ? "Operation held for human approval." : isSan ? "Untrusted instructions sanitized." : "Permitted by security policy.");
+            out += `    ${dim("Why:")} ${whyText.slice(0, W - 12)}\n`;
+            out += `    ${dim("Policy:")} ${e.policy ?? e.rule ?? "—"}  ${dim("·")}  ${cyan("[Enter]")} ${dim("Inspect details")}\n`;
           }
-          if (isSel && isHold) {
-            out += `    ${amber("→ AWAITING APPROVAL")}  ${dim(e.policy ?? "")}\n`;
-          }
-        }
-      }
-      if (events.length > 0) {
-        const last = events[events.length - 1];
-        const lastDec = last.decision ?? "";
-        if (lastDec === "deny" || last.risk === "critical") {
-          out += `\n  ${dim("SECURITY")}\n\n`;
-          out += `  ${dim("Last decision:")}  ${red(bold("✕ BLOCKED"))}  ${dim(last.policy ?? last.rule ?? "")}\n`;
         }
       }
     }
 
     out += `\n  ${dim("─".repeat(Math.max(0, W)))}\n`;
     const p = statusData?.stats?.latency;
-    out += `  ${dim("P50")} ${p?.p50 ?? "—"}ms  ${dim("P95")} ${p?.p95 ?? "—"}ms  ${dim("P99")} ${p?.p99 ?? "—"}ms   ${auditData?.ok ? green("Audit ✓ INTEGRITY OK") : dim("Audit —")}`;
-    if (message) out += `   ${dim("·")} ${message}`;
-    out += `\n`;
+    if (p && (statusData?.stats?.count ?? 0) > 0) {
+      out += `  ${dim(`Session latency: P50 ${p.p50 ?? "—"}ms · P95 ${p.p95 ?? "—"}ms · P99 ${p.p99 ?? "—"}ms (${statusData.stats.count} local decisions)`)}\n`;
+    }
+    if (message) {
+      out += `  ${cyan("●")} ${message}\n`;
+    }
     out += `  ${dim("├" + "─".repeat(Math.max(0, W)) + "┤")}\n`;
-    const prompt = inputMode ? `$ ${inputBuf}█` : `$ ${inputBuf}${dim("_")}  ${dim("? help  q quit  r refresh  l logs  p pol  a audit  d demo  i intercept  ↑↓ nav  Enter inspect")}`;
+    const prompt = inputMode ? `$ ${inputBuf}█` : `$ ${inputBuf}${dim("_")}  ${cyan("[↑/↓]")} ${dim("Nav")}  ${cyan("[Enter]")} ${dim("Inspect")}  ${cyan("[?]")} ${dim("Help")}  ${cyan("[q]")} ${dim("Quit")}  ${cyan("[r]")} ${dim("Refresh")}`;
     out += `  ${dim("│")} ${prompt.slice(0, innerW).padEnd(innerW)} ${dim("│")}\n`;
     out += `  ${dim("└" + "─".repeat(Math.max(0, W)) + "┘")}\n`;
     try { stdout.write(out); } catch {}
@@ -491,7 +590,17 @@ export async function interactive({ cwd, flags = {}, rules, stdin = process.stdi
     } catch {}
   };
   try {
-    watcher = watch(join(stateDir, "audit.jsonl"), () => { void pollLive(); });
+    if (await exists(join(stateDir, "audit.jsonl"))) {
+      watcher = watch(join(stateDir, "audit.jsonl"), () => { void pollLive(); });
+      watcher.on("error", () => {
+        try { if (watcher) watcher.close(); } catch {}
+        watcher = null;
+        if (!poll) {
+          poll = setInterval(() => { void pollLive(); }, 900);
+          poll?.unref?.();
+        }
+      });
+    }
   } catch {
     poll = setInterval(() => { void pollLive(); }, 900);
     poll?.unref?.();

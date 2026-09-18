@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cirvix"
-version = "0.2.1"
+version = "0.2.2"
 description = "Runtime governance for AI agents — evaluate every tool call against policy before it executes."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -50,7 +50,7 @@ try:
 except PackageNotFoundError:
     # Source checkouts are not installed distributions. The package metadata
     # and VERSION file are checked together by tools/check-version.mjs.
-    __version__ = "0.2.1"
+    __version__ = "0.2.2"
 
 __all__ = [
     "CirvixDenied",

@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { interactive } from "../src/commands/interactive.mjs";
+import { stripAnsi } from "../src/core/format.mjs";
 
 function createMockTerminal({ columns = 80, rows = 24 } = {}) {
   const stdin = new EventEmitter();
@@ -231,6 +232,93 @@ test("interactive TTY: backspace edits input buffer", async (t) => {
   await waitFor(() => stdout.getOutput().includes("$ x█"));
 
   // Clean exit
+  stdin.send("\x03");
+  await runner;
+});
+
+test("interactive TTY: empty state displays clear guidance when no decisions exist", async (t) => {
+  const cwd = await createTempWorkspace(t);
+  const { stdin, stdout } = createMockTerminal();
+
+  const runner = interactive({
+    cwd,
+    flags: { fast: true },
+    rules: [],
+    stdin,
+    stdout,
+    onExit: () => {},
+  });
+
+  await waitFor(() => stdout.getOutput().includes("No security decisions yet"));
+  const output = stdout.getOutput();
+  assert.match(output, /No security decisions yet/);
+  assert.match(output, /Cirvix is ready to inspect agent activity/);
+  assert.match(output, /cirvix demo/);
+  assert.match(output, /cirvix init/);
+
+  stdin.send("\x03");
+  await runner;
+});
+
+test("interactive TTY: Enter inspects decision details and Esc returns to list", async (t) => {
+  const cwd = await createTempWorkspace(t);
+  const { stdin, stdout } = createMockTerminal();
+
+  // Create audit.jsonl with a demo decision
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const stateDir = join(cwd, ".cirvix");
+  await mkdir(stateDir, { recursive: true });
+  const sampleEvent = {
+    request_id: "req_test_01",
+    decision_id: "dec_test_01",
+    run_id: "run_demo_123",
+    timestamp: "2026-09-18T10:00:00.000Z",
+    tool: "read_file",
+    action: "filesystem.read",
+    resource: "~/.aws/credentials",
+    decision: "deny",
+    verdict: "deny",
+    risk: "critical",
+    policy: "deny-credential-directories",
+    reason: "Credential directories are not readable outside an approved secrets flow.",
+    latency_ms: 2.5,
+  };
+  await writeFile(join(stateDir, "audit.jsonl"), JSON.stringify(sampleEvent) + "\n", "utf8");
+
+  const runner = interactive({
+    cwd,
+    flags: { fast: true },
+    rules: [],
+    stdin,
+    stdout,
+    onExit: () => {},
+  });
+
+  await waitFor(() => stripAnsi(stdout.getOutput()).includes("SECURITY DEMO"));
+  const listOutput = stripAnsi(stdout.getOutput());
+  assert.match(listOutput, /SECURITY DEMO/);
+  assert.match(listOutput, /SIMULATED EVENTS/);
+  assert.match(listOutput, /BLOCKED/);
+  assert.match(listOutput, /read_file/);
+
+  // Press Enter to inspect decision
+  stdout.clearOutput();
+  stdin.send("\r");
+  await waitFor(() => stripAnsi(stdout.getOutput()).includes("DECISION DETAILS"));
+  const detailOutput = stripAnsi(stdout.getOutput());
+  assert.match(detailOutput, /DECISION DETAILS/);
+  assert.match(detailOutput, /BLOCKED \(DENY\)/);
+  assert.match(detailOutput, /No action was executed/);
+  assert.match(detailOutput, /Credential directories are not readable/);
+  assert.match(detailOutput, /FORENSICS/);
+  assert.match(detailOutput, /req_test_01/);
+  assert.match(detailOutput, /\[Esc\] Back to decisions/);
+
+  // Press Escape to return to activity list
+  stdout.clearOutput();
+  stdin.send("\x1b");
+  await waitFor(() => stripAnsi(stdout.getOutput()).includes("SECURITY DEMO"));
+
   stdin.send("\x03");
   await runner;
 });

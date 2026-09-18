@@ -279,7 +279,7 @@ function readPath(obj, path) {
 function conditionsHold(conditions, context) {
   if (!conditions || conditions.length === 0) return true;
   return conditions.every((cond) => {
-    const cmp = COMPARATORS[cond.op];
+    const cmp = Object.hasOwn(COMPARATORS, cond.op) ? COMPARATORS[cond.op] : null;
     if (!cmp) return false;
     return cmp(readPath(context, cond.path), cond.value);
   });
@@ -569,7 +569,7 @@ export function parseRules(json) {
       );
     }
     for (const cond of rule.when ?? []) {
-      if (!COMPARATORS[cond.op]) {
+      if (!Object.hasOwn(COMPARATORS, cond.op)) {
         throw new Error(`Rule "${rule.name}" uses unknown operator "${cond.op}".`);
       }
     }
@@ -642,7 +642,7 @@ export function validateRules(json) {
         errors.push({ rule: where, message: "Condition is not an object." });
         continue;
       }
-      if (!COMPARATORS[cond.op]) {
+      if (!Object.hasOwn(COMPARATORS, cond.op)) {
         errors.push({ rule: where, message: `Unknown operator "${cond.op}".` });
       }
       if (typeof cond.path !== "string" || !cond.path) {

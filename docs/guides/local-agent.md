@@ -8,7 +8,7 @@ calls outside the wrapped object are outside this integration's coverage.
 
 ```bash
 npm install @cirvix_ai/agent-control
-cirvix init
+npx cirvix init
 ```
 
 ```js
@@ -27,5 +27,4 @@ try {
 
 Load a checked-in policy with `parseRules`, run its declared cases with
 `cirvix policy test`, then exercise one allowed and one denied call. Verify the
-local chain with `cirvix audit verify`. Python uses the same flow through
-`pip install cirvix` and `cirvix.guard.wrap`.
+local chain only if an `AuditChain` was explicitly supplied to the wrapper (this short snippet does not supply one). See [Quickstart](../quickstart.md) for a self-contained audited example. Python has no CLI or built-in audit sink; install with `pip install cirvix`, use returned wrappers and configure `on_decision` separately.

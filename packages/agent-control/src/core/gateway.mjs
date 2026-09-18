@@ -64,6 +64,9 @@ import {
   errorResponse,
   heldToolResult,
   serialize,
+  isRequest,
+  isNotification,
+  isResponse,
 } from "./jsonrpc.mjs";
 
 // Re-exported so existing importers of the gateway keep working; the
@@ -162,6 +165,8 @@ class Upstream {
     this.proc.on("error", (err) => {
       this.alive = false;
       this.log(`upstream ${this.name} failed to start: ${err.message}`);
+      for (const entry of this.pending.values()) entry.reject(new Error("Upstream unavailable."));
+      this.pending.clear();
       this.onExit(this);
     });
 
@@ -288,9 +293,22 @@ export class Gateway {
     licence = null,
     meter = null,
     agents = null,
+    approvals = null,
+    missions = null,
+    mission = null,
+    requestTimeoutMs = 30_000,
+    maxInflight = 1024,
   }) {
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 2_147_483_647) throw new RangeError("Invalid request timeout.");
+    if (!Number.isSafeInteger(maxInflight) || maxInflight < 1) throw new RangeError("Invalid in-flight limit.");
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.maxInflight = maxInflight;
+    this.stopped = false;
     this.serversSpec = servers;
     this.audit = audit;
+    this.approvals = approvals;
+    this.missions = missions;
+    this.mission = mission;
     this.scopeFor = scopeFor;
     this.log = log;
     this.onDecision = onDecision;
@@ -324,6 +342,9 @@ export class Gateway {
       audit,
       secrets,
       delegation,
+      approvals,
+      missions,
+      mission,
       licence,
       meter,
       agents,
@@ -406,7 +427,7 @@ export class Gateway {
     for (const [name, spec] of Object.entries(this.serversSpec)) {
       const hooks = {
         onMessage: (u, m) => this.#fromUpstream(u, m),
-        onExit: () => {},
+        onExit: (up) => this.#failRoutes(up),
         log: this.log,
       };
 
@@ -442,6 +463,8 @@ export class Gateway {
   }
 
   stop() {
+    this.stopped = true;
+    this.#failRoutes();
     for (const up of this.upstreams.values()) up.stop();
   }
 
@@ -449,20 +472,37 @@ export class Gateway {
   /*  Agent → gateway                                                        */
   /* ---------------------------------------------------------------------- */
 
-  async handleClientMessage(message) {
-    // Notifications are forwarded to every upstream and never answered.
-    if (message.id === undefined && message.method) {
-      for (const up of this.upstreams.values()) up.send(message);
+  async handleClientMessage(message, deliver = this.write) {
+    if (this.stopped) {
+      if (isRequest(message)) deliver(errorResponse(message.id, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Gateway stopped."));
+      return;
+    }
+    if (isNotification(message)) {
+      if (message.method.startsWith("notifications/")) {
+        for (const up of this.upstreams.values()) up.send(message);
+      }
+      return;
+    }
+    if (!isRequest(message)) {
+      deliver(errorResponse(null, ERROR_CODE.INVALID_REQUEST, "Invalid JSON-RPC request."));
+      return;
+    }
+    if ((message.method === "tools/call" &&
+         (typeof message.params?.name !== "string" || !message.params.name ||
+          (message.params.arguments != null && (typeof message.params.arguments !== "object" || Array.isArray(message.params.arguments))))) ||
+        (["resources/read", "resources/subscribe", "resources/unsubscribe"].includes(message.method) &&
+         (typeof message.params?.uri !== "string" || !message.params.uri))) {
+      deliver(errorResponse(message.id, ERROR_CODE.INVALID_PARAMS, "Invalid method parameters."));
       return;
     }
 
     switch (message.method) {
       case "initialize":
-        return this.#handleInitialize(message);
+        return this.#handleInitialize(message, deliver);
       case "tools/list":
-        return this.#handleToolsList(message);
+        return this.#handleToolsList(message, deliver);
       case "tools/call":
-        return this.#handleToolsCall(message);
+        return this.#handleToolsCall(message, deliver);
 
       /*
        * Resources are a read path, and a read path is a policy decision.
@@ -480,16 +520,16 @@ export class Gateway {
        * thing.
        */
       case "resources/read":
-        return this.#handleResourcesRead(message);
+        return this.#handleResourcesRead(message, deliver);
       case "resources/list":
       case "resources/templates/list":
-        return this.#handleResourcesList(message);
+        return this.#handleResourcesList(message, deliver);
       case "resources/subscribe":
       case "resources/unsubscribe":
-        return this.#handleResourceSubscription(message);
+        return this.#handleResourceSubscription(message, deliver);
 
       case "prompts/list":
-        return this.#handlePromptsList(message);
+        return this.#handlePromptsList(message, deliver);
 
       /*
        * `ping` is answered HERE, by the gateway, and never forwarded.
@@ -507,24 +547,23 @@ export class Gateway {
        * dropping a dead server's tools from `tools/list`.
        */
       case "ping":
-        this.write({ jsonrpc: "2.0", id: message.id, result: {} });
+        deliver({ jsonrpc: "2.0", id: message.id, result: {} });
         return;
 
       default:
-        // Anything else is broadcast to the first live upstream. The gateway
-        // deliberately does not invent behaviour for methods it doesn't model.
-        return this.#forwardToAny(message);
+        deliver(errorResponse(message.id, ERROR_CODE.METHOD_NOT_FOUND, "Method not supported by the gateway."));
+        return;
     }
   }
 
-  #handleInitialize(message) {
-    this.write({
+  #handleInitialize(message, deliver = this.write) {
+    deliver({
       jsonrpc: "2.0",
       id: message.id,
       result: {
         protocolVersion: message.params?.protocolVersion ?? "2024-11-05",
-        // Advertised because the gateway now governs all three, rather than
-        // passing two of them through untouched.
+        // Discovery is advertised; prompts/get remains unsupported. Listing a
+        // prompt is not a policy authorization to retrieve its content.
         capabilities: { tools: {}, resources: { subscribe: true }, prompts: {} },
         // Same manifest the CLI reports, so an MCP client and `cirvix --version`
         // cannot disagree about which build is running.
@@ -544,7 +583,7 @@ export class Gateway {
    * the same two reasons: two servers may expose the same URI, and a policy
    * written for one must not silently govern the other.
    */
-  async #handleResourcesList(message) {
+  async #handleResourcesList(message, deliver = this.write) {
     const key = message.method === "resources/templates/list" ? "resourceTemplates" : "resources";
     const collected = [];
 
@@ -571,7 +610,7 @@ export class Gateway {
       }
     }
 
-    this.write({ jsonrpc: "2.0", id: message.id, result: { [key]: collected } });
+    deliver({ jsonrpc: "2.0", id: message.id, result: { [key]: collected } });
   }
 
   /**
@@ -583,7 +622,7 @@ export class Gateway {
    * the shared core as an `fs.read`, and the result is scrubbed on the way back
    * like any other payload.
    */
-  async #handleResourcesRead(message) {
+  async #handleResourcesRead(message, deliver = this.write) {
     const fullUri = message.params?.uri ?? "";
     const sep = fullUri.indexOf(NS);
     const server = sep === -1 ? null : fullUri.slice(0, sep);
@@ -591,7 +630,7 @@ export class Gateway {
     const up = server ? this.upstreams.get(server) : [...this.upstreams.values()].find((u) => u.alive);
 
     if (!up || !up.alive) {
-      this.write(
+      deliver(
         errorResponse(
           message.id,
           ERROR_CODE.UPSTREAM_UNAVAILABLE,
@@ -624,19 +663,17 @@ export class Gateway {
 
     if (decision.verdict === "deny") {
       this.log(`DENY resources/read ${decision.resource} (${decision.rule})`);
-      this.write(deniedToolResult(message.id, decision));
+      deliver(deniedToolResult(message.id, decision));
       return;
     }
     if (decision.verdict === "hold") {
-      decision.approvalId = `apr_${String(decision.decisionId).slice(4, 12)}`;
+      decision.approvalId = decision.approvalId ?? `apr_${String(decision.decisionId).slice(4, 12)}`;
       this.log(`HOLD resources/read ${decision.resource} (${decision.rule})`);
-      this.write(heldToolResult(message.id, decision));
+      deliver(heldToolResult(message.id, decision));
       return;
     }
 
-    const gatewayId = `gw-${this.nextGatewayId++}`;
-    this.inflight.set(gatewayId, { clientId: message.id, upstream: up });
-    up.send({ jsonrpc: "2.0", id: gatewayId, method: "resources/read", params: { ...message.params, uri } });
+    return this.#forward({ ...message, params: { ...message.params, uri } }, up, decision, deliver);
   }
 
   /**
@@ -645,7 +682,7 @@ export class Gateway {
    * Governed with the same decision as a one-shot read, because a subscription
    * to a resource an agent may not read is a slower version of reading it.
    */
-  async #handleResourceSubscription(message) {
+  async #handleResourceSubscription(message, deliver = this.write) {
     const fullUri = message.params?.uri ?? "";
     const sep = fullUri.indexOf(NS);
     const server = sep === -1 ? null : fullUri.slice(0, sep);
@@ -653,7 +690,7 @@ export class Gateway {
     const up = server ? this.upstreams.get(server) : [...this.upstreams.values()].find((u) => u.alive);
 
     if (!up || !up.alive) {
-      this.write(
+      deliver(
         errorResponse(message.id, ERROR_CODE.UPSTREAM_UNAVAILABLE, `No registered server for "${fullUri}".`),
       );
       return;
@@ -662,22 +699,20 @@ export class Gateway {
     // Unsubscribing is always permitted: refusing to let an agent stop
     // receiving something is not a security property.
     if (message.method === "resources/unsubscribe") {
-      const gatewayId = `gw-${this.nextGatewayId++}`;
-      this.inflight.set(gatewayId, { clientId: message.id, upstream: up });
-      up.send({ jsonrpc: "2.0", id: gatewayId, method: message.method, params: { ...message.params, uri } });
-      return;
+      return this.#forward({ ...message, params: { ...message.params, uri } }, up, null, deliver);
     }
 
     const { decision } = await this.guard.authorize({
       tool: "resources.subscribe",
       server: server ?? up.name,
       args: { uri, path: fileUriToPath(uri) },
+      ...callerIdentity(message.params),
     });
     this.stats = this.guard.stats;
 
     if (decision.verdict !== "permit") {
       this.log(`${decision.verdict.toUpperCase()} resources/subscribe ${decision.resource} (${decision.rule})`);
-      this.write(
+      deliver(
         decision.verdict === "hold"
           ? heldToolResult(message.id, decision)
           : deniedToolResult(message.id, decision),
@@ -685,9 +720,7 @@ export class Gateway {
       return;
     }
 
-    const gatewayId = `gw-${this.nextGatewayId++}`;
-    this.inflight.set(gatewayId, { clientId: message.id, upstream: up });
-    up.send({ jsonrpc: "2.0", id: gatewayId, method: message.method, params: { ...message.params, uri } });
+    return this.#forward({ ...message, params: { ...message.params, uri } }, up, decision, deliver);
   }
 
   /**
@@ -698,7 +731,7 @@ export class Gateway {
    * context with the authority of a system message, and it is written by
    * whoever wrote the server.
    */
-  async #handlePromptsList(message) {
+  async #handlePromptsList(message, deliver = this.write) {
     const prompts = [];
     for (const [name, up] of this.upstreams) {
       if (!up.alive) continue;
@@ -713,14 +746,14 @@ export class Gateway {
         prompts.push({ ...prompt, name: `${name}${NS}${prompt.name}` });
       }
     }
-    this.write({ jsonrpc: "2.0", id: message.id, result: { prompts } });
+    deliver({ jsonrpc: "2.0", id: message.id, result: { prompts } });
   }
 
   /**
    * Aggregates tools from every live upstream, applies the per-server scope,
    * and withholds any tool whose definition has drifted from its pin.
    */
-  async #handleToolsList(message) {
+  async #handleToolsList(message, deliver = this.write) {
     const tools = [];
 
     for (const [name, up] of this.upstreams) {
@@ -763,11 +796,11 @@ export class Gateway {
       }
     }
 
-    this.write({ jsonrpc: "2.0", id: message.id, result: { tools } });
+    deliver({ jsonrpc: "2.0", id: message.id, result: { tools } });
   }
 
   /** The decision point. */
-  async #handleToolsCall(message) {
+  async #handleToolsCall(message, deliver = this.write) {
     const fullName = message.params?.name ?? "";
     const sep = fullName.indexOf(NS);
     const server = sep === -1 ? null : fullName.slice(0, sep);
@@ -775,13 +808,21 @@ export class Gateway {
     const up = server ? this.upstreams.get(server) : null;
 
     if (!up || !up.alive) {
-      this.write(
+      deliver(
         errorResponse(
           message.id,
           ERROR_CODE.UPSTREAM_UNAVAILABLE,
           `No registered server for tool "${fullName}".`,
         ),
       );
+      return;
+    }
+
+    const scope = this.scopeFor(server);
+    const pin = this.pins.get(fullName);
+    const definition = up.tools.get(toolName);
+    if ((scope && !scope.includes(toolName)) || (pin && (!definition || definition.fingerprint !== pin))) {
+      deliver(errorResponse(message.id, ERROR_CODE.POLICY_DENIED, "Tool is outside the configured scope or its definition is not verified."));
       return;
     }
 
@@ -805,40 +846,68 @@ export class Gateway {
 
     if (decision.verdict === "deny") {
       this.log(`DENY ${decision.action ?? toolName} ${decision.resource} (${decision.rule})`);
-      this.write(deniedToolResult(message.id, decision));
+      deliver(deniedToolResult(message.id, decision));
       return;
     }
 
     if (decision.verdict === "hold") {
-      decision.approvalId = `apr_${String(decision.decisionId).slice(4, 12)}`;
+      decision.approvalId = decision.approvalId ?? `apr_${String(decision.decisionId).slice(4, 12)}`;
       this.log(`HOLD ${decision.action ?? toolName} ${decision.resource} (${decision.rule})`);
-      this.write(heldToolResult(message.id, decision));
+      deliver(heldToolResult(message.id, decision));
       return;
     }
 
     // Forward under a gateway-owned id, remembering how to route the answer —
     // and what was decided about it, so the return path can say so.
-    const gatewayId = `gw-${this.nextGatewayId++}`;
-    this.inflight.set(gatewayId, { clientId: message.id, upstream: up, decision });
-    up.send({
+    return this.#forward({
       jsonrpc: "2.0",
-      id: gatewayId,
+      id: message.id,
       method: "tools/call",
       params: { name: toolName, arguments: outgoingArgs },
-    });
+    }, up, decision, deliver);
   }
 
-  #forwardToAny(message) {
-    const up = [...this.upstreams.values()].find((u) => u.alive);
-    if (!up) {
-      this.write(
-        errorResponse(message.id, ERROR_CODE.UPSTREAM_UNAVAILABLE, "No upstream server available."),
-      );
+  #finishRoute(id, message) {
+    const route = this.inflight.get(id);
+    if (!route) return;
+    this.inflight.delete(id);
+    clearTimeout(route.timer);
+    (route.deliver ?? this.write)({ ...message, id: route.clientId });
+    route.resolveRoute?.();
+  }
+
+  #failRoutes(upstream) {
+    for (const [id, route] of this.inflight) {
+      if (!upstream || route.upstream === upstream) {
+        this.#finishRoute(id, errorResponse(null, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream unavailable."));
+      }
+    }
+  }
+
+  #forward(message, up, decision, deliver = this.write) {
+    if (this.stopped || !up.alive || this.inflight.size >= this.maxInflight) {
+      deliver(errorResponse(message.id, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream unavailable or request limit reached."));
       return;
     }
-    const gatewayId = `gw-${this.nextGatewayId++}`;
-    this.inflight.set(gatewayId, { clientId: message.id, upstream: up });
-    up.send({ ...message, id: gatewayId });
+    const id = `gw-${this.nextGatewayId++}`;
+    const timeoutMs = Math.min(this.requestTimeoutMs, up.spec?.timeoutMs ?? this.requestTimeoutMs);
+    let resolve;
+    const settled = new Promise((r) => { resolve = r; });
+    const timer = setTimeout(() => {
+      this.#finishRoute(id, errorResponse(null, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream request timed out."));
+    }, timeoutMs);
+    this.inflight.set(id, { clientId: message.id, upstream: up, decision, timer, deliver, resolveRoute: resolve });
+    // Expose the completion promise so callers (HTTP transport) can await the
+    // upstream answer rather than returning 202.
+    message._routePromise = settled;
+    try {
+      if (!up.send({ ...message, id })) {
+        this.#finishRoute(id, errorResponse(null, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream send failed."));
+      }
+    } catch {
+      this.#finishRoute(id, errorResponse(null, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream send failed."));
+    }
+    return settled;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -846,19 +915,27 @@ export class Gateway {
   /* ---------------------------------------------------------------------- */
 
   #fromUpstream(up, message) {
-    // Responses to the gateway's own internal requests (tools/list, etc.)
-    if (up.settle(message)) return;
-
-    const route = this.inflight.get(message.id);
-    if (route) {
-      this.inflight.delete(message.id);
-      this.write({ ...this.#annotate(this.#scrub(message), route.decision), id: route.clientId });
+    if (this.stopped) return;
+    if (isResponse(message)) {
+      if (up.settle(message)) return;
+      const route = this.inflight.get(message.id);
+      if (!route || route.upstream !== up) return;
+      let reply;
+      try {
+        reply = this.#annotate(this.#scrub(message, route.decision), route.decision);
+      } catch {
+        reply = errorResponse(null, ERROR_CODE.INTERNAL, "Upstream response could not be safely processed.");
+      }
+      this.#finishRoute(message.id, reply);
       return;
     }
-
-    // Server-initiated notifications pass straight through — scrubbed, since
-    // a notification reaches the model's context exactly like a result does.
-    if (message.id === undefined) this.write(this.#scrub(message));
+    if (isNotification(message)) {
+      try {
+        this.write(this.#scrub(message));
+      } catch {
+        this.log("Upstream notification could not be safely processed.");
+      }
+    }
   }
 
   /**
@@ -873,8 +950,8 @@ export class Gateway {
    * limit, it is the one the product's own documentation states, and it is
    * why this is a backstop rather than a substitute for scoping handles.
    */
-  #scrub(message) {
-    return this.guard.scrub(message).payload;
+  #scrub(message, decision) {
+    return this.guard.scrub(message, decision).payload;
   }
 
   /**

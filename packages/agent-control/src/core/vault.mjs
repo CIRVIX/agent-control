@@ -111,6 +111,8 @@ export class Vault {
    * @returns {string} the handle
    */
   issue(name, value, { destinations = [], maxUses = Infinity, ttlSeconds = null, subject = null } = {}) {
+    if (maxUses !== Infinity && (!Number.isSafeInteger(maxUses) || maxUses < 0)) throw new Error("Invalid credential use limit.");
+    if (ttlSeconds !== null && (!Number.isFinite(ttlSeconds) || !Number.isFinite(Date.now() + ttlSeconds * 1000))) throw new Error("Invalid credential lifetime.");
     if (typeof value !== "string" || !value.length) {
       throw new Error(`Cannot issue a handle for "${name}": no value.`);
     }
@@ -139,11 +141,40 @@ export class Vault {
       subject: subject === null || subject === undefined ? null : String(subject),
       expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : null,
       issuedAt: Date.now(),
+      revoked: false,
+      revokedAt: null,
     });
     this.#byName.set(name, handle);
     this.stats.issued++;
     this.log(`vault: issued ${handle} for ${name}`);
     return handle;
+  }
+
+  /**
+   * Revokes a credential handle so it can no longer be resolved.
+   *
+   * @param {string} handle
+   * @returns {boolean} whether the handle was found and marked revoked
+   */
+  revoke(handle) {
+    const entry = this.#lookup(handle);
+    if (!entry) return false;
+    entry.revoked = true;
+    entry.revokedAt = Date.now();
+    this.log(`vault: revoked handle ${handle} (${entry.name})`);
+    return true;
+  }
+
+  /**
+   * Revokes a credential by its name.
+   *
+   * @param {string} name
+   * @returns {boolean} whether the name was found and marked revoked
+   */
+  revokeByName(name) {
+    const handle = this.#byName.get(name);
+    if (!handle) return false;
+    return this.revoke(handle);
   }
 
   /**
@@ -164,11 +195,13 @@ export class Vault {
     return [...this.#entries.entries()].map(([handle, e]) => ({
       handle,
       name: e.name,
-      destinations: e.destinations,
+      destinations: [...e.destinations],
       uses: e.uses,
       maxUses: e.maxUses === Infinity ? null : e.maxUses,
       expiresAt: e.expiresAt ? new Date(e.expiresAt).toISOString() : null,
       expired: this.#isExpired(e),
+      revoked: Boolean(e.revoked),
+      revokedAt: e.revokedAt ? new Date(e.revokedAt).toISOString() : null,
     }));
   }
 
@@ -186,6 +219,9 @@ export class Vault {
    * the vault entirely — but `cirvix status` reports how many are unscoped.
    */
   #authorize(entry, destination, subject) {
+    if (entry.revoked) {
+      return { ok: false, outcome: "revoked", reason: "This credential handle has been revoked." };
+    }
     if (this.#isExpired(entry)) {
       return { ok: false, outcome: "expired", reason: "This handle has expired." };
     }
@@ -283,7 +319,6 @@ export class Vault {
       }
       replacements.set(handle, entry.value);
       names.push(entry.name);
-      entry.uses++;
     }
 
     const value = mapStrings(args, (s) => {
@@ -292,6 +327,7 @@ export class Vault {
       return out;
     });
 
+    for (const handle of handles) this.#entries.get(handle).uses++;
     this.stats.substituted += replacements.size;
     this.onEvent({ kind: "secret_substituted", names, destination: destination ?? null });
     return { ok: true, value, substituted: names };
@@ -470,7 +506,12 @@ export class Vault {
         value: e.value,
         destinations: e.destinations,
         maxUses: e.maxUses === Infinity ? null : e.maxUses,
+        uses: e.uses,
+        subject: e.subject,
         expiresAt: e.expiresAt,
+        issuedAt: e.issuedAt,
+        revoked: Boolean(e.revoked),
+        revokedAt: e.revokedAt ?? null,
       })),
     );
 
@@ -517,9 +558,12 @@ export class Vault {
         value: e.value,
         destinations: e.destinations ?? [],
         maxUses: e.maxUses ?? Infinity,
-        uses: 0,
+        uses: e.uses ?? 0,
+        subject: e.subject ?? null,
         expiresAt: e.expiresAt ?? null,
-        issuedAt: Date.now(),
+        issuedAt: e.issuedAt ?? Date.now(),
+        revoked: Boolean(e.revoked),
+        revokedAt: e.revokedAt ?? null,
       });
       this.#byName.set(e.name, e.handle);
       const n = Number(String(e.handle).slice(HANDLE_PREFIX.length));

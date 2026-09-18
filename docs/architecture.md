@@ -1,225 +1,55 @@
 # Architecture
 
-Cirvix answers one question, in one place, and records the answer: **may this
-agent make this tool call?**
+## Available components
 
-Everything else in the system exists to get that question asked, to distribute
-the rules it is asked against, or to keep the answer afterwards.
+```text
+MCP client -> Gateway -> Guard.authorize -> upstream MCP server
+Node tools -> guard.wrap -> Guard.authorize -> wrapped function
+Socket client -> UdsServer -> Pipeline.submit -> cooperating executor
+                                    |
+                    policy / risk / approvals / authority / vault / audit
 
-## The shape
-
-```
-                          ┌───────────────────────────────┐
-   agent ──stdio──▶  MCP Gateway  ──stdio──▶ upstream MCP servers
-                          │                  (github, filesystem, …)
-                          ├─ Guard ── policy engine
-                          ├─ audit chain (.cirvix/audit.jsonl)
-                          └─ Daemon ─────HTTPS─────┐
-                                                   ▼
-   agent (LangChain/CrewAI) ── guard.wrap ──▶ Guard        Control Plane
-                                                   ├─ policy distribution
-                                                   ├─ fleet inventory
-                                                   ├─ decisions + runs
-                                                   ├─ approvals
-                                                   ├─ secret broker
-                                                   ├─ audit chain (per tenant)
-                                                   ├─ SSO / SCIM
-                                                   └─ compliance evidence
-                                                          ▲
-                                        console  ──────────┘
+Gateway or standalone Daemon -> optional external control-plane API
 ```
 
-Two enforcement paths, **one decision core**.
+`packages/agent-control/bin/cirvix.mjs` dispatches commands, loads policies, wires stores, and starts transports. `src/commands` provides setup, reporting, policy operations, proofs, and demos. `src/adapters` detects client configurations and generates integration plans; detection is not evidence of routed execution.
 
-## One decision core, two transports
+`src/core/guard.mjs` and `src/core/pipeline.mjs` are distinct orchestration paths sharing policy and other components. Gateway uses Guard; the local control socket uses Pipeline. They require cross-path tests; a shared evaluator alone does not establish parity.
 
-The MCP gateway and `guard.wrap()` are two transports for one question. They
-**must not** be two implementations of the answer — a guard that permits what
-the gateway denies is worse than having no SDK at all, because it is a
-governance product with a documented bypass.
+Rules are evaluated locally, with default deny and forbid taking precedence over hold and permit. Optional mission and delegation constraints narrow authority. On permitted calls a configured broker substitutes handles; responses are scrubbed. Audit records describe authorization, not necessarily successful tool execution. Pipeline submission alone never performs a refund, deployment, or filesystem edit.
 
-Both call `Guard.authorize()` in
-[`core/guard.mjs`](../packages/agent-control/src/core/guard.mjs), which calls
-`evaluate()` in [`core/policy.mjs`](../packages/agent-control/src/core/policy.mjs).
-The gateway was refactored onto this shared core specifically so the two cannot
-drift.
+The package exports SDK modules through `package.json`; its tarball includes `bin`, `src`, `action`, README, LICENSE, and NOTICE. Repository demo harnesses, tests, docs, tools, and conformance fixtures are not in that tarball. The Python engine is a separate implementation with a shared conformance fixture, not the full Node orchestration stack.
 
-The Python engine is a separate implementation of `evaluate()`, held in
-agreement by a [shared conformance fixture](./policy.md).
+## Integration limits
 
-| | Gateway | `guard.wrap` |
-|---|---|---|
-| Governs tools added after deployment | **yes** — sits on the wire | no — wraps a list |
-| Requires the agent to speak MCP | yes | no |
-| Same engine, rules, decision record | yes | yes |
-| Secret brokering | yes | Node only |
-| Audit chain | yes | Node only |
+The gateway governs only traffic routed through it. Client configurations that retain direct upstream entries permit ungoverned access. Fleet integration therefore refuses those generated plans instead of claiming protection. Built-in editor tools, arbitrary subprocesses, and framework executors using unwrapped tools remain outside the boundary.
 
-## The decision path
+A configuration entry is not a handshake; an authorization permit is not a verified end-to-end execution. Fleet detection does not infer VERIFIED from a permit record.
 
-For one `tools/call` crossing the gateway:
+Gateway forwarded routes have timeouts and capacity bounds, carry their authorization decision into response scrubbing, and reject unsupported client methods. Pipeline selects agent identity from trusted submission context or configuration, not the raw request agent field; the embedding transport is responsible for authenticating that context. Node wrappers guard supported callable entrypoints and reject unsupported shapes rather than passing them through.
 
-1. **Decode.** The JSON-RPC frame is parsed. Tool names are namespaced
-   `server__tool`.
-2. **Map to policy vocabulary.** `actionForTool` normalizes the tool name to an
-   action (`fs.read`, `shell.exec`, …); `resourceForCall` extracts the resource
-   from the arguments.
-3. **Canonicalize.** The resource is resolved — traversal collapsed, case
-   normalized, URLs reduced to scheme/host/path.
-4. **Assemble context.** `environment`, `path.insideWorkspace`,
-   `egress.external`, `session.touchedSecret`, `mcp.server`, `mcp.tool`.
-5. **Evaluate.** Ordered rules; forbid short-circuits, hold outranks permit,
-   default deny.
-6. **Broker.** On a permit, secret handles in the arguments are substituted for
-   real material — all or nothing. A broker refusal turns the permit into a
-   deny.
-7. **Record.** One decision record, appended to the hash chain and handed to
-   `onDecision`.
-8. **Forward, refuse, or hold.**
-9. **Scrub the return path.** The result is scanned for material this session
-   resolved, and handles are put back.
+## Persistence and trust
 
-Latency is measured around step 5 only. The tool round trip is orders of
-magnitude larger and including it would flatter the number dishonestly.
+Local audit records form a SHA-256 hash chain, not a Merkle tree. Internal consistency cannot prove truthful recording or detect complete deletion/replacement without a trusted external checkpoint. `prove` produces a signed compact token; local signing keys remain under the state directory. A local proof is not independent evidence.
 
-## Why the gateway is built the way it is
+Local approvals bind request fingerprints (including server/environment in Guard) and record reviewer names. They do not implement SSO-authenticated dual-key signatures. Vault handles and missions require explicit wiring; exported modules are not proof that every CLI transport enables every feature. Avoid multiple processes writing the same state files without verified coordination.
 
-The gateway is the product; everything else describes what it does. Six
-decisions in it are load-bearing.
+## Feature wiring is not uniform
 
-**Tool names are namespaced.** Two servers may both expose `search`. Without
-namespacing the gateway cannot route the call and — worse — a policy written for
-one server silently governs the other.
-
-**Request ids are rewritten.** The agent's id space and each upstream's are
-independent. Forwarding an id unchanged means two servers can answer with the
-same id and the gateway mis-routes a response.
-
-**Tool definitions are pinned.** A tool's description is instruction text that
-enters the model's context with the authority of a system message, and it is
-supplied by the server, not by you. The gateway hashes each definition on first
-sight; a changed definition is withheld until re-approved. This is the defence
-against a rug-pulled MCP server.
-
-**Denials are tool results, not transport errors.** A transport error tells the
-agent the plumbing broke, and it retries. A tool result carrying a refusal and a
-remediation tells it what happened and what to do instead.
-
-**One upstream failing does not take down the session.** A dead server's tools
-disappear from `tools/list`; calls to it return a clean error.
-
-**Secrets are substituted here, if anywhere.** This is the only point in the
-process where a credential exists inside a request, and it sits downstream of
-the decision that authorized it.
-
-## Enforcement does not depend on the control plane
-
-The gateway and both SDKs evaluate **locally**, against rules already on the
-machine. The control plane distributes rules and collects what happened.
-
-A control-plane outage must not become an enforcement outage. The daemon caches
-the last known rule set in its state directory and keeps enforcing it; telemetry
-spools to disk and ships when the connection returns.
-
-This is also why `cirvix scan`, `check`, `policy`, `gateway` and `audit verify`
-all work with no account at all. Only `why` and `replay` require the control
-plane, because they ask about something recorded somewhere else.
-
-## The audit chain
-
-Append-only JSONL where every record commits to the hash of its predecessor.
-SHA-256 over a **canonical** JSON serialization — keys sorted all the way down,
-because `JSON.stringify` preserves insertion order and two semantically
-identical records would otherwise hash differently.
-
-Stated precisely, because the distinction is the whole value and is routinely
-overstated:
-
-| | |
+| Entry point | Actual wiring |
 |---|---|
-| **Proves** | No record was altered or removed after it was written, assuming any published checkpoint root is trusted |
-| **Does not prove** | That a record was written truthfully in the first place. That property comes from the enforcement path, not the log |
-| **Does not prevent** | Destruction. Someone with disk access can delete the file. The chain guarantees that doing so is *visible* |
+| `guard.wrap` / SDK Guard | Policy/risk, taint, shared in-process kill checks and supplied optional audit/approval/broker/delegation/mission/meter objects. No default persistent audit sink. |
+| CLI MCP gateway | Guard plus local audit/approval stores and metering. Optional daemon handles remote synchronization; the CLI does not pass a secret broker, mission/delegation registry or Pipeline-only controls. |
+| CLI local runtime | Pipeline plus audit/approvals/metering; vault only populated with `--vault`. Socket clients cooperate; no upstream operation is executed by Pipeline submission. |
+| Pipeline library | Additional optional intent, session tracker and behavioral baseline; process-local kill engine. The kill context does not supply every scope advertised by the helper. |
+| Python Guard | Native policy/wrapper and decision callback; no Node audit sink, broker or delegation implementation. |
 
-`cirvix audit verify` prints that caveat on every successful run.
+`AgentSandbox.execute` spawns a subprocess with a checked working directory and timeout; it does not impose OS filesystem/network confinement or its configured memory ceiling. MCP inspection scores supplied metadata/strings rather than verifying publisher signatures. Passport rotation verifies the current passport and requires signatures from old and new keys. Passport and action-receipt helpers remain explicitly invoked primitives, not runtime enrollment, mandatory transport authentication or automatic per-call immutable receipts. Mission budgets and revocation are not atomically coupled to the final external execution boundary.
 
-The control plane keeps a **per-tenant** chain of its own. Appending reads the
-previous hash and inserts the next row inside one `IMMEDIATE` transaction —
-without that, two concurrent writers both read the same predecessor and fork the
-chain.
+Daemon policy cache/spool and process-local taint/kill state are not a distributed control plane. The CLI selects gateway rules at construction and does not hot-update them when the daemon refreshes. See [Operations](./operations.md#current-local-operations-and-recovery) for state, restart and recovery boundaries.
 
-## The control plane
+## Not shipped here
 
-Zero-dependency Node HTTP server over SQL. 110 routes. Two invariants are
-enforced structurally rather than by discipline:
+No runnable control-plane server, Next.js console, tenant database implementation, SSO/SCIM service, alert delivery, billing checkout/webhooks, hosted proof issuer, Helm chart, or production deployment manifests are present. The daemon, remote commands, commercial entitlement tables, and links are client-side integration surfaces, not those systems themselves. Local control-plane data remnants are not deployable software.
 
-- **`orgId` is never read from a body, query, or path.** It comes only from the
-  authenticated principal, so the parameter that would allow cross-tenant
-  addressing does not exist in the routing layer.
-- **Every route declares its permission** or `null` for an explicitly public
-  one. `route()` throws at startup otherwise, so an endpoint cannot be added
-  unauthenticated by omission — the most common way an API grows a hole.
-
-Storage preserves the method surface of the original in-memory store, so
-persistence can be swapped again (Postgres) without touching routing, auth, or
-RBAC.
-
-### Subsystems
-
-| Module | Responsibility |
-|---|---|
-| `api.mjs` | Routing, RBAC, rate limiting, dispatch |
-| `auth.mjs` | Sessions, JWT (HS256, hand-rolled), refresh rotation with reuse detection |
-| `store-sql.mjs` | Tenanted persistence, roles, permissions, audit chain |
-| `db/migrations.mjs` | 8 versioned migrations |
-| `governance.mjs` | Draft → review → publish, hash-bound approvals |
-| `runs.mjs` | Runs, steps, replay |
-| `secrets.mjs` | Envelope encryption, handles, destination binding, usage log |
-| `sso.mjs` / `oidc.mjs` | OIDC for Google, Entra, Okta, generic |
-| `scim.mjs` | SCIM 2.0 Users and Groups |
-| `alerts.mjs` | Slack, Teams, webhook, email dispatch |
-| `compliance.mjs` | SOC 2 / ISO 27001 evidence |
-| `metrics.mjs` | Prometheus |
-| `events.mjs` | Tenant-scoped SSE bus |
-| `egress.mjs` | Outbound request guarding (SSRF) |
-
-JWT is implemented in-repo rather than pulled from npm. It is ~60 lines of HMAC
-and base64url, and a control plane taking a dependency for its own token
-verification is taking a dependency on someone else's release process for its
-most security-critical path.
-
-## Identity
-
-Three credential types with deliberately different blast radius:
-
-| | Lifetime | Scope | Storage |
-|---|---|---|---|
-| API key `cvx_` | until revoked | one org, one role | SHA-256 |
-| Session JWT | 15 min | one org, role re-read per request | not stored |
-| Refresh `cvr_` | 30 days, rotating | one session family | SHA-256 |
-| SCIM `scim_` | until revoked | provisioning only | SHA-256 |
-
-Federated identity is `(issuer, subject)`, **never email**. An email address is
-a display attribute a directory administrator can reassign, and treating it as
-identity means reassigning an address hands over the account.
-
-## Scaling boundary
-
-The control plane is a single Node process over SQLite. That is a real
-boundary, and [Operations](./operations.md#scaling-boundary) states where it
-sits and what to do at it rather than leaving it to be discovered under load.
-
-Enforcement scales independently and horizontally: every gateway and every
-wrapped agent decides locally, so adding agents adds no load to the control
-plane beyond telemetry ingest.
-
-## Dependencies
-
-| Package | Runtime dependencies |
-|---|---|
-| `@cirvix_ai/agent-control` | none |
-| `cirvix` (PyPI) | none |
-| `@cirvix/control-plane` | `@cirvix_ai/agent-control` only |
-
-The console is a Next.js app and does have dependencies. Nothing on the
-enforcement path does.
+Historical API/administration/operations documents describe an external or private product contract. Its availability, security claims, and tests are not established by this repository. Use [Deployment](./deployment.md) for supported local launch instructions and [Developer guide](./developer.md) for reproducible gates.

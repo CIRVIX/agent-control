@@ -30,7 +30,7 @@
  * has more than one answer and the record stops being evidence.
  */
 
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile, readFile, open as openFile, unlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 
 import { requestId } from "./normalize.mjs";
@@ -90,13 +90,15 @@ const DEFAULT_GRANT_TTL_MS = 10 * 60 * 1000;
  * deployments byte-identical to before.
  */
 export function approvalFingerprint(call) {
-  const canonical = JSON.stringify({
+  const canonical = stableStringify({
     agent: call.agent ?? null,
     action: call.action ?? call.tool ?? null,
     resource: call.resource ?? "",
     command: call.command ?? null,
-    delegation: call.delegation?.principals ?? null,
-    args: stableStringify(call.arguments ?? {}),
+    delegation: Array.isArray(call.delegation) ? call.delegation : call.delegation?.principals ?? null,
+    server: call.server ?? null,
+    environment: call.environment ?? null,
+    args: call.arguments ?? {},
   });
   return "sha256:" + createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
@@ -114,6 +116,29 @@ function stableStringify(value, depth = 0) {
 export class ApprovalStore {
   /** id → record, rebuilt from the log on open. */
   #byId = new Map();
+  #corrupt = false;
+
+  async #transaction(operation) {
+    const lockPath = `${this.path}.lock`;
+    const deadline = Date.now() + 5000;
+    let lock;
+    while (!lock) {
+      try {
+        lock = await openFile(lockPath, "wx", 0o600);
+      } catch (err) {
+        if (err.code !== "EEXIST" || Date.now() >= deadline) throw err;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    try {
+      await this.open();
+      if (this.#corrupt) throw new Error("Approval log is malformed; refusing state transitions.");
+      return await operation();
+    } finally {
+      await lock.close();
+      await unlink(lockPath);
+    }
+  }
 
   /**
    * @param {string} path        JSONL log; every state transition is appended
@@ -137,10 +162,13 @@ export class ApprovalStore {
    * first concurrent write.
    */
   async open() {
+    this.#byId.clear();
+    this.#corrupt = false;
     let text = "";
     try {
       text = await readFile(this.path, "utf8");
-    } catch {
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
       return this;
     }
     for (const line of text.split("\n").filter(Boolean)) {
@@ -148,9 +176,15 @@ export class ApprovalStore {
       try {
         entry = JSON.parse(line);
       } catch {
+        this.#corrupt = true;
+        continue;
+      }
+      if (!entry || typeof entry !== "object") {
+        this.#corrupt = true;
         continue;
       }
       if (entry.type === "request") {
+        if (this.#byId.has(entry.id)) continue;
         this.#byId.set(entry.id, { ...entry, state: STATE.PENDING });
       } else if (entry.type === "decision") {
         const existing = this.#byId.get(entry.id);
@@ -213,8 +247,11 @@ export class ApprovalStore {
       fingerprint: fields.fingerprint ?? null,
     };
 
-    this.#byId.set(id, { ...record, state: STATE.PENDING });
-    await this.#write(record);
+    await this.#transaction(async () => {
+      if (this.#byId.has(id)) throw new Error(`Approval ${id} already exists.`);
+      await this.#write(record);
+      this.#byId.set(id, structuredClone({ ...record, state: STATE.PENDING }));
+    });
     this.onEvent({ kind: "approval_requested", ...record });
 
     if (!wait) return { id, state: STATE.PENDING };
@@ -248,7 +285,10 @@ export class ApprovalStore {
     if (!decidedBy) {
       throw new Error("An approval decision must name who made it.");
     }
+    return this.#transaction(async () => this.#decideLocked(id, state, decidedBy, note));
+  }
 
+  async #decideLocked(id, state, decidedBy, note) {
     const record = this.get(id);
     if (!record) throw new Error(`No approval with id ${id}.`);
     if (TERMINAL.has(record.state)) {
@@ -257,7 +297,7 @@ export class ApprovalStore {
       );
     }
     if (this.#isExpired(record)) {
-      await this.#expire(record);
+      await this.#expire(this.#byId.get(id));
       throw new Error(`Approval ${id} expired at ${record.expiresAt} and can no longer be decided.`);
     }
 
@@ -269,14 +309,14 @@ export class ApprovalStore {
       decidedBy,
       note,
     };
-    record.state = state;
-    record.decidedBy = decidedBy;
-    record.decidedAt = entry.ts;
-    record.note = note;
-
     await this.#write(entry);
+    const stored = this.#byId.get(id);
+    stored.state = state;
+    stored.decidedBy = decidedBy;
+    stored.decidedAt = entry.ts;
+    stored.note = note;
     this.onEvent({ kind: "approval_decided", id, state, decidedBy });
-    return record;
+    return this.get(id);
   }
 
   get(id) {
@@ -284,7 +324,7 @@ export class ApprovalStore {
     if (record && record.state === STATE.PENDING && this.#isExpired(record)) {
       record.state = STATE.EXPIRED;
     }
-    return record ?? null;
+    return record ? structuredClone(record) : null;
   }
 
   /**
@@ -313,19 +353,19 @@ export class ApprovalStore {
    *   at.
    */
   findGrant(fingerprint) {
-    if (!fingerprint) return null;
+    if (!fingerprint || this.#corrupt) return null;
     for (const record of this.#byId.values()) {
       if (record.state !== STATE.APPROVED) continue;
       if (record.fingerprint !== fingerprint) continue;
       if (this.#grantExpired(record)) continue;
-      return record;
+      return structuredClone(record);
     }
     return null;
   }
 
   #grantExpired(record) {
-    if (!record.decidedAt) return false;
-    return Date.now() - new Date(record.decidedAt).getTime() > this.grantTtlMs;
+    const decidedAt = Date.parse(record.decidedAt);
+    return !Number.isFinite(decidedAt) || Date.now() - decidedAt >= this.grantTtlMs;
   }
 
   /**
@@ -336,15 +376,20 @@ export class ApprovalStore {
    * the incident review, not during the run.
    */
   async consume(id, requestIdentifier) {
-    const record = this.get(id);
-    if (!record) throw new Error(`No approval with id ${id}.`);
-    if (record.state !== STATE.APPROVED) {
-      throw new Error(`Approval ${id} is ${record.state}, not approved; it cannot be spent.`);
-    }
-    if (this.#grantExpired(record)) {
-      throw new Error(`Approval ${id} was granted too long ago to spend.`);
-    }
+    return this.#transaction(async () => {
+      const record = this.get(id);
+      if (!record) throw new Error(`No approval with id ${id}.`);
+      if (record.state !== STATE.APPROVED) {
+        throw new Error(`Approval ${id} is ${record.state}, not approved; it cannot be spent.`);
+      }
+      if (this.#grantExpired(record)) {
+        throw new Error(`Approval ${id} was granted too long ago to spend.`);
+      }
+      return this.#consumeLocked(id, record, requestIdentifier);
+    });
+  }
 
+  async #consumeLocked(id, record, requestIdentifier) {
     const entry = {
       type: "decision",
       id,
@@ -353,11 +398,11 @@ export class ApprovalStore {
       decidedBy: record.decidedBy,
       consumedBy: requestIdentifier ?? null,
     };
+    await this.#write(entry);
     record.state = STATE.CONSUMED;
     record.consumedAt = entry.ts;
     record.consumedBy = entry.consumedBy;
-
-    await this.#write(entry);
+    this.#byId.set(id, structuredClone(record));
     this.onEvent({ kind: "approval_consumed", id, requestId: requestIdentifier ?? null });
     return record;
   }
@@ -366,7 +411,8 @@ export class ApprovalStore {
   pending() {
     return [...this.#byId.values()]
       .filter((r) => this.get(r.id)?.state === STATE.PENDING)
-      .sort((a, b) => a.ts.localeCompare(b.ts));
+      .sort((a, b) => a.ts.localeCompare(b.ts))
+      .map((record) => structuredClone(record));
   }
 
   all() {

@@ -1,8 +1,7 @@
 # Policy reference
 
-A Cirvix policy is an **ordered array of JSON rules**. The on-disk format is
-`cirvix.policy.json`. There is no separate policy language, no compiler, and no
-expression evaluator — a rule is data, and the engine that reads it is
+A Cirvix policy is an **ordered array of data rules**, commonly stored as
+`cirvix.policy.json`. Node also supplies a `cirvix.policy` DSL compiler (`compilePolicy` / `core/policy-dsl.mjs`) and CLI validation/testing. Conditions are data, not executable expressions. The JSON evaluator is
 [`packages/agent-control/src/core/policy.mjs`](../packages/agent-control/src/core/policy.mjs)
 (Node) and [`packages/cirvix-python/cirvix/policy.py`](../packages/cirvix-python/cirvix/policy.py)
 (Python).
@@ -62,7 +61,7 @@ other permissive rule must not quietly skip them.
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `name` | string | yes | Unique identifier. Appears in every decision, alert, and audit record. |
-| `effect` | `"permit"` \| `"forbid"` \| `"hold"` | yes | What happens on a match. |
+| `effect` | `"permit"` \| `"forbid"` \| `"hold"` \| `"sanitize"` \| `"audit_only"` | yes | What happens on a match. |
 | `agents` | string \| string[] | no | Glob(s) matched against the agent name. Omitted means any. |
 | `actions` | string \| string[] | no | Glob(s) matched against the action. Omitted means any. |
 | `resources` | string \| string[] | no | Glob(s) matched against the canonical resource. Omitted means any. |
@@ -82,15 +81,16 @@ They are not the same vocabulary, and the distinction is deliberate.
 |---|---|---|
 | `permit` | `permit` | The call proceeds. |
 | `forbid` | `deny` | The call is refused. Re-planning is the only recovery. |
-| `hold` | `hold` | The call is suspended for a named human. This exact call may still happen. |
+| `hold` | `hold` | The call is refused pending approval; a configured store may allow a later retry. |
+| `sanitize` | `permit` only with a matching permit | Adds sanitization requirements; does not authorize on its own. |
+| `audit_only` | Does not authorize | Annotation only; distinct from Pipeline's runtime audit mode, which may forward otherwise blocked calls. |
 
 An agent that treats `hold` as failure learns to give up on work a person was
 about to approve, which is why the SDKs raise a distinct `CirvixHeld` type.
 
 ## Glob matching
 
-Patterns are matched by a two-pointer wildcard matcher, **not** a regular
-expression.
+Patterns use a non-regex wildcard matcher. Standalone `*` and `**` are universal special cases; the segment restrictions below apply when a star appears within a larger pattern.
 
 | Token | Matches |
 |---|---|
@@ -131,9 +131,7 @@ security product the vulnerability.
 ```
 
 Each condition is `{ path, op, value }`. `path` is a dotted lookup into the
-evaluation context. Every condition in the array must hold. **An unknown
-operator fails closed** — the condition does not match, so a typo cannot
-accidentally widen a rule.
+evaluation context. Every condition in the array must hold. `parseRules` rejects unknown operators. Raw evaluation treats an unknown comparator as non-matching; that can suppress a forbid as well as a permit, so it is not a substitute for validating loaded rules.
 
 ### Operators
 
@@ -159,7 +157,7 @@ which is what keeps the engine pure and identically testable in both languages.
 |---|---|---|
 | `agent` | string | The request's agent name |
 | `action` | string | The request's action |
-| `environment` | string | `--env`, `CIRVIX_ENV`, or the `Guard`'s `environment` |
+| `environment` | string | CLI `--env` or the Guard's `environment`; SDK examples may explicitly read `CIRVIX_ENV`, but it is not automatically loaded |
 | `path.insideWorkspace` | boolean | Whether the canonical resource resolves inside the workspace root |
 | `egress.external` | boolean | Whether the resource is an http(s) URL to a non-local host |
 | `egress.allowlisted` | boolean | Whether the destination is on an egress allowlist |
@@ -179,24 +177,9 @@ entire point of a handle.
 
 ## Actions
 
-Policy is written against a normalized action vocabulary rather than raw tool
-names, so one rule covers every tool that does the same thing. `actionForTool`
-(Node) / `action_for_tool` (Python) maps a tool name to an action:
+Node `actionForTool` delegates to `classifyTool` in `core/normalize.mjs`. Exact taxonomy names and aliases are checked before camel-case splitting, network/file subject rules and ordered taxonomy patterns. For example, `fetch_file` is a filesystem read while `web_search` is a network request. Unknown names retain `mcp.<server>.<tool>` or `tool.<name>` identity.
 
-| Tool name contains | Action |
-|---|---|
-| `read`, `get`, `cat`, `fetch` | `fs.read` |
-| `write`, `create`, `put`, `save`, `edit` | `fs.write` |
-| `delete`, `remove`, `rm`, `unlink`, `drop` | `fs.delete` |
-| `list`, `ls`, `search`, `find`, `query`, `grep` | `fs.list` |
-| `exec`, `run`, `shell`, `command`, `spawn` | `shell.exec` |
-| `request`, `http`, `curl`, `browse`, `scrape` | `http.request` |
-| `apply`, `deploy`, `rollout` | `k8s.apply` |
-| *no match, via the gateway* | `mcp.<server>.<tool>` |
-| *no match, via `wrap`* | `tool.<name>` |
-
-Matching is on whole words delimited by start/end, `.`, `_`, or `-` — so
-`read_file` maps to `fs.read` but `spreadsheet` does not.
+Classification is heuristic, not an understanding of actual tool behavior. Inspect normalized actions/resources for your specific schemas and compare Python behavior where applicable; a simple verb table is not the complete contract.
 
 Because unmatched tools fall through to `mcp.*` and `tool.*`, you can always
 write a rule against one specific tool by name.
@@ -252,7 +235,7 @@ from.
 
 ## The starter rule set
 
-`STARTER_RULES` is what you get with no `--policy` flag. Nine rules, chosen so a
+`STARTER_RULES` is the fallback when no explicit or discovered workspace policy is loaded. It currently has nine rules, chosen so a
 developer working normally is not interrupted while the handful of actions that
 actually cause incidents are stopped or held.
 
@@ -279,20 +262,13 @@ cirvix policy --json
 Two validators, at different boundaries.
 
 **`parseRules(json)`** — used by the CLI and SDKs when loading a file. Throws on
-the first problem: a missing `name`, an `effect` that is not one of the three, or
+the first problem: a missing `name`, an unsupported `effect`, or
 a `when` condition using an unknown operator.
 
-**`validateRules(rules)`** — used by the control plane before publishing.
-Returns *every* problem as `{ path, message }` rather than throwing on the first,
-because publishing fans a rule set out to the entire fleet and an operator fixing
-one error at a time across six round trips is an operator who gives up. It
-additionally catches duplicate rule names and a `hold` with no `approvers`.
+**`validateRules(rules)`** reports validation errors/warnings, including duplicate names and a hold without approvers. It is available locally; a control-plane validation endpoint is not shipped here.
 
 ```bash
-curl -X POST https://api.example.com/v1/policy/validate \
-  -H "authorization: Bearer $CIRVIX_API_KEY" \
-  -H "content-type: application/json" \
-  -d '{"rules":[{"name":"r","effect":"maybe"}]}'
+cirvix policy check --policy cirvix.policy.json
 ```
 
 ## Testing a rule set
@@ -306,7 +282,6 @@ Rules are code. Test them in CI next to everything else — see
 - It decides **authorization**, not payload semantics. A permitted query that
   returns more rows than intended is a query design problem, not a policy outcome.
 - It cannot evaluate what it never sees. `guard.wrap` governs the tools you hand
-  it; a tool the agent reaches directly is not evaluated. The gateway does not
-  have this limitation because it sits on the wire.
+   it; a tool the agent reaches directly is not evaluated. The gateway similarly governs only calls routed through it.
 - A permissive rule you wrote yourself is honoured exactly as written. Policy
   quality is the operator's responsibility.

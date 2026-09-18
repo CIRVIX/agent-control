@@ -150,10 +150,25 @@ export async function verify({
   write = (s) => process.stdout.write(s),
 } = {}) {
   let token = String(proof ?? "").trim();
-  // A path or the artifact itself, because both are what people actually have.
-  if (token && !token.includes(".")) {
-    token = (await readFile(token, "utf8").catch(() => "")).trim();
-  } else if (token && token.length < 512) {
+  if (!token) {
+    const err = { verified: false, failed: "input", reason: "No proof token or file provided." };
+    if (json) return { result: err, output: JSON.stringify(err, null, 2), exitCode: 1 };
+    write(`\n  ${red("No proof token or file provided.")}\n\n`);
+    return { result: err, exitCode: 1 };
+  }
+
+  // A path or the artifact itself. If it is not in JWT format (3 dot-separated segments starting with eyJ), treat as a file path.
+  const isJwtShape = token.split(".").length === 3 && token.startsWith("eyJ");
+  if (!isJwtShape) {
+    try {
+      token = (await readFile(proof, "utf8")).trim();
+    } catch {
+      const err = { verified: false, failed: "file_not_found", reason: `File not found: ${proof}` };
+      if (json) return { result: err, output: JSON.stringify(err, null, 2), exitCode: 1 };
+      write(`\n  ${red(`File not found: ${proof}`)}\n\n`);
+      return { result: err, exitCode: 1 };
+    }
+  } else if (token.length < 512) {
     const fromFile = await readFile(proof, "utf8").catch(() => null);
     if (fromFile) token = fromFile.trim();
   }

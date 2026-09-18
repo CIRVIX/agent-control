@@ -20,7 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cirvix.policy import evaluate  # noqa: E402
 
-FIXTURE = Path(__file__).resolve().parents[2] / "conformance" / "policy-conformance.json"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = PACKAGE_ROOT / "conformance" / "policy-conformance.json"
+if not FIXTURE.is_file():
+    FIXTURE = PACKAGE_ROOT.parent / "conformance" / "policy-conformance.json"
 
 
 def load_suite() -> dict:

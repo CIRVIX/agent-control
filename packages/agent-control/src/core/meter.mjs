@@ -142,7 +142,9 @@ export class Meter {
 
   /** Records one decision and returns the new total. */
   count(n = 1) {
+    if (!Number.isSafeInteger(n) || n < 0) throw new Error("Decision count must be a non-negative safe integer.");
     const used = this.used();
+    if (!Number.isSafeInteger(used + n)) throw new Error("Decision count exceeds the safe integer limit.");
     this.#used = used + n;
     this.#dirty = true;
     this.#schedule();

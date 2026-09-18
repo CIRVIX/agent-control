@@ -4,7 +4,7 @@ The decision engine exists twice: once in Node, once in Python. This document is
 the contract a third one satisfies.
 
 It is written with a Rust implementation in mind, because that is the one the
-original architecture called for and the only piece of it still missing. Nothing
+original architecture called for and a possible additional engine, not the only absent product component. Nothing
 here is Rust-specific.
 
 ## The position
@@ -136,8 +136,7 @@ Two engines calling the same correct evaluator still diverged, repeatedly:
 Each of those passed every conformance case, because each was a wiring failure
 between correct components rather than a wrong answer from one.
 
-So an engine is conformant when it passes the fixture, and it is **safe** when it
-also has:
+Passing the fixture establishes conformance for those inputs, not general safety. Additional validation should include:
 
 1. **One decision path per surface, or one shared core.** See
    `applyDelegation` in `core/delegation.mjs` — a single implementation both

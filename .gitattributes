@@ -1,0 +1,31 @@
+# Normalise line endings in the repository, check out native on each platform.
+#
+# Set before the first commit deliberately. The runtime is developed on Windows
+# and CI runs on Linux; without this, the first Linux checkout reports every
+# file as modified, and adding it later forces a mass-renormalisation commit
+# that buries real history.
+* text=auto
+
+# Shell scripts and the socket fixtures must keep LF wherever they are checked
+# out — CRLF makes a shebang line unrunnable.
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Binary — never touched.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+
+# Deployment artefacts are consumed by Linux. CRLF here is not cosmetic: a shell
+# script with CRLF fails as `bash\r: No such file or directory`, and a systemd
+# unit or Caddyfile with CRLF fails to parse. `*.sh` was already pinned; these
+# have no extension or an extension git does not know, so they were checked out
+# native and committed with CRLF from a Windows working copy.
+deploy/vm/Caddyfile              text eol=lf
+deploy/vm/*.service              text eol=lf
+deploy/vm/env.production.example text eol=lf

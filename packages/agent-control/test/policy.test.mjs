@@ -178,6 +178,14 @@ test("an unknown operator fails closed rather than matching", () => {
   assert.equal(d.verdict, "deny");
 });
 
+test("policy comparators are restricted to explicitly defined operators", () => {
+  for (const op of ["constructor", "toString", "valueOf"]) {
+    const rules = [{ name: "invalid", effect: "permit", when: [{ path: "environment", op, value: "local" }] }];
+    assert.throws(() => parseRules(rules), /unknown operator/);
+    assert.equal(evaluate({ agent: "worker", action: "fs.read", resource: "readme.txt", context: ctx() }, rules).verdict, "deny");
+  }
+});
+
 test("conditions are data, never evaluated as code", () => {
   const rules = [
     {

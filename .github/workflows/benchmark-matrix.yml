@@ -1,0 +1,113 @@
+# Fills the platform rows this project cannot measure on a developer machine.
+#
+# The matrix in `benchmarks/decision.mjs --matrix` prints "not measured" for any
+# platform nobody has run on, and that is the honest default — an estimated
+# latency row is indistinguishable from a measured one once it is in a table.
+# This workflow is how the rows stop being empty: real runners, real silicon,
+# real numbers, committed back with the machine attached to each one.
+#
+# It does NOT run on every push. A 1,000,000-decision run takes ~80s per
+# platform, and a benchmark that runs on every commit becomes a benchmark
+# nobody reads. Trigger it deliberately, or let the monthly schedule catch
+# drift.
+#
+# WHAT THIS CANNOT DO
+#
+# GitHub-hosted runners are virtualized. These numbers are honest for "the
+# engine on this class of machine" and are not a substitute for a measurement on
+# the hardware a customer actually deploys on. The runner label is recorded in
+# each row so the reader can judge for themselves.
+#
+# There is deliberately no emulated-ARM job. `--platform linux/arm64` under QEMU
+# runs and produces numbers that describe QEMU, and a figure qualified in a
+# footnote gets quoted without the footnote. The ARM row comes from an ARM
+# runner or it stays empty.
+
+name: benchmark matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monthly. Enough to catch a performance regression that survived review,
+    # rare enough that the results stay worth looking at.
+    - cron: "0 6 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing must not cancel the others. A partial matrix is
+      # more useful than no matrix, and the missing row stays honestly missing.
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+          - label: macos-arm64
+            runner: macos-14
+          - label: windows-x86_64
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # No install step: the engine is dependency-free, so there is nothing to
+      # restore and `npm ci` would only add time and a lockfile failure mode.
+
+      - name: Verify the engine is correct before timing it
+        # A fast wrong engine is not a result. Timing an implementation whose
+        # tests fail produces a number that means nothing.
+        working-directory: packages/agent-control
+        run: npm test
+
+      - name: Measure
+        run: node benchmarks/decision.mjs --record --full
+
+      - name: Upload the row
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.label }}
+          path: benchmarks/results.json
+          if-no-files-found: error
+
+  container:
+    name: docker-linux-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the benchmark image
+        run: docker build -f benchmarks/Dockerfile -t cirvix-bench .
+
+      - name: Measure
+        # The bind mount is what makes this useful. Without it the row is
+        # written inside the container and discarded on exit — and the run still
+        # prints "recorded", so the matrix stays empty while every run looks
+        # like a success. That failure has happened here; it is why the next
+        # step asserts the row actually landed.
+        run: docker run --rm -v "$PWD/benchmarks:/app/benchmarks" cirvix-bench --record --full
+
+      - name: Assert the row was written to the host
+        run: |
+          node -e '
+            const r = require("./benchmarks/results.json");
+            const row = r.platforms["docker-linux-x86_64"];
+            if (!row) { console.error("the container row did not reach the host — check the bind mount"); process.exit(1); }
+            console.log("recorded", row.runs.at(-1).n, "decisions, p99", row.runs.at(-1).p99, "ms");
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-docker-linux-x86_64
+          path: benchmarks/results.json
+          if-no-files-found: error

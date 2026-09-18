@@ -64,8 +64,11 @@ const HELP = `
 
   ${bold("USAGE")}
     cirvix <command> [options]
+    cirvix console [--eval "<tool> <resource>"] [--json]
+    cirvix --eval "<tool> <resource>" [--json]   (non-interactive preview)
 
   ${bold("GETTING STARTED")}
+    console               Preview what policy would decide — never executes, never records
     init                  Detect agents and MCP servers, write a policy, start protecting
     init --apply          Safely wire detected agents with pre-integration backup
     init --dry-run        Preview agent configuration changes without modifying files
@@ -177,15 +180,22 @@ async function controlPlane(flags) {
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
+  const booleans = new Set(["json", "help", "version", "deep", "fast", "no-animation", "fail-on-risk", "sign", "badge", "http", "diff", "strict", "source", "force", "apply", "dry-run", "list", "watch", "follow", "w", "status", "browser", "all", "vault"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith("--")) flags[key] = true;
-      else {
-        flags[key] = next;
-        i++;
+      const eq = a.indexOf("=");
+      const key = a.slice(2, eq === -1 ? undefined : eq);
+      const next = eq === -1 ? argv[i + 1] : a.slice(eq + 1);
+      if (booleans.has(key)) {
+        if (eq !== -1) throw new Error(`--${key} does not accept a value.`);
+        flags[key] = true;
+      } else if (next === undefined || next.startsWith("--")) {
+        if (key !== "rollback") throw new Error(`--${key} requires a value.`);
+        flags[key] = true;
+      } else {
+        flags[key] = key === "arg" ? [...(flags[key] ?? []), next] : next;
+        if (eq === -1) i++;
       }
     } else positional.push(a);
   }
@@ -298,9 +308,28 @@ async function main() {
   const sub = positional[1];
   const cwd = flags.cwd ? String(flags.cwd) : process.cwd();
 
+  if (flags.help) {
+    process.stdout.write(HELP + "\n");
+    return 0;
+  }
+
   if (flags.version || command === "version") {
     process.stdout.write(VERSION + "\n");
     return 0;
+  }
+
+  // Non-interactive preview: `cirvix --eval "<tool> <resource>"`.
+  // Prints what policy would decide and exits. Never launches the TUI,
+  // never touches the network/audit/vault, never executes anything.
+  if (typeof flags.eval === "string") {
+    const { consolePreview } = await import("../src/commands/console.mjs");
+    const { code, output, error } = await consolePreview({
+      cwd, json: Boolean(flags.json), evalInput: flags.eval,
+      policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+    });
+    if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
+    process.stdout.write(output + "\n");
+    return code;
   }
 
   // BARE `cirvix`:
@@ -324,6 +353,40 @@ async function main() {
   }
 
   switch (command) {
+    case "console": {
+      // `cirvix console` — the evaluation preview surface.
+      //
+      // With --eval: print one hypothetical decision and exit. No TUI, no
+      // network, no audit write, no tool execution — safe in scripts and CI.
+      // Without --eval on a TTY: launch the existing full-screen terminal.
+      // Without --eval and without a TTY: print local digest instead of
+      // hanging on stdin. Unknown subcommands are usage errors, not previews.
+      if (sub !== undefined && !sub.startsWith("-")) {
+        process.stdout.write(HELP + "\n");
+        return 2;
+      }
+      const evalInput = typeof flags.eval === "string" ? flags.eval : null;
+      if (evalInput !== null) {
+        const { consolePreview } = await import("../src/commands/console.mjs");
+        const { code, output, error } = await consolePreview({
+          cwd, json: Boolean(flags.json), evalInput,
+          policy: flags.policy, agent: String(flags.agent ?? "local"), env: String(flags.env ?? "local"),
+        });
+        if (error) { process.stderr.write(red(`  ${error}\n`)); return code; }
+        process.stdout.write(output + "\n");
+        return code;
+      }
+      const { canLaunchInteractive } = await import("../src/commands/interactive.mjs");
+      if (canLaunchInteractive(flags, positional.slice(1))) {
+        const rules = await loadRules(flags.policy, cwd);
+        const { interactive } = await import("../src/commands/interactive.mjs");
+        await interactive({ cwd, flags, rules });
+        return 0;
+      }
+      await welcome({ cwd });
+      return 0;
+    }
+
     case "protect": {
       /* Shares policy resolution with `runtime` and `gateway`. A protect that
          read policy differently from the runtime would be proving a decision
@@ -447,6 +510,7 @@ async function main() {
       const stateDir = String(flags.state ?? join(cwd, ".cirvix"));
       await mkdir(stateDir, { recursive: true }).catch(() => {});
       const chain = await new AuditChain(join(stateDir, "audit.jsonl")).open();
+      const approvals = await new ApprovalStore(join(stateDir, "approvals.jsonl")).open();
 
       // If a control plane is configured, the daemon supplies policy and
       // receives telemetry. Without one the gateway still enforces, from the
@@ -478,6 +542,7 @@ async function main() {
         servers,
         rules: daemon?.currentRules().length ? daemon.currentRules() : rules,
         audit: chain,
+        approvals,
         cwd,
         environment: String(flags.env ?? "local"),
         licence: gwLicence,
@@ -584,7 +649,7 @@ async function main() {
           }
           resolve();
         };
-        process.stdin.on("end", () => void shutdown());
+        if (!httpServer) process.stdin.on("end", () => void shutdown());
         process.on("SIGINT", () => void shutdown());
         process.on("SIGTERM", () => void shutdown());
       });
@@ -688,8 +753,30 @@ async function main() {
         process.stderr.write(red("  why needs a decision id.\n"));
         return 2;
       }
-      const api = await controlPlane(flags);
-      const d = await api("GET", `/v1/decisions/${encodeURIComponent(decisionId)}`);
+      let d;
+      const apiUrl = flags.api ?? process.env.CIRVIX_API_URL;
+      const apiKey = flags.key ?? process.env.CIRVIX_API_KEY;
+      if (apiUrl && apiKey) {
+        const api = await controlPlane(flags);
+        d = await api("GET", `/v1/decisions/${encodeURIComponent(decisionId)}`);
+      } else {
+        const stateDir = stateDirFor(flags, cwd);
+        const file = String(flags.file ?? join(stateDir, "audit.jsonl"));
+        const records = await journal.read(file);
+        const record = journal.find(records, decisionId);
+        if (!record) {
+          process.stderr.write(
+            red(`  No decision with id "${decisionId}" found in ${file}.\n  Pass --api and --key to query a remote control plane.\n`),
+          );
+          return 2;
+        }
+        d = {
+          ...record,
+          verdict: record.verdict ?? (record.decision === DECISION.ALLOW ? "permit" : record.decision === DECISION.REQUIRE_APPROVAL ? "hold" : "deny"),
+          rule: record.rule ?? record.policy,
+          ts: record.ts ?? record.timestamp,
+        };
+      }
 
       if (flags.json) {
         process.stdout.write(JSON.stringify(d, null, 2) + "\n");
@@ -839,7 +926,7 @@ async function main() {
         process.stderr.write(red("  Only `audit verify` is available.\n"));
         return 2;
       }
-      const file = String(flags.file ?? ".cirvix/audit.jsonl");
+      const file = String(flags.file ?? join(stateDirFor(flags, cwd), "audit.jsonl"));
       const chain = new AuditChain(file);
       const res = await chain.verify();
       if (flags.json) {
@@ -1163,10 +1250,10 @@ async function main() {
         }
         if (flags.json) {
           process.stdout.write(JSON.stringify(record, null, 2) + "\n");
-          return record.decision === DECISION.DENY ? 1 : 0;
+          return 0;
         }
         process.stdout.write("\n" + journal.renderTree(record) + "\n\n");
-        return record.decision === DECISION.DENY ? 1 : 0;
+        return 0;
       }
 
       const selected = journal.query(records, {

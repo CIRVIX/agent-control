@@ -6,8 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   build:
@@ -22,6 +21,11 @@ jobs:
     outputs:
       creds: ${{ steps.creds.outputs.npm }}
     steps:
+      - name: Require npm credentials for tag publication
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: test -n "$NPM_TOKEN"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -31,18 +35,23 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install --upgrade build hatchling
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run verify:version
       - run: npm test
+      - name: Python tests
+        working-directory: packages/cirvix-python
+        run: python -m unittest discover -s tests -v
       - run: npm run verify:adversarial
       - run: npm run verify:license
       - run: npm run verify:public
-      - name: Build Node package
+      - name: Build and verify Node artifact
         run: |
           mkdir -p dist/node
-          (cd packages/agent-control && npm pack --pack-destination "$GITHUB_WORKSPACE/dist/node")
+          CIRVIX_PACKAGE_OUTPUT_DIR="$GITHUB_WORKSPACE/dist/node" npm run verify:package
       - name: Build Python package
         run: python -m build packages/cirvix-python --outdir dist/python
+      - name: Verify Python artifact contents
+        run: python packages/cirvix-python/check_artifacts.py dist/python
       - uses: actions/upload-artifact@v4
         with:
           name: packages
@@ -61,8 +70,11 @@ jobs:
     # tag push. A manual dispatch is a dry run of build; a tag without
     # credentials produces green build + artifacts but no false "publish".
     needs: build
-    if: github.ref_type == 'tag' && needs.build.outputs.creds == 'available'
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.build.outputs.creds == 'available'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     environment: npm
     steps:
       - uses: actions/checkout@v4
@@ -75,14 +87,13 @@ jobs:
           name: packages
           path: dist
       - name: Publish Node package
-        working-directory: packages/agent-control
-        run: npm publish --provenance --access public
+        run: npm publish dist/node/*.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-pypi:
     needs: build
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -96,20 +107,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/python
-          # PyPI versions are immutable, so re-running a tag that already
-          # published fails with "file already exists" and takes the whole run
-          # red — even when the other publish jobs succeeded. That is not
-          # hypothetical here: 0.1.0 is already on PyPI while npm never
-          # published, so the very re-run that fixes npm would fail on Python.
-          # Skipping an already-present file makes the release re-runnable,
-          # which is what a release pipeline has to be when one half of it
-          # fails.
-          skip-existing: true
+          skip-existing: false
 
   release:
-    needs: build
-    if: github.ref_type == 'tag'
+    needs: [build, publish-npm, publish-pypi]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Create GitHub release

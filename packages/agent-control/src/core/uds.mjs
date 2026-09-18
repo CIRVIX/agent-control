@@ -230,7 +230,7 @@ export class UdsServer {
         const params = message.params ?? {};
         if (!params.tool) return fail(UDS_ERROR.INVALID_PARAMS, "authorize needs a tool name.");
 
-        const { event, decision, arguments: outgoing } = await this.pipeline.submit(
+        const result = await this.pipeline.submit(
           { tool: params.tool, server: params.server ?? null, arguments: params.arguments ?? {} },
           {
             agent: params.agent,
@@ -254,6 +254,16 @@ export class UdsServer {
             delegation: params.delegation ?? null,
           },
         );
+
+        // Validate the dependency result before reading its fields. An invalid
+        // response must never be represented as a successful authorization.
+        const { event, decision, arguments: outgoing } = result ?? {};
+        if (!event || Array.isArray(event) || typeof event !== "object" ||
+            !decision || Array.isArray(decision) || typeof decision !== "object" ||
+            !Object.values(DECISION).includes(event.decision) ||
+            event.decision !== decision.decision) {
+          return fail(UDS_ERROR.INTERNAL, "The pipeline returned an unreadable decision; the call was not authorized.");
+        }
 
         return ok({
           request_id: event.request_id,

@@ -30,6 +30,4 @@ cirvix check --action database.write --resource production/users --env productio
 cirvix audit verify
 ```
 
-Expected: the production write is held for `platform-oncall` or denied by your
-policy, and the decision is present in the local audit chain. A caller that
-connects directly to an upstream MCP server bypasses this integration.
+The hypothetical write may be held or denied depending on loaded rules; `check` does not append an audit record. Generate benign calls through the actual client/gateway and verify expected decision IDs and a nonzero chain count. Keep the upstream file separate from the client gateway-only configuration. Direct upstream access and built-in tools remain outside this integration.

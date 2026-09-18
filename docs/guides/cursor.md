@@ -14,15 +14,14 @@ cirvix policy check
 
 ## Connect
 
-In Cursor's MCP configuration, register Cirvix and point `--servers` at the
-existing Cursor server map:
+Copy upstream definitions into a separate `mcp-upstreams.json`, then replace the active client map with a gateway-only entry. Remove direct upstream entries; do not point the gateway back at the file you just replaced:
 
 ```json
 {
   "mcpServers": {
     "cirvix": {
       "command": "cirvix",
-      "args": ["gateway", "--servers", "/absolute/path/to/.cursor/mcp.json", "--policy", "/absolute/path/to/cirvix.policy"]
+      "args": ["gateway", "--servers", "/absolute/path/to/mcp-upstreams.json", "--policy", "/absolute/path/to/cirvix.policy"]
     }
   }
 }
@@ -40,5 +39,4 @@ cirvix check --action shell.exec --resource "rm -rf /"
 cirvix audit verify
 ```
 
-Expected: policy tests pass, both dangerous examples are denied, and the local
-audit chain verifies.
+Expected results depend on the loaded policy. `check` is hypothetical and does not write an audit record; a hold also exits `0`. Verify actual benign routed calls and a nonzero expected audit count. Editor built-ins and direct upstream calls remain outside coverage.

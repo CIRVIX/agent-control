@@ -24,11 +24,14 @@
  * firewall exception.
  */
 
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname, platform } from "node:os";
 import { dirname, join } from "node:path";
 
-const VERSION = "0.1.0";
+const VERSION = JSON.parse(
+  readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+).version;
 
 /** Exponential backoff with a ceiling — a dead control plane must not become
  *  a self-inflicted denial-of-service against itself. */
@@ -116,8 +119,7 @@ export class Daemon {
     this.stop();
     try {
       if (!this.endpointId) return false;
-      await this.#drainSpool();
-      return true;
+      return await this.#drainSpool();
     } catch (err) {
       this.log(`final flush failed, ${this.stats.spooled - this.stats.shipped} records remain spooled: ${err.message}`);
       return false;
@@ -268,27 +270,49 @@ export class Daemon {
 
   /* -- telemetry ---------------------------------------------------------- */
 
+  #drainLock = Promise.resolve();
+
   /**
    * Records a decision. Always spools to disk first, then ships. Ship-then-
    * persist would lose the record on a crash mid-flight, and the record is the
    * product.
    */
   async record(decision) {
+    const line = JSON.stringify(decision) + "\n";
+    const queued = this.#drainLock.then(() => this.#appendSpool(line));
+    this.#drainLock = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  async #appendSpool(line) {
     await mkdir(this.stateDir, { recursive: true }).catch(() => {});
     const { appendFile } = await import("node:fs/promises");
-    await appendFile(this.spoolPath, JSON.stringify(decision) + "\n", "utf8");
+    await appendFile(this.spoolPath, line, "utf8");
     this.stats.spooled++;
   }
 
   async #drainSpool() {
+    const queued = this.#drainLock.then(() => this.#drainSpoolLocked());
+    this.#drainLock = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  async #drainSpoolLocked() {
     let text = "";
     try {
       text = await readFile(this.spoolPath, "utf8");
-    } catch {
-      return; // nothing spooled
+    } catch (err) {
+      if (err.code === "ENOENT") return true; // nothing spooled
+      throw err;
     }
     const lines = text.split("\n").filter(Boolean);
-    if (lines.length === 0) return;
+    if (lines.length === 0) return true;
 
     // Batches are capped to match the API's limit; the remainder stays
     // spooled and goes out on the next tick.
@@ -311,6 +335,7 @@ export class Daemon {
     await this.#atomicWrite(this.spoolPath, remaining.length ? remaining.join("\n") + "\n" : "");
     this.stats.shipped += decisions.length;
     if (decisions.length) this.log(`shipped ${decisions.length} decisions`);
+    return remaining.length === 0;
   }
 
   /* -- disk --------------------------------------------------------------- */

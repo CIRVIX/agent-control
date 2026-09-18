@@ -106,3 +106,45 @@ test("a malformed line is reported rather than silently skipped", async () => {
   assert.equal(res.ok, false);
   assert.match(res.reason, /Malformed/);
 });
+
+test("open() refuses to extend a tampered log instead of forking it", async () => {
+  const { file } = await chainIn();
+  const chain = await new AuditChain(file).open();
+  await chain.append({ decision: "dec_1", verdict: "deny" }, TS);
+  await chain.append({ decision: "dec_2", verdict: "deny" }, TS);
+
+  const lines = (await readFile(file, "utf8")).trim().split("\n");
+  const tampered = JSON.parse(lines[1]);
+  tampered.verdict = "permit";
+  lines[1] = JSON.stringify(tampered);
+  await writeFile(file, lines.join("\n") + "\n");
+
+  await assert.rejects(() => new AuditChain(file).open(), /failed verification/);
+});
+
+test("open() refuses to extend a log with an interior record removed", async () => {
+  const { file } = await chainIn();
+  const chain = await new AuditChain(file).open();
+  await chain.append({ decision: "dec_1" }, TS);
+  await chain.append({ decision: "dec_2" }, TS);
+  await chain.append({ decision: "dec_3" }, TS);
+
+  const lines = (await readFile(file, "utf8")).trim().split("\n");
+  lines.splice(1, 1);
+  await writeFile(file, lines.join("\n") + "\n");
+
+  await assert.rejects(() => new AuditChain(file).open(), /failed verification/);
+});
+
+test("open() on an intact log still succeeds", async () => {
+  const { file } = await chainIn();
+  const first = await new AuditChain(file).open();
+  await first.append({ decision: "dec_1" }, TS);
+
+  const second = await new AuditChain(file).open();
+  const r = await second.append({ decision: "dec_2" }, TS);
+  assert.equal(r.seq, 2);
+
+  const res = await second.verify();
+  assert.equal(res.ok, true);
+});

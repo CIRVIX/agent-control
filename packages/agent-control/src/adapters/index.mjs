@@ -91,12 +91,7 @@ export async function detectFleet(cwd = process.cwd(), { stateDir = join(cwd, ".
   }
 
   const agentsWithAudits = new Set(auditRecords.map((r) => r.agent).filter(Boolean));
-  const agentsWithVerifiedPermits = new Set(
-    auditRecords
-      .filter((r) => (r.verdict === "permit" || r.decision === "allow") && r.tool)
-      .map((r) => r.agent)
-      .filter(Boolean),
-  );
+  const agentsWithVerifiedPermits = new Set();
 
   const detectedRuntimes = [];
   let detectedFrameworks = [];
@@ -110,6 +105,8 @@ export async function detectFleet(cwd = process.cwd(), { stateDir = join(cwd, ".
       continue;
     }
 
+    const entries = Object.entries(info.servers ?? {});
+    info.isIntegrated = entries.length > 0 && entries.every(([name, def]) => adapter.isCirvixServer(name, def));
     const hasAuditLogs = agentsWithAudits.has(adapter.id);
     const hasVerifiedCall = agentsWithVerifiedPermits.has(adapter.id);
 
@@ -201,6 +198,15 @@ export async function generateFleetPlan(cwd = process.cwd(), options = {}) {
     if (!adapter) continue;
     try {
       const plan = await adapter.generateIntegrationPlan(cwd, options);
+      const map = plan.plan?.[adapter.mcpKey];
+      if (!map || Object.entries(map).some(([name, def]) => !adapter.isCirvixServer(name, def))) {
+        plan.canIntegrate = false;
+        plan.reason = "Automatic integration would retain direct upstream access. Configure a separate upstream file and a gateway-only client map manually.";
+      }
+      if (!Object.keys(plan.upstreams ?? {}).length) {
+        plan.canIntegrate = false;
+        plan.reason = "No upstream servers available to govern.";
+      }
       plans.push(plan);
     } catch {}
   }

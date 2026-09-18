@@ -28,6 +28,7 @@ export class SessionTracker {
     this.sessionId = sessionId;
     this.agentId = agentId;
     this.history = [];
+    if (!Number.isSafeInteger(maxHistory) || maxHistory < 3) throw new TypeError("Session history must retain at least three steps.");
     this.maxHistory = maxHistory;
     this.cumulativeRisk = 0;
     this.taint = {
@@ -53,6 +54,7 @@ export class SessionTracker {
    * @returns {{ suspicious: boolean, chainDetected?: string, reason?: string, risk: number }}
    */
   recordStep({ action, resource = "", tool = "", decision = "ALLOW", risk = RISK.LOW }) {
+    if (this.status !== "active") return { suspicious: true, reason: this.quarantineReason ?? "Session is not active.", risk: this.cumulativeRisk };
     const ts = new Date().toISOString();
     const entry = { action, resource, tool, decision, risk, ts };
 
@@ -63,12 +65,8 @@ export class SessionTracker {
 
     // Accumulate risk based on severity
     const rLower = String(risk ?? "low").toLowerCase();
-    const riskPoints = {
-      low: 1,
-      medium: 5,
-      high: 15,
-      critical: 40,
-    }[rLower] ?? 1;
+    const points = { low: 1, medium: 5, high: 15, critical: 40 };
+    const riskPoints = Object.hasOwn(points, rLower) ? points[rLower] : 1;
 
     this.cumulativeRisk = Math.min(100, this.cumulativeRisk + riskPoints);
 
@@ -111,7 +109,7 @@ export class SessionTracker {
 
     // Check for exfiltration chain:
     // Session previously read sensitive data/secrets -> now attempting external egress
-    const isEgress = actLower.includes("net") || actLower.includes("egress") || actLower.includes("post") || actLower.includes("curl");
+    const isEgress = actLower === "http.request" || actLower.includes("net") || actLower.includes("egress") || actLower.includes("post") || actLower.includes("curl");
     const isExternalDest = resLower.startsWith("http://") || resLower.startsWith("https://");
 
     if ((this.taint.readSensitiveData || this.taint.readSecrets) && isEgress && isExternalDest) {

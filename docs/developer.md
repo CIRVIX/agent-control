@@ -1,223 +1,62 @@
 # Developer guide
 
-Working on Cirvix itself.
+## Checkout layout
 
-## Layout
+- `packages/agent-control/bin`: CLI entry points.
+- `packages/agent-control/src/commands` and `src/adapters`: local operations, reporting, configuration detection and integration planning.
+- `packages/agent-control/src/core`: policy/DSL, Guard/Pipeline, gateway/transports, local stores and optional controls.
+- `packages/agent-control/test` and `action`: Node tests/fixtures and composite scan action.
+- `packages/cirvix-python`: native Python evaluator, wrappers, tests and artifact checker.
+- `packages/conformance`: shared policy and Node delegation fixtures.
+- `tools`, `demo`, `benchmarks`, `docs`: repository validation, fixture demonstrations, benchmarks and documentation.
+- `.github/workflows`: CI and release automation.
 
-```
-packages/
-  agent-control/       the CLI, engine, gateway, daemon, audit, secrets, scanner
-    bin/cirvix.mjs     the CLI entry point
-    src/core/          policy · guard · gateway · daemon · audit · secrets · jsonrpc · detect · format
-    src/commands/      scan · sarif
-    src/testing.mjs    evaluate / expectNoLoosening / loadPolicy
-    action/            the GitHub Action (composite)
-    test/              8 suites, node:test
-  cirvix-python/       the Python engine and SDK
-    cirvix/            policy.py · guard.py · testing.py
-    tests/             2 suites, unittest
-  conformance/
-    policy-conformance.json    the contract between the two engines
-  control-plane/       the multi-tenant API
-    bin/serve.mjs      entry point
-    src/               api · auth · store-sql · db/ · governance · runs · secrets ·
-                       sso · oidc · scim · alerts · compliance · metrics · events · egress
-    deploy/            Dockerfile · docker-compose · helm · k8s
-    test/              11 suites, node:test
-src/                   the Next.js console and marketing site
-docs/                  this documentation set
-```
+No runnable SaaS/control-plane server, frontend, auth/billing/tenant service or production deployment templates are shipped. Ignored control-plane environment/database/dependency artifacts are not server source.
 
-## Running the suites
+## Verification commands
 
-```bash
-# Node — agent-control (150 tests)
-cd packages/agent-control && npm test
+Run from the repository root unless stated otherwise:
 
-# Node — control-plane (322 tests)
-cd packages/control-plane && npm test
+| Purpose | Command |
+|---|---|
+| Node suite | `npm test` |
+| Example policy tests | `node --test docs/examples/policy.test.mjs` |
+| Version / licence / public provenance | `npm run verify:version`, `npm run verify:license`, `npm run verify:public` |
+| Node pack and offline clean-install gate | `npm run verify:package` |
+| Python tests | `python -m unittest discover -s tests -v` from `packages/cirvix-python` |
+| Python build | `python -m build packages/cirvix-python --outdir .artifacts/python` |
+| Python artifact inventory/source check | `python packages/cirvix-python/check_artifacts.py .artifacts/python` |
 
-# Python (63 tests)
-cd packages/cirvix-python && python -m unittest discover -s tests
+Node uses `node:test`, not Jest. `npm test` also includes adversarial fixtures and subprocess/transport tests; select tests according to the review's permitted scope. `npm run verify:adversarial` is a separate gate, not an ordinary unit-test substitute. Do not run discovery over operator configuration or credentials in a restricted review.
 
-# Console: types, lint, build
-npm run verify
-```
+No lint/typecheck script or Node compilation build is configured. `node --check <file>` validates syntax only. Python packaging requires the `build` module and `hatchling`; a missing build module blocks artifact validation and is not a successful build. The artifact checker requires exactly the current wheel/sdist, compares runtime bytes with source, validates metadata/licences/conformance inventory, and rejects unexpected members.
 
-`npm run verify` is `typecheck && lint && build`, and lint runs with
-`--max-warnings 0`.
+`verify:package` checks the Node package inventory and required exports, packs and installs offline, checks CLI version/policy behavior and imports the SDK. Setting `CIRVIX_PACKAGE_OUTPUT_DIR` to an existing directory exports the same verified tarball; it does not repack for publication. Isolate operator environment/home/cache as required by the test scope. `verify:public` is a provenance check, not certification. The npm script first runs its own `--self-test` against a seeded fixture, because a guard that has never been seen to fail is not a guard, then fails on credential stores, SQLite databases or WAL sidecars present anywhere in the audited tree — the artifacts one stray `git add -A` publishes — before the existing secret and proprietary-path scans.
 
-No test framework is installed anywhere. Node uses `node:test`, Python uses
-`unittest`. Both are in the standard library, and a security package with a
-dev-dependency tree has the same supply-chain problem as one with runtime
-dependencies — just on a different day.
+Optional harnesses include `npm run proof-suite`, `npm run demos`, `npm run demo`, `npm run demo:scenarios`, `npm run bench` and `npm run bench:system`. Fixture demonstrations do not execute real payment/cloud integrations, and benchmark output is not an SLA.
 
-## The dependency rule
+## Current implementation
 
-| Package | Runtime dependencies | Enforced by |
-|---|---|---|
-| `@cirvix_ai/agent-control` | **none** | no `dependencies` key in `package.json` |
-| `cirvix` (PyPI) | **none** | `dependencies = []` in `pyproject.toml` |
-| `@cirvix/control-plane` | `@cirvix_ai/agent-control` only | `package.json` |
+- Guard and Pipeline use the shared in-process kill checks, including a recheck after asynchronous brokering. This does not give the standalone kill CLI cross-process delivery.
+- Guard approval fingerprints include server and environment. Pipeline selects the agent from trusted submission context or its configured default rather than the raw request's agent field; the embedding transport must establish that context.
+- Node wrappers guard all supported callable entrypoints, reject ambiguous/accessor/unsupported shapes, and accept zero arguments or one plain argument object. Python wrappers bind inspectable signatures and guard supported methods on independent copies. See the SDK guides for their differences.
+- Gateway forwarded routes have timeout/capacity bounds, retain decisions for response scrubbing, and refuse unsupported client methods.
+- Daemon records snapshot their input and serialize append/drain operations within the instance. Shutdown reports whether its final batch emptied the backlog rather than treating any successful batch as complete delivery. This is not multi-process coordination or a crash-durability guarantee.
+- `AuditChain.open()` verifies loaded history before extending it. Read-error handling remains a final-review checkpoint: at this documentation pass, `read()` still catches errors as an empty list. Verify the main agent's pending correction before release.
+- Passport rotation requires the old private key and signs the rotated payload with old and new keys. These remain standalone identity primitives, not automatic runtime enrollment.
 
-This is permanent, not aspirational. A security tool that drags in a transitive
-dependency tree is asking to become the supply-chain incident it exists to
-prevent.
+## Release workflow and gate
 
-Consequences you will hit:
+Release build runs Node and Python tests, metadata/licence/provenance gates, verified Node packing, Python build and Python artifact checking. Tag-push publication fails early without npm credentials. npm publishes the exported verified tarball; PyPI does not skip existing artifacts. GitHub release creation depends on build and both publisher jobs. Manual dispatch builds without publishing.
 
-- **No Express.** The control plane uses `node:http` and a hand-rolled router.
-- **No `jsonwebtoken`.** JWT is ~60 lines of HMAC and base64url in `auth.mjs`.
-  A control plane taking a dependency for its own token verification is taking a
-  dependency on someone else's release process for its most security-critical
-  path.
-- **No SQL library.** `node:sqlite`, via `src/db/index.mjs`.
-- **No glob library.** `matchGlob` in `policy.mjs`.
+**Final release status is pending the main agent's final run.** Earlier ordinary-suite results included failures being fixed, and local Python artifact building was blocked by a missing build module. Prior subset counts and intermediate package checks are not a full-suite or final-artifact pass. Record exact commands, runtime versions, failures/skips and artifact results in the final report; do not reuse historical gate tables as current evidence.
 
-## The conformance contract
+## Remaining boundaries
 
-[`packages/conformance/policy-conformance.json`](../packages/conformance/policy-conformance.json)
-is the contract between every implementation of the policy engine. 44 cases,
-loaded by both suites from the **same file** — neither language is allowed a
-private copy.
+- Mission budget assessment/accounting and revocation checks are not an atomic transaction at the final execution boundary. Approval consumption, audit persistence and external effects also lack exactly-once coupling; reconcile failures before retrying.
+- Signed passports/rotation do not establish mandatory authenticated runtime enrollment or SaaS tenant isolation.
+- `cirvix kill` changes only its process-local state; fleet/process containment requires separate delivery and supervisor controls.
+- Remote policy refresh does not hot-reload the running CLI gateway. Rules are selected at construction; plan controlled restart and review empty-policy fallback semantics.
+- Local file stores, sandbox helpers and proofs do not supply OS isolation, managed HA, independent compliance evidence or automatic recovery. See [Architecture](./architecture.md), [Deployment](./deployment.md) and [Operations](./operations.md).
 
-**Changing engine behaviour means changing that file first, in a commit a
-reviewer can see.** Adding an engine means making it pass.
-
-The fixture is not ceremony. It immediately caught a real Windows path-
-canonicalization bug in the Node engine — `path.resolve` prepending the current
-drive to `/etc/passwd` on Windows — that no single-language suite would have
-found.
-
-Paths in the fixture are POSIX and `cwd` is always explicit, so resolution is
-deterministic regardless of where the tests run.
-
-A case looks like:
-
-```json
-{
-  "name": "forbid wins over a permit that comes after it",
-  "cwd": "/workspace",
-  "rules": [
-    { "name": "deny-env", "effect": "forbid", "actions": ["fs.read"], "resources": ["**/.env"] },
-    { "name": "allow-reads", "effect": "permit", "actions": ["fs.read"], "resources": ["*"] }
-  ],
-  "request": { "agent": "a", "action": "fs.read", "resource": "/workspace/.env" },
-  "expect": { "verdict": "deny", "rule": "deny-env" }
-}
-```
-
-`expect` may additionally assert `resource` (the canonical form), `approvers`,
-and the full `considered` trace.
-
-Each suite also runs one meta-test asserting the fixture loaded and has no
-duplicate case names — a suite that silently loads zero cases passes forever.
-
-## Adding a route
-
-Every route declares the permission it needs:
-
-```js
-route("GET", "/v1/thing", "org:read", (ctx) => ok(ctx.res, store.listThings(ctx.orgId)));
-```
-
-`route()` **throws at startup** if the permission is not in `PERMISSIONS`, is
-not `null` for an explicitly public route, and is not the SCIM scope. An
-endpoint cannot be added unauthenticated by omission.
-
-Two rules for the handler:
-
-1. **Never read `orgId` from a body, query, or path.** It comes from
-   `ctx.principal` only. Every store method that touches tenant data takes an
-   `orgId` and puts `org_id = ?` in its SQL.
-2. **Anything that assigns a role goes through `cannotGrant`.** Otherwise it is
-   privilege escalation with one extra step.
-
-Audit anything an operator would want to see later:
-
-```js
-audit(ctx, "thing.created", thing.id, { name: thing.name });
-```
-
-## Adding a migration
-
-Append to the array in `src/db/migrations.mjs` with the next version number.
-Forward-only; there is no down-migration. Each runs inside a transaction with
-its version bump, so a failure leaves the schema untouched and the process exits
-rather than serving against a half-applied schema.
-
-Never edit an applied migration. Add another.
-
-## Adding a policy operator or context field
-
-1. Add the case to `packages/conformance/policy-conformance.json`.
-2. Watch **both** suites fail.
-3. Implement in `packages/agent-control/src/core/policy.mjs`.
-4. Implement in `packages/cirvix-python/cirvix/policy.py`.
-5. Both suites pass.
-6. Document it in [`docs/policy.md`](./policy.md).
-
-Step 1 first is the whole discipline. Implementing in one language and then
-"porting" is how the two engines drift.
-
-Unknown operators must continue to **fail closed**.
-
-## Style
-
-The codebase explains *why*, not *what*. A comment that restates the code is
-noise; a comment recording a decision — why it is not a regex, why the id is
-rewritten, why the default is deny — is the thing a reader six months later
-actually needs.
-
-Where a design has a sharp edge, the comment states it plainly rather than
-softening it. `audit.mjs` says what the chain does not prove. `egress.mjs` says
-it does not close DNS rebinding. That honesty is load-bearing: an operator who
-finds one overstated claim discards the rest.
-
-## The console
-
-Next.js 16 App Router, React 19, Tailwind v4. See `DESIGN.md` (console design contract, not in this repository)
-before writing a component. The short version:
-
-**Chroma means state.** Four saturated colours, each a runtime verdict —
-`permit` green, `deny` red, `pending` amber, `route` blue. Nothing decorative
-may use them, so green on a Cirvix screen always means a decision was made.
-
-**Content lives in `src/content/*`, not in pages.** Pages render the content
-model. Routes are declared once in `ROUTES` in `src/config/site.ts` — never
-hard-code a path.
-
-Documentation on the site is a typed block model in `src/content/docs.ts`, not
-MDX. A content typo shows up as a type error rather than a silent bad render.
-
-### Keeping the site and this directory in agreement
-
-`docs/` is derived from the code and is canonical. When you change behaviour:
-
-1. Update the code.
-2. Update `docs/`.
-3. Update `src/content/docs.ts` if the change is user-facing.
-
-The site docs previously described a product that did not exist — Cedar, a
-`cirvix.toml`, commands like `cirvix init` and `cirvix run`. That is the failure
-mode this directory exists to prevent: documentation written ahead of the code
-and never reconciled.
-
-## Security review
-
-See [`SECURITY.md`](../SECURITY.md) for the threat model and the findings from
-the adversarial review. If you are touching auth, tenancy, secrets, or the
-policy engine, read it first — it lists eight real vulnerabilities that were
-found and fixed, and the patterns that produced them.
-
-## Before opening a pull request
-
-```bash
-cd packages/agent-control  && npm test
-cd packages/control-plane  && npm test
-cd packages/cirvix-python  && python -m unittest discover -s tests
-npm run verify
-```
-
-All four green, no exceptions. If you changed engine behaviour, the conformance
-fixture change should be the first thing a reviewer sees in the diff.
+Preserve concurrent work and coordinate ownership of code, tests, workflows and docs. This documentation pass changes no runtime code and runs no network or release operations. Source inspection describes implementation, not a guarantee that all tests pass.

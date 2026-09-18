@@ -60,6 +60,4 @@ As of 2026-08-23, publication credentials and registry access were not
 available in this workspace. Do not claim the public `npm install` or `pip
 install` paths work until the published commands above have been run.
 
-Human unblock, one line: **Configure npm trusted publishing for
-`CIRVIX/agent-control` and PyPI trusted publishing for `cirvix`, then push a
-`v0.1.0` tag.**
+Before publication, complete the current [release gate](../developer.md), verify artifact versions against `VERSION` (currently `0.1.5`), and confirm publishing credentials/environments with the operator. The current npm workflow uses `NPM_TOKEN`; PyPI uses trusted publishing. Do not publish an obsolete `v0.1.0` tag or infer publication from a green build. No publication is authorized by this document.

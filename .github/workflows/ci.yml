@@ -25,7 +25,7 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build hatchling
       - name: Install Node workspace
-        run: npm ci
+        run: npm ci --ignore-scripts
       - name: Canonical version check
         run: npm run verify:version
       - name: Node tests
@@ -43,32 +43,12 @@ jobs:
         run: |
           npm run verify:license
           npm run verify:public
-          python - <<'PY'
-          import pathlib, zipfile, tarfile
-          root = pathlib.Path('.artifacts/python')
-          artifacts = list(root.iterdir())
-          assert any(p.suffix == '.whl' for p in artifacts), artifacts
-          assert any(p.name.endswith('.tar.gz') for p in artifacts), artifacts
-          for p in artifacts:
-              if p.suffix == '.whl': names = zipfile.ZipFile(p).namelist()
-              elif p.name.endswith('.tar.gz'): names = tarfile.open(p).getnames()
-              else: continue
-              assert all('control-plane' not in n.lower() for n in names), (p, names)
-          print('Python artifact integrity passed')
-          PY
+          python packages/cirvix-python/check_artifacts.py .artifacts/python
       - name: Secret scan
         # gitleaks-action@v2 requires a paid license key for organizations.
         # Until GITLEAKS_LICENSE is configured, fall back to the free
         # gitleaks binary so the scan itself never silently disappears.
         run: |
-          if [ -n "$GITLEAKS_LICENSE" ]; then
-            echo "license present — running gitleaks-action"
-          else
-            echo "no GITLEAKS_LICENSE — running free gitleaks binary"
-            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz -o /tmp/gl.tgz
-            mkdir -p /tmp/gl && tar -xzf /tmp/gl.tgz -C /tmp/gl
-            /tmp/gl/gitleaks detect --source . --no-git --redact -v
-          fi
-        env:
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz -o /tmp/gl.tgz
+          mkdir -p /tmp/gl && tar -xzf /tmp/gl.tgz -C /tmp/gl
+          /tmp/gl/gitleaks detect --source . --redact

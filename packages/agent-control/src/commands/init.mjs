@@ -511,6 +511,20 @@ export async function init({
   const stateDir = join(cwd, ".cirvix");
   const policyPath = join(cwd, "cirvix.policy");
 
+  if (dryRun) {
+    if (apply || force || rollback) {
+      const result = { ok: false, error: "--dry-run cannot be combined with --apply, --force, or --rollback." };
+      return { result, output: json ? JSON.stringify(result) : result.error };
+    }
+    const plans = await generateFleetPlan(cwd, { stateDir });
+    const result = {
+      ok: true,
+      dryRun: true,
+      fleetPlans: plans.map(({ adapterId, targetFile, canIntegrate }) => ({ adapterId, targetFile, canIntegrate })),
+    };
+    return { result, output: json ? JSON.stringify(result, null, 2) : `Integration preview: ${plans.length} plans. No files modified.` };
+  }
+
   /* ------------------------------------------------------------ 0. rollback */
   if (rollback) {
     const backupManager = new ConfigBackupManager({ stateDir });
@@ -548,7 +562,9 @@ export async function init({
 
   /* ------------------------------------------------------------ 1. runtime */
   await mkdir(stateDir, { recursive: true });
-  const token = await writeToken(stateDir);
+  const token = await exists(tokenPath(stateDir))
+    ? (await readFile(tokenPath(stateDir), "utf8")).trim()
+    : await writeToken(stateDir);
   const endpoint = defaultEndpoint(stateDir);
   steps.push({
     id: "runtime",
@@ -673,7 +689,7 @@ export async function init({
       ok: true,
       detail: unintegratedPlans.length
         ? `${plural(unintegratedPlans.length, "agent")} ready for automatic integration (use --apply)`
-        : "all detected agents already routed through CIRVIX",
+        : "no safe automatic integration available; verify gateway-only routing manually",
     });
   }
 
@@ -749,12 +765,12 @@ function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = n
   const secretsDetail = result.credentials ? `${result.credentials} credential sources` : "active";
 
   const panelLines = [
-    `${bold("CIRVIX PROTECTED")}`,
+    `${bold("CIRVIX CONFIGURATION")}`,
     ``,
     `${"Runtime".padEnd(12)} ${runtimeLabel}  ${runtimeDetail}`,
-    `${"Policy".padEnd(12)} ${green(bold("● ENFORCING"))}  ${dim(policyDetail)}`,
-    `${"Secrets".padEnd(12)} ${green(bold("● PROTECTED"))}  ${dim(secretsDetail)}`,
-    `${"Audit".padEnd(12)} ${green(bold("● RECORDING"))}  ${dim(".cirvix/audit.jsonl")}`,
+    `${"Policy".padEnd(12)} ${result.ok ? cyan("CONFIGURED") : red("INVALID")}  ${dim(policyDetail)}`,
+    `${"Secrets".padEnd(12)} ${cyan("DETECTED")}  ${dim(secretsDetail)}`,
+    `${"Audit".padEnd(12)} ${cyan("CONFIGURED")}  ${dim(".cirvix/audit.jsonl")}`,
     `${"Agents".padEnd(12)} ${String(runtimes.length)} detected`,
   ];
 
@@ -767,7 +783,7 @@ function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = n
   }
 
   panelLines.push(``);
-  panelLines.push(`${dim(`${0} blocked  ·  ${0} approvals  ·  ${0} violations`)}`);
+  panelLines.push(dim("Configuration is not evidence of executed tool calls."));
 
   lines.push(panel({ lines: panelLines, width: 62 }));
   lines.push("");
@@ -780,7 +796,7 @@ function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = n
     }
     lines.push("");
   } else {
-    lines.push(`  ${green(bold("Ready. Your agent is under policy control."))}`);
+    lines.push(`  ${dim("Start the runtime or gateway and verify a routed tool call before relying on enforcement.")}`);
     lines.push("");
   }
 

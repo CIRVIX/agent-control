@@ -34,6 +34,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { isHandle } from "./secrets.mjs";
 
 /** Below this, a random-looking string is usually a word, a path, or a hash. */
 const ENTROPY_FLOOR = 3.6;
@@ -236,7 +237,7 @@ export const DETECTORS = [
       /\b([A-Za-z0-9_.-]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|CLIENT[_-]?SECRET|AUTH|CREDENTIAL)[A-Za-z0-9_.-]*)\s*[:=]\s*["']?([^\s"',;}]{12,})["']?/gi,
     group: 2,
     nameGroup: 1,
-    validate: (v) => isHighEntropy(v) && !isPlaceholder(v),
+    validate: (v) => !isHandle(v) && isHighEntropy(v) && !isPlaceholder(v),
   },
   {
     id: "authorization-header",
@@ -244,7 +245,7 @@ export const DETECTORS = [
     severity: SEVERITY.HIGH,
     pattern: /authorization["'\s:=]+["']?(?:Bearer|Basic|Token)\s+([A-Za-z0-9._~+/=-]{16,})["']?/gi,
     group: 1,
-    validate: (v) => !isPlaceholder(v),
+    validate: (v) => !isHandle(v) && !isPlaceholder(v),
   },
 ];
 

@@ -26,7 +26,7 @@
  * this talks to.
  */
 
-import { MessageFramer } from "./jsonrpc.mjs";
+import { MessageFramer, isResponse, isRequest, errorResponse, ERROR_CODE } from "./jsonrpc.mjs";
 
 /** How long a single JSON-RPC request may take before it is abandoned. */
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -135,7 +135,8 @@ export class HttpUpstream {
       const res = await this.fetchImpl(this.url, {
         method: "GET",
         headers: { accept: "text/event-stream", ...this.headers },
-        signal: this.#abort.signal,
+        redirect: "error",
+        signal: AbortSignal.any([this.#abort.signal, AbortSignal.timeout(this.timeoutMs)]),
       });
 
       if (res.ok && (res.headers.get("content-type") ?? "").includes("text/event-stream")) {
@@ -252,7 +253,12 @@ export class HttpUpstream {
   /** Fire-and-forget. Mirrors the stdio upstream's `send`. */
   send(message) {
     if (!this.alive) return false;
-    void this.#post(message).catch((err) => this.log(`upstream ${this.name}: ${err.message}`));
+    void this.#post(message).catch(() => {
+      this.log(`upstream ${this.name}: request failed`);
+      if (isRequest(message)) {
+        this.onMessage?.(this, errorResponse(message.id, ERROR_CODE.UPSTREAM_UNAVAILABLE, "Upstream request failed."));
+      }
+    });
     return true;
   }
 
@@ -271,7 +277,7 @@ export class HttpUpstream {
       body: JSON.stringify(message),
       // Same-origin only. A cross-origin redirect is how this becomes an SSRF.
       redirect: "error",
-      signal: timeout,
+      signal: this.#abort ? AbortSignal.any([this.#abort.signal, timeout]) : timeout,
     });
 
     const session = res.headers.get("mcp-session-id");
@@ -360,6 +366,7 @@ export class HttpUpstream {
   }
 
   settle(message) {
+    if (!isResponse(message)) return false;
     const entry = this.#pending.get(message.id);
     if (!entry) return false;
     this.#pending.delete(message.id);
@@ -476,18 +483,55 @@ export class HttpGatewayServer {
       return send(400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
     }
 
-    // The gateway writes answers through a callback; collect them for this
-    // request and answer in one body.
+    // The gateway writes answers through a request-owned deliver callback;
+    // collect them for this request and answer in one body. Forwarded calls
+    // complete asynchronously; route promises track that completion so we hold
+    // the response open.
+    //
+    // REQUEST OWNERSHIP & MULTI-CLIENT ISOLATION:
+    // Never mutate `this.gateway.write` — doing so races concurrent HTTP requests
+    // and corrupts stdio if active. Each HTTP request gets its own isolated sink.
+    // Late replies (after client disconnect or timeout) are dropped safely.
     const outbound = [];
-    const previousWrite = this.gateway.write;
-    this.gateway.write = (m) => outbound.push(m);
+    const collected = [];
+    let closed = false;
+
+    const cleanup = () => {
+      closed = true;
+    };
+    req.on("close", cleanup);
+    res.on("close", cleanup);
+
+    const requestDeliver = (m) => {
+      if (closed || res.writableEnded || res.destroyed) {
+        this.log(`http gateway: dropped response for id ${m?.id} (request finished or connection closed)`);
+        return;
+      }
+      if (m._routePromise) {
+        collected.push(m._routePromise);
+        delete m._routePromise;
+      }
+      outbound.push(m);
+    };
 
     try {
-      await this.gateway.handleClientMessage(message);
+      const routePromise = await this.gateway.handleClientMessage(message, requestDeliver);
+      if (routePromise && typeof routePromise.then === "function") {
+        await routePromise;
+      }
+      if (message._routePromise) await message._routePromise;
+      await Promise.all(collected);
+    } catch (err) {
+      if (!res.writableEnded && !closed) {
+        return send(500, { jsonrpc: "2.0", id: message?.id ?? null, error: { code: -32603, message: "Internal error" } });
+      }
+      return;
     } finally {
-      this.gateway.write = previousWrite;
+      req.off("close", cleanup);
+      res.off("close", cleanup);
     }
 
+    if (closed || res.writableEnded || res.destroyed) return;
     if (!outbound.length) return send(202, "");
     return send(200, outbound.length === 1 ? outbound[0] : outbound);
   }

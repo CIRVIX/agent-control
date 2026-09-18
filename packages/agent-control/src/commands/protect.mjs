@@ -287,7 +287,7 @@ export async function protect({
      ends when the process does. */
   out(`\n  ${dim("Policy verified against real calls. Nothing is running yet.")}\n`);
   out(`  ${dim("Start enforcement:")}  ${bold("cirvix runtime")}\n`);
-  out(`  ${dim("Govern an MCP server:")}  ${bold("cirvix gateway --servers <cmd>")}\n\n`);
+  out(`  ${dim("Govern an MCP server:")}  ${bold("cirvix gateway --servers <file>")}\n\n`);
 
   return { result, output: "" };
 }

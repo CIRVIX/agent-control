@@ -8,15 +8,9 @@ Zero runtime dependencies. Node 20 or later. ESM only.
 
 ## What `wrap` is for
 
-The [gateway](./cli.md#cirvix-gateway) governs everything an agent does,
-including tools added after you deployed it, because it sits on the wire. It
-also requires the agent to speak MCP.
+The [gateway](./cli.md#cirvix-gateway) governs MCP calls routed through it, not all activity by an agent. Direct upstream access, editor built-ins and arbitrary subprocesses remain outside its boundary.
 
-`guard.wrap` is for the case where it does not: a LangChain executor, a hand-
-rolled loop over some functions. **You give up the "governs tools you did not
-know about" property** — you are wrapping a list — and you keep every other one:
-same engine, same rules, same decision record, same secret brokering, same audit
-chain.
+`guard.wrap` governs returned callables used by your executor. Both paths use Guard, but audit persistence, approvals, secret brokering and other optional facilities depend on explicit wiring. Installing the SDK or retaining the original tool collection provides no interception.
 
 That trade is stated here rather than glossed, because an operator who believes
 `wrap` is equivalent to the gateway will not understand why a tool the agent
@@ -27,25 +21,27 @@ reached directly was never evaluated.
 ```js
 import { guard, CirvixDenied, CirvixHeld, STARTER_RULES } from "@cirvix_ai/agent-control";
 
-const tools = guard.wrap(myTools, {
+const tools = guard.wrap({ read_file: async ({ path }) => `Fixture read: ${path}` }, {
   agent: "pr-triage",
   environment: process.env.CIRVIX_ENV ?? "local",
   rules: STARTER_RULES,
 });
 
+console.log(await tools.read_file({ path: "src/index.mjs" }));
 try {
-  await agent.invoke(input);
+  await tools.read_file({ path: ".env.production" });
 } catch (err) {
   if (err instanceof CirvixHeld) {
-    console.log(err.approvers);   // ["platform-oncall"] — a person can release this
+    console.log(err.approvers);
   } else if (err instanceof CirvixDenied) {
-    console.log(err.policy);      // "deny-dotenv-read"
-    console.log(err.remediation); // 'secrets.get("STRIPE_KEY")'
-    console.log(err.decisionId);  // pass to `cirvix why`
+    console.log(err.policy, err.remediation, err.decisionId);
+  } else {
+    throw err;
   }
-  throw err;
 }
 ```
+
+This fixture reads no files. A framework executor must use the returned tools. No audit file or approval queue is created unless you pass an `audit` or `approvals` store; without a record sink, the decision ID is not automatically available to `cirvix why`. See [Quickstart](./quickstart.md) for explicit audit wiring.
 
 > **`rules` is the option, not `policyDir`.** `wrap` forwards its options
 > straight to the `Guard` constructor, which takes an in-memory rule array. To
@@ -65,23 +61,17 @@ const tools = guard.wrap(myTools, { agent: "pr-triage", rules });
 
 ## Shapes `wrap` accepts
 
-It returns the same shape it was given, so this is a one-line change at the
-executor boundary rather than a rewrite of how tools are registered.
+The returned collection must replace the originals at the executor boundary.
 
 | Input | Behaviour |
 |---|---|
-| `{ name: fn }` | Each function replaced; non-functions passed through |
-| `[toolObject, …]` | Each tool **shallow-copied** with its callable replaced |
-| `fn` | Wrapped; name from `options.name` or `fn.name` |
+| Plain `{ name: tool }` map | Values must be functions or supported tool objects; metadata-only values are rejected |
+| Array of functions/tool objects | Functions wrapped; supported objects copied without mutating originals |
+| `fn` | Wrapped; requires a nonempty name from `options.name` or `fn.name` |
 
-For tool objects, the first of `func`, `invoke`, `call`, `execute`, `handler`,
-`_call`, `run` that is a function is the one wrapped. LangChain, CrewAI and
-AutoGen all land here.
+All callable methods named `func`, `invoke`, `call`, `execute`, `handler`, `_call` or `run` are guarded, including inherited methods. Tool objects need a name (or a map key); accessors, unsupported callable methods and invalid entrypoints require an explicit adapter. Copies use a null prototype and preserve non-callable data descriptors rather than guaranteeing framework class identity.
 
-Everything else on the tool — descriptions, schemas, framework metadata — is
-preserved by reference, because a framework that reads `tool.schema` after
-wrapping must still find it. The copy is deliberate: mutating the originals
-would govern the caller's array as a side effect of reading ours.
+A governed call accepts zero arguments or one plain argument object, not arbitrary positional arguments. Its result is scrubbed with the authorization decision. Test the actual framework shape instead of assuming compatibility from its name.
 
 `fn.name` is preserved on the wrapper. Frameworks introspect it to build their
 tool registry, and an anonymous arrow would silently rename every governed tool.
@@ -111,7 +101,8 @@ Decides one call and brokers any secret handles it carries.
 ```js
 const { decision, record, args } = await g.authorize({ tool: "read_file", args: { path: ".env" } });
 if (decision.verdict !== "permit") throw g.toError(decision);
-const result = await realTool(args);   // note: `args`, not the originals
+const result = await realTool(args);
+const safeResult = g.scrub(result, decision).payload;
 ```
 
 Returns the arguments **to forward**, which are not necessarily the ones passed
@@ -214,6 +205,8 @@ policy is allowed to move without a reviewer being surprised.
 
 ## Secret handles
 
+`SecretsClient` requires a separately supplied compatible control-plane API; no such server is shipped here. Alternatively, explicitly supply a local `Vault` to Guard. CLI gateway construction does not currently supply either broker. Detection/redaction is bounded, not a guarantee that arbitrary secrets or encodings cannot reach a model.
+
 ```js
 import { SecretsClient } from "@cirvix_ai/agent-control/secrets";
 
@@ -266,9 +259,8 @@ Subpath exports, for importing one thing without the rest:
 
 ## Parity with Python
 
-Both engines run the same 44-case
-[conformance fixture](../packages/conformance/policy-conformance.json). Two
-differences are real and intentional:
+Both engines run the policy cases in the shared
+[conformance fixture](../packages/conformance/policy-conformance.json). This is evaluator coverage, not full runtime parity. Two differences are:
 
 | | Node | Python |
 |---|---|---|

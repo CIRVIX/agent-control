@@ -23,6 +23,24 @@ build/
 # path may ever be committed here.
 packages/control-plane/
 
+# Secret material and customer data. These are not product source; they are
+# credentials and live tenant rows. `secrets.json` is the catalogue credential
+# store, `secrets.json.bak-*` a pre-change snapshot of it, and `data` /
+# `data-shm` / `data-wal` are the control plane's SQLite database and its WAL
+# sidecars. A single `git add -A` in a tree holding these publishes them to the
+# public remote. The ignore below is one line of defence; the check in
+# `tools/audit-public-repo.mjs` is the one that fails a build.
+secrets.json
+secrets.json.bak-*
+secrets.bak*
+data
+data-shm
+data-wal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
 # Local Python environments and packaging output. `ci.yml` builds the Python
 # sdist and wheel into `.artifacts/python`, and `packages/cirvix-python` has a
 # test suite the README tells you to run, so a venv and a stray build directory

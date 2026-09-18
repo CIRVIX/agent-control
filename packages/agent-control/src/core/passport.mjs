@@ -310,6 +310,9 @@ export function verifyPassport(publicKeyPem, token) {
   if (!base.ok) return base;
 
   const p = base.payload;
+  if (!p || typeof p !== "object" || Array.isArray(p)) {
+    return { ok: false, verified: false, failed: "integrity", reason: "The passport payload must be an object." };
+  }
   for (const field of ["v", "kind", "issuer", "passportId", "agent", "issuedAt", "passport"]) {
     if (p[field] === undefined) {
       return { ok: false, verified: false, failed: "integrity", reason: `The passport is missing "${field}".` };
@@ -320,6 +323,13 @@ export function verifyPassport(publicKeyPem, token) {
   }
   if (p.v !== PASSPORT_VERSION) {
     return { ok: false, verified: false, failed: "integrity", reason: `This passport is version ${p.v}; this verifier understands ${PASSPORT_VERSION}.` };
+  }
+  if (!p.passport || typeof p.passport !== "object" || Array.isArray(p.passport) ||
+      typeof p.agent !== "string" || !p.agent.trim() || p.agent !== p.passport.agent ||
+      typeof p.issuedAt !== "string" || !Number.isFinite(Date.parse(p.issuedAt)) || p.issuedAt !== p.passport.issuedAt ||
+      p.environment !== (p.passport.environment ?? null) ||
+      (p.passport.policy && (typeof p.policyHash !== "string" || !p.policyHash.trim()))) {
+    return { ok: false, verified: false, failed: "integrity", reason: "The passport identity or policy binding is invalid." };
   }
   if (p.passportId !== passportId(p.passport)) {
     return { ok: false, verified: false, failed: "integrity", reason: "The passport id does not match its contents." };
@@ -429,7 +439,7 @@ export function badgeSvg(passport, { label = "cirvix" } = {}) {
    CRYPTOGRAPHIC IDENTITY & AGENT PASSPORT (Section 3)
    ========================================================================== */
 
-import { generateKeyPairSync, sign as cryptoSign, verify as cryptoVerify, randomUUID } from "node:crypto";
+import { generateKeyPairSync, createPublicKey, sign as cryptoSign, verify as cryptoVerify, randomUUID } from "node:crypto";
 import { canonicalJson } from "./audit.mjs";
 
 /**
@@ -475,6 +485,10 @@ export function issueCryptographicPassport({
     pub = keys.publicKey;
   }
 
+  const publicKey = createPublicKey(priv);
+  if (publicKey.asymmetricKeyType !== "ed25519") throw new TypeError("A passport needs an Ed25519 key.");
+  pub = publicKey.export({ type: "spki", format: "pem" }).toString();
+
   const payload = {
     id: agentId,
     name: name ?? agentId,
@@ -511,8 +525,8 @@ export function issueCryptographicPassport({
  */
 export function verifyPassportSignature(passport, publicKeyOverride = null) {
   if (!passport || typeof passport !== "object") return false;
-  const { signature, ...payload } = passport;
-  if (!signature) return false;
+  const { signature, previousSignature, ...payload } = passport;
+  if (typeof signature !== "string") return false;
 
   const keyToUse = publicKeyOverride ?? payload.publicKey;
   if (!keyToUse) return false;
@@ -520,7 +534,13 @@ export function verifyPassportSignature(passport, publicKeyOverride = null) {
   try {
     const data = Buffer.from(canonicalJson(payload));
     const sigBytes = Buffer.from(signature, "base64url");
-    return cryptoVerify(null, data, keyToUse, sigBytes);
+    if (createPublicKey(keyToUse).asymmetricKeyType !== "ed25519") return false;
+    if (!cryptoVerify(null, data, keyToUse, sigBytes)) return false;
+    if (payload.previousPublicKey) {
+      if (typeof previousSignature !== "string") return false;
+      return cryptoVerify(null, data, payload.previousPublicKey, Buffer.from(previousSignature, "base64url"));
+    }
+    return previousSignature === undefined;
   } catch {
     return false;
   }
@@ -530,10 +550,17 @@ export function verifyPassportSignature(passport, publicKeyOverride = null) {
  * Rotates an agent's cryptographic keypair while preserving identity lineage.
  */
 export function rotatePassportKeys(currentPassport, oldPrivateKey, newKeypair = null) {
+  if (!verifyPassportSignature(currentPassport)) throw new Error("The current passport is invalid.");
+  const oldPublicKey = createPublicKey(oldPrivateKey).export({ type: "spki", format: "pem" }).toString();
+  if (oldPublicKey !== currentPassport.publicKey) throw new Error("Rotation requires the current private key.");
   const keys = newKeypair ?? generateAgentKeypair();
+  const newPublicKey = createPublicKey(keys.privateKey);
+  if (newPublicKey.asymmetricKeyType !== "ed25519" || newPublicKey.export({ type: "spki", format: "pem" }).toString() !== keys.publicKey) {
+    throw new Error("The replacement keypair is invalid.");
+  }
   const ts = new Date().toISOString();
 
-  const { signature: _oldSig, ...prevPayload } = currentPassport;
+  const { signature: _oldSig, previousSignature: _previousSig, ...prevPayload } = currentPassport;
 
   const rotatedPayload = {
     ...prevPayload,
@@ -549,6 +576,7 @@ export function rotatePassportKeys(currentPassport, oldPrivateKey, newKeypair = 
     passport: {
       ...rotatedPayload,
       signature: newSignature,
+      previousSignature: cryptoSign(null, Buffer.from(canonicalJson(rotatedPayload)), oldPrivateKey).toString("base64url"),
     },
     privateKey: keys.privateKey,
   };

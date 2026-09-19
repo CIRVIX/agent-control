@@ -19,14 +19,27 @@ The package metadata and `cirvix --version` report **0.2.1**.
   workspace it opens the legacy interactive screen only when its TTY/environment
   gates allow it; otherwise it prints a local status digest and next steps.
   Startup branding is not evidence that an enforcement runtime was started.
-- On an interactive terminal, bare `cirvix` opens with a short animated brand
-  plate (the wordmark draws, is swept once, and settles) before the digest. It is
-  bounded to under a second, any keypress ends it, and it changes nothing that
-  follows: the frame it rests on is the same plate the static header prints. It
-  is suppressed by `--fast`, `--no-animation`, `CIRVIX_NO_ANIM=1`,
-  `CIRVIX_REDUCED_MOTION=1`, `NO_COLOR`, `TERM=dumb`, CI, a non-TTY, or a
-  terminal narrower than the box — and when it is suppressed, nothing extra is
-  printed at all.
+- On an interactive terminal, bare `cirvix` opens with a ~600ms brand plate: the
+  top rule draws itself, the frame closes, the wordmark wipes in row by row, one
+  light sweep crosses it, and the tagline types in. It rests on the same plate the
+  static header prints, so nothing is readable only while it is moving. Any
+  keypress skips it, and the digest below it then assembles line by line.
+- Two rows on the plate are transient and gone by the resting frame: a status row
+  that names the probe phase actually in flight (`probing the runtime`) and then
+  reports what it found (`3 agents · no policy · runtime down`), and a
+  `press any key to skip` hint. Nothing on that row is asserted — every word comes
+  from the local probe that just ran.
+- The plate reserves its own 12 rows before drawing. Without that, launching
+  `cirvix` near the bottom of the window would scroll the buffer and the redraw
+  would erase earlier output.
+- The whole opening is suppressed by `--fast`, `--no-animation`,
+  `CIRVIX_NO_ANIM=1`, `CIRVIX_REDUCED_MOTION=1`, `NO_COLOR`, `TERM=dumb`, CI, a
+  non-TTY, or a terminal narrower than the box — and when it is suppressed,
+  nothing extra is printed at all. The digest is byte-identical either way.
+- The plate draws only in brand chroma. Green, red, and amber mean permit, deny,
+  and hold everywhere in this product and are never used decoratively. On a light
+  background the brand ramp inverts (`CIRVIX_THEME=light`) because its highlight
+  end is nearly white and would be invisible.
 - `cirvix console` previews what policy would decide. With `--eval "<tool>
   <resource>"` it prints one hypothetical decision and exits — no tool runs,
   nothing is recorded, no network is touched. Without `--eval` on a TTY it

@@ -26,9 +26,9 @@ import { access, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { bold, dim, green, gray, cyan, amber, red } from "../core/format.mjs";
+import { bold, dim, green, gray, cyan, amber, red, plural } from "../core/format.mjs";
 import { glyphs, boxChars } from "../core/ui/theme.mjs";
-import { launchBanner } from "../core/ui/launch.mjs";
+import { launchBanner, revealLines, DEFAULT_STAGGER_MS } from "../core/ui/launch.mjs";
 import { status as statusCmd } from "./status.mjs";
 import * as journal from "../core/journal.mjs";
 import { UdsClient, defaultEndpoint, tokenPath } from "../core/uds.mjs";
@@ -70,9 +70,13 @@ async function checkRuntime(stateDir) {
  * Split out so the launch sequence can play *while* this runs: the runtime probe
  * alone waits up to 800ms on a socket, and drawing over that wait rather than
  * blocking through it is the difference between an opening and a hang.
+ *
+ * `onPhase` is called with each phase as it starts, so the plate can name what is
+ * actually happening rather than decorating the wait with something invented.
  */
-async function collectState({ cwd, stateDir }) {
+async function collectState({ cwd, stateDir, onPhase = () => {} }) {
   // Detect agents and MCP servers
+  onPhase("looking for agents");
   let fleet = { runtimes: [], mcpServers: [] };
   try {
     const { detectFleet } = await import("../adapters/index.mjs");
@@ -80,12 +84,16 @@ async function collectState({ cwd, stateDir }) {
   } catch {}
 
   // Check policy and runtime state
+  onPhase("reading policy");
   const hasPolicy = (await exists(join(cwd, "cirvix.policy"))) ||
                     (await exists(join(cwd, "cirvix.policy.json"))) ||
                     (await exists(join(stateDir, "policy.json")));
+
+  onPhase("probing the runtime");
   const isRuntimeUp = await checkRuntime(stateDir);
 
   // Read quick activity summary if audit records exist
+  onPhase("reading the decision log");
   let activitySummary = null;
   const auditPath = join(stateDir, "audit.jsonl");
   if (await exists(auditPath)) {
@@ -99,6 +107,22 @@ async function collectState({ cwd, stateDir }) {
   }
 
   return { fleet, hasPolicy, isRuntimeUp, activitySummary };
+}
+
+/**
+ * The machine in one line, for the plate's status row.
+ *
+ * Every word here comes from the probe that just ran. A status row that reports
+ * a tidy constant would be worse than no status row: it would be the one thing
+ * on the screen that is not evidence.
+ */
+function describeMachine({ fleet, hasPolicy, isRuntimeUp }) {
+  const agents = (fleet.runtimes ?? []).length;
+  return [
+    plural(agents, "agent"),
+    hasPolicy ? "policy loaded" : "no policy",
+    isRuntimeUp ? "runtime up" : "runtime down",
+  ].join("  ·  ");
 }
 
 export async function welcome({
@@ -119,9 +143,31 @@ export async function welcome({
   const g = glyphs();
   const ch = boxChars();
 
-  // The launch plays while local state is read, not before it.
-  const statePromise = collectState({ cwd, stateDir });
-  const { animated } = await launchBanner({ stdout, stdin, pace, force: animate });
+  // The launch plays *over* the state probe, not before it. The plate's status
+  // row names whichever phase is running, then reports what the probe found —
+  // so the animation covers real work instead of adding to it.
+  let phaseLabel = "";
+  let machineLabel = "";
+  const statePromise = collectState({
+    cwd,
+    stateDir,
+    onPhase: (label) => {
+      phaseLabel = label;
+    },
+  }).then((state) => {
+    machineLabel = describeMachine(state);
+    return state;
+  });
+
+  const { animated } = await launchBanner({
+    stdout,
+    stdin,
+    pace,
+    force: animate,
+    pending: statePromise,
+    phase: () => phaseLabel,
+    summary: () => machineLabel,
+  });
   const { fleet, hasPolicy, isRuntimeUp, activitySummary } = await statePromise;
 
   const isProtected = hasPolicy;
@@ -184,7 +230,15 @@ export async function welcome({
   lines.push(`  ${dim("? Help:")} ${bold("cirvix --help")}   ${dim("q Quit:")} ${bold("Ctrl+C")}`);
   lines.push("");
 
-  stdout.write(lines.join("\n"));
+  // The digest assembles itself line by line rather than appearing whole. Same
+  // bytes either way — the reveal writes exactly what `join("\n")` writes — so a
+  // TTY run and a piped run stay identical.
+  await revealLines({
+    stdout,
+    stdin,
+    lines,
+    pace: pace ?? DEFAULT_STAGGER_MS,
+  });
 
   // If stdin and stdout are interactive TTY, allow one-key action
   const isInteractiveTTY = stdin.isTTY && stdout.isTTY && !process.env.CI && process.env.TERM !== "dumb";

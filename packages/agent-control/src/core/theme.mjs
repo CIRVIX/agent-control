@@ -260,6 +260,31 @@ export const BRAND = {
 };
 
 /**
+ * The same ramp for a **light** background.
+ *
+ * The highlight end is nearly white: on a white terminal it is invisible, so a
+ * "landed" flash or a scan head drawn with it looks like a glitch rather than
+ * emphasis. On light backgrounds emphasis runs the other way — deeper is
+ * brighter — so the ramp is inverted and the highlight becomes the deep blue.
+ */
+const BRAND_ON_LIGHT = {
+  deep: [111, 155, 255],
+  base: [26, 68, 168],
+  highlight: [14, 44, 112],
+};
+
+/**
+ * The ramp to draw with, given the active theme.
+ *
+ * Callers that draw gradients, scan heads, or emphasis must take the ramp from
+ * here rather than reaching for `BRAND`, or the animation is only correct on the
+ * half of terminals the author happened to be using.
+ */
+export function brandRamp() {
+  return themeName() === "light" ? BRAND_ON_LIGHT : BRAND;
+}
+
+/**
  * What the terminal can actually render: `"truecolor"`, `"256"`, `"16"`, or
  * `"none"`. A degraded answer is a correct answer — an animated brand that
  * emits an unsupported SGR sequence renders as literal `[38;2;…` garbage in the
@@ -294,11 +319,11 @@ function lerp(a, b, t) {
  * The first half runs deep → brand, the second brand → highlight, so a plain
  * left-to-right gradient reads as lit from the right.
  */
-export function brandAt(t) {
+export function brandAt(t, ramp = brandRamp()) {
   const clamped = Math.max(0, Math.min(1, Number(t) || 0));
   const [from, to, local] = clamped <= 0.5
-    ? [BRAND.deep, BRAND.base, clamped * 2]
-    : [BRAND.base, BRAND.highlight, (clamped - 0.5) * 2];
+    ? [ramp.deep, ramp.base, clamped * 2]
+    : [ramp.base, ramp.highlight, (clamped - 0.5) * 2];
   return [
     lerp(from[0], to[0], local),
     lerp(from[1], to[1], local),
@@ -319,55 +344,104 @@ export function mixRgb(from, to, t) {
 }
 
 /**
+ * Open/close sequences for one colour, at this terminal's depth — or null when
+ * colour is off.
+ *
+ * Exposed because a run-based renderer needs to emit the *open* alone and reuse
+ * it across runs: emitting `open + text + close` per run produces a stream where
+ * half the escapes set a colour that is already active (`…Xm██` `…Xm██`), which
+ * is wasted bytes on a slow link and a flicker source on some terminals.
+ */
+export function colourPair(rgb) {
+  if (!colorEnabled() || !rgb) return null;
+  const depth = colorDepth();
+  if (depth === "truecolor") return [`\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`, "\x1b[39m"];
+  if (depth === "256") return [`\x1b[38;5;${to256(rgb)}m`, "\x1b[39m"];
+  const accent = roleAnsi("accent");
+  return accent ? [`\x1b[${accent[0]}m`, `\x1b[${accent[1]}m`] : null;
+}
+
+/** True when two rgb triplets are the same colour. */
+export function sameRgb(a, b) {
+  return Boolean(a && b) && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+/**
  * Paint one colour with the best sequence this terminal understands.
  * On a 16-colour terminal the brand collapses to the `accent` role — still the
  * brand family, never a verdict colour.
  */
 export function paint(text, rgb) {
   const s = String(text);
-  if (!colorEnabled()) return s;
-  const depth = colorDepth();
-  if (depth === "truecolor") return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${s}\x1b[39m`;
-  if (depth === "256") return `\x1b[38;5;${to256(rgb)}m${s}\x1b[39m`;
-  return style(s, "accent");
+  const pair = colourPair(rgb);
+  return pair ? pair[0] + s + pair[1] : s;
 }
 
 /**
- * Paint a string as a brand gradient across its own length.
+ * Render `[{ text, rgb|null }]` as a minimal escape stream.
  *
- * Colours are quantised into `steps` bands and emitted run-by-run, so a 58-cell
- * row costs a handful of escape sequences instead of one per character. That
- * matters: this runs on the critical path of `cirvix` on an SSH session, and a
- * per-character repaint is the difference between prompt and sluggish.
+ * One colour is emitted when it *changes* and reset once at the end, instead of
+ * being set and reset around every run. The difference is not cosmetic: a plain
+ * per-run emitter writes `…Xm██` `…39m` `…Xm██` for a gradient that happens to
+ * revisit a colour, and on the previous animation that was 642 redundant
+ * sequences out of 1,437 — the kind of thing that flickers on a real terminal
+ * and reads as jank on a slow link.
+ *
+ * `rgb: null` means "carry the active colour" — spaces have no colour of their
+ * own, and the escape after one is exactly what was being wasted.
  */
-export function gradient(text, { from = 0, to = 1, steps = 8 } = {}) {
-  const s = String(text);
-  const depth = colorDepth();
-  if (depth === "none") return s;
-  if (depth === "16") return style(s, "accent");
-
-  const span = Math.max(1, s.length - 1);
-  const stepFor = (i) => Math.min(steps - 1, Math.max(0, Math.floor(steps * (from + ((to - from) * i) / span))));
+export function paintRuns(runs) {
+  const visible = runs.filter((run) => run.text);
+  if (!colorEnabled()) return visible.map((run) => run.text).join("");
 
   let out = "";
-  let run = "";
-  let runStep = null;
-  const flush = () => {
-    if (!run) return;
-    out += runStep === -1 ? run : paint(run, brandAt((runStep + 0.5) / steps));
-    run = "";
-  };
+  let openedWith = null;
+  let close = "";
+  for (const run of visible) {
+    if (run.rgb) {
+      const pair = colourPair(run.rgb);
+      // Compare sequences rather than colours: on a 16-colour terminal every
+      // colour collapses to the same accent pair, and comparing rgb would
+      // re-emit it once per run.
+      if (pair && pair[0] !== openedWith) {
+        out += pair[0];
+        openedWith = pair[0];
+        close = pair[1];
+      }
+    }
+    out += run.text;
+  }
+  return close ? out + close : out;
+}
+
+/**
+ * Paint a string as a brand gradient across its own length, skipping empty runs
+ * so the result is the shortest escape stream that renders the same picture.
+ */
+export function gradient(text, { from = 0, to = 1, steps = 8, ramp = brandRamp() } = {}) {
+  const s = String(text);
+  if (!colorEnabled() || colorDepth() === "none") return s;
+
+  const span = Math.max(1, s.length - 1);
+  const runes = [];
+  let buffered = "";
+  let rgb = null;
+  const same = (a, b) => (a === null && b === null) || sameRgb(a, b);
+
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
-    const step = ch.trim() === "" ? -1 : stepFor(i);
-    if (step !== runStep) {
-      flush();
-      runStep = step;
+    const next = ch.trim() === ""
+      ? null
+      : brandAt((Math.min(steps - 1, Math.max(0, Math.floor(steps * (from + ((to - from) * i) / span)))) + 0.5) / steps, ramp);
+    if (!same(next, rgb)) {
+      if (buffered) runes.push({ text: buffered, rgb });
+      buffered = "";
+      rgb = next;
     }
-    run += ch;
+    buffered += ch;
   }
-  flush();
-  return out;
+  if (buffered) runes.push({ text: buffered, rgb });
+  return paintRuns(runes);
 }
 
 export { wrapAnsi };

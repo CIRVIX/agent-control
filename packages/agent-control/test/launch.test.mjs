@@ -19,14 +19,51 @@ import { fileURLToPath } from "node:url";
 
 import { stripAnsi } from "../src/core/format.mjs";
 import { brandHeader, logoRows } from "../src/core/ui/primitives.mjs";
-import { LAUNCH_HEIGHT, LAUNCH_WIDTH, launchBanner, launchFrames, playLaunch } from "../src/core/ui/launch.mjs";
-import { colorDepth } from "../src/core/theme.mjs";
+import {
+  LAUNCH_HEIGHT,
+  LAUNCH_WIDTH,
+  launchBanner,
+  launchFrames,
+  playLaunch,
+  revealLines,
+  skipRow,
+  statusRow,
+  withOverlay,
+} from "../src/core/ui/launch.mjs";
+import { colorDepth, setTheme } from "../src/core/theme.mjs";
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../bin/cirvix.mjs", import.meta.url));
 
 /** Verdict chroma. Green means permitted, red denied, amber held — never decoration. */
 const VERDICT_SGR = /\u001b\[(3[123]|9[123])m/;
+
+/**
+ * Visible text: SGR *and* cursor control removed.
+ *
+ * `stripAnsi` only removes SGR sequences, and an animated path legitimately
+ * interleaves `hide cursor` / `show cursor` around its content. Comparing
+ * un-hidden output is how you prove a TTY run says the same thing as a piped one
+ * without asserting the cursor choreography.
+ */
+const visible = (s) => stripAnsi(s).replace(/\u001b\[\?25[lh]/g, "");
+
+/**
+ * Wait until `predicate` holds, or give up.
+ *
+ * The alternative — sleeping for a fixed duration and hoping the animation got
+ * there — encodes this machine's timing into the test and fails on a slower
+ * runner. Waiting for the condition asserts what the code promises (the phase is
+ * named *while the probe is pending*) instead of how fast it renders.
+ */
+async function waitFor(predicate, timeoutMs = 3000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
 
 /**
  * Run `fn` with the given environment, then put it back.
@@ -225,7 +262,7 @@ test("launch: a keypress ends it early and still lands on the plate", async () =
 
   const result = await withEnv(INTERACTIVE_ENV, async () => {
     const playing = playLaunch({ stdout, stdin, pace: 6, budgetMs: 60_000 });
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.ok(await waitFor(() => stdout.chunks.length >= 3), "the sequence never started");
     stdin.press("q");
     return playing;
   });
@@ -293,6 +330,160 @@ test("launch: a piped run prints no escapes and no plate", async (t) => {
   assert.equal(stripAnsi(result.stdout), result.stdout, "ANSI escapes reached a piped run");
   assert.match(result.stdout, /GET STARTED/, "the home screen did not render");
   assert.equal(result.stdout.match(/█████/), null, "the brand plate was drawn into a pipe");
+});
+
+test("launch: the plate reserves its rows before drawing, so it cannot scroll the buffer", async () => {
+  // Without the reservation, starting `cirvix` near the bottom of the terminal
+  // scrolls the buffer and every redraw then erases the user's earlier output.
+  const stdout = ttyStream();
+  await withEnv(INTERACTIVE_ENV, () => playLaunch({ stdout, stdin: fakeStdin(), pace: 1 }));
+
+  const reservation = "\n".repeat(LAUNCH_HEIGHT - 1) + `\u001b[${LAUNCH_HEIGHT - 1}A`;
+  const reservedAt = stdout.chunks.findIndex((chunk) => chunk === reservation);
+  const firstFrameAt = stdout.chunks.findIndex((chunk) => chunk.includes("╭"));
+
+  assert.notEqual(reservedAt, -1, "the block's rows were never reserved");
+  assert.notEqual(firstFrameAt, -1, "no frame was drawn");
+  assert.ok(firstFrameAt > reservedAt, "a frame was drawn before the rows were reserved");
+});
+
+test("launch: once the outline exists, every frame is a closed box", () => {
+  // The wordmark must land *inside* a frame. Frames before `overlayFrom` are the
+  // outline being drawn; every frame after it has both side borders on all ten
+  // inner rows, so nothing floats outside the box.
+  const { frames, overlayFrom } = launchFrames();
+  assert.ok(overlayFrom > 0, "the outline has to be drawn before the wordmark");
+
+  for (let i = overlayFrom; i < frames.length; i++) {
+    const bordered = frames[i].split("\n").filter((line) => (line.match(/│/g) ?? []).length === 2).length;
+    assert.equal(bordered, 10, `frame ${i + 1} left the box open`);
+  }
+});
+
+test("launch: no frame re-sets a colour that is already active", async () => {
+  await withEnv({ FORCE_COLOR: "1", CIRVIX_TRUECOLOR: "0", NO_COLOR: undefined }, () => {
+    const { frames } = launchFrames();
+    const COLOUR = /\u001b\[(?:38;5;\d+|38;2;\d+;\d+;\d+)m/g;
+
+    let seen = 0;
+    for (const [i, frame] of frames.entries()) {
+      for (const line of frame.split("\n")) {
+        const codes = [...line.matchAll(COLOUR)].map((m) => m[0]);
+        seen += codes.length;
+        for (let k = 1; k < codes.length; k++) {
+          assert.notEqual(codes[k], codes[k - 1], `frame ${i + 1} re-set ${codes[k]} already active`);
+        }
+      }
+    }
+    assert.ok(seen > 100, `expected coloured frames, saw ${seen} colour sequences`);
+  });
+});
+
+test("launch: the skip hint and status row are overlay-only, never part of the plate", () => {
+  const { frames, overlayFrom, settle } = launchFrames();
+  const overlaid = withOverlay(frames[overlayFrom], {
+    eyebrow: statusRow({ label: "probing the runtime" }),
+    hint: skipRow(),
+  });
+
+  assert.match(stripAnsi(overlaid), /probing the runtime/);
+  assert.match(stripAnsi(overlaid), /press any key to skip/);
+  assert.equal(overlaid.split("\n").length, LAUNCH_HEIGHT, "the overlay changed the block height");
+
+  // The resting plate is the static header, so nothing transient survives into it.
+  assert.doesNotMatch(stripAnsi(settle), /press any key to skip/);
+  assert.doesNotMatch(stripAnsi(settle), /probing the runtime/);
+});
+
+test("launch: the status row follows the probe — phase, then findings, then gone", async () => {
+  const stdout = ttyStream();
+  const stdin = fakeStdin();
+  let resolveProbe;
+  const pending = new Promise((resolve) => {
+    resolveProbe = resolve;
+  });
+  let findings = "";
+
+  const playing = withEnv(INTERACTIVE_ENV, () =>
+    playLaunch({
+      stdout,
+      stdin,
+      pace: 20,
+      pending,
+      phase: () => "probing the runtime",
+      summary: () => findings,
+    }));
+
+  assert.ok(
+    await waitFor(() => visible(stdout.text()).includes("probing the runtime")),
+    "the phase was never named while the probe was pending",
+  );
+
+  findings = "3 agents  ·  no policy  ·  runtime down";
+  resolveProbe();
+  assert.ok(
+    await waitFor(() => visible(stdout.text()).includes("3 agents")),
+    "the findings never replaced the phase",
+  );
+
+  const result = await playing;
+  assert.equal(result.animated, true);
+
+  // Whatever the resting frame is, it carries neither transient row.
+  const resting = stdout.chunks
+    .filter((chunk) => stripAnsi(chunk).includes("AI AGENT RUNTIME GOVERNANCE"))
+    .pop() ?? "";
+  assert.doesNotMatch(stripAnsi(resting), /press any key to skip/);
+  assert.doesNotMatch(stripAnsi(resting), /probing the runtime|3 agents/);
+});
+
+test("launch: a light background never gets the near-white highlight", async () => {
+  // #d8e6ff is invisible on white, so on the light theme the ramp inverts rather
+  // than flashing rows that look blank.
+  await withEnv({ FORCE_COLOR: "1", CIRVIX_TRUECOLOR: "1", NO_COLOR: undefined }, () => {
+    const dark = launchFrames().frames.join("");
+    assert.ok(dark.includes("216;230;255"), "the dark ramp should reach the highlight");
+
+    setTheme("light");
+    try {
+      const light = launchFrames();
+      const all = light.frames.join("") + light.settle;
+      assert.equal(all.includes("216;230;255"), false, "near-white on a light background is invisible");
+      assert.ok(all.includes("\u001b[38;2;"), "the light ramp still draws a gradient");
+    } finally {
+      setTheme("dark");
+    }
+  });
+});
+
+test("launch: the staggered digest writes exactly what the single write writes", async () => {
+  const lines = ["", "  ◆ CIRVIX v0.2.4", "", "  GET STARTED", ""];
+
+  const plain = ttyStream({ isTTY: false });
+  await revealLines({ stdout: plain, stdin: fakeStdin(), lines, pace: 1 });
+  assert.equal(plain.text(), lines.join("\n"));
+
+  const staggered = ttyStream();
+  const result = await withEnv(INTERACTIVE_ENV, () =>
+    revealLines({ stdout: staggered, stdin: fakeStdin(), lines, pace: 1 }));
+
+  assert.equal(result.staggered, true);
+  assert.ok(staggered.chunks.length > 1, "the digest was written in one chunk");
+  assert.equal(visible(staggered.text()), lines.join("\n"), "a TTY run and a piped run diverged");
+  assert.ok(staggered.text().includes("\u001b[?25l") && staggered.text().includes("\u001b[?25h"));
+});
+
+test("launch: skipping the digest still prints every line", async () => {
+  const lines = Array.from({ length: 12 }, (_, i) => `line ${i}`);
+  const stdout = ttyStream();
+  const stdin = fakeStdin();
+
+  const running = withEnv(INTERACTIVE_ENV, () => revealLines({ stdout, stdin, lines, pace: 20 }));
+  assert.ok(await waitFor(() => stdout.chunks.length >= 3), "the digest never started");
+  stdin.press("q");
+  await running;
+
+  assert.equal(visible(stdout.text()), lines.join("\n"), "a skip cost the user output");
 });
 
 test("launch: --fast and --no-animation are the same home screen as the plain run", async (t) => {

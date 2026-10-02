@@ -1,6 +1,34 @@
 # Quickstart
 
 Node 20+ is required. This guide distinguishes hypothetical policy evaluation, in-process enforcement, and MCP routing. Package installation may use the network; no hosted Cirvix account is needed for local evaluation.
+## First Node wrapper proof
+
+Run this from an empty Node project. The fixture is in-memory; no policy or target file is read.
+
+```bash
+npm install @cirvix_ai/agent-control
+node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+import { CirvixDenied, STARTER_RULES, guard } from "@cirvix_ai/agent-control";
+
+let invoked = 0;
+const tools = guard.wrap(
+  { read_file: async ({ path }) => { invoked += 1; return `Fixture only: ${path}`; } },
+  { agent: "quickstart", rules: STARTER_RULES },
+);
+
+assert.equal(await tools.read_file({ path: "src/index.mjs" }), "Fixture only: src/index.mjs");
+await assert.rejects(
+  tools.read_file({ path: ".env.production" }),
+  (err) => err instanceof CirvixDenied && err.policy === "deny-dotenv-read",
+);
+assert.equal(invoked, 1, "denied calls do not invoke the tool");
+console.log("allow=src/index.mjs deny=.env.production; fixture invocations=1");
+NODE
+```
+
+Register the **returned** `tools` with your executor. The wrapper guards only calls routed through it; the MCP gateway covers only calls actually routed through that gateway. Unwrapped tools, editor built-ins, arbitrary subprocesses and other machine activity remain outside this boundary. This minimal example does not persist decisions; supply an `audit` sink or `onDecision` callback when a local record is needed.
+
 
 ## 1. Install and ask a policy question
 

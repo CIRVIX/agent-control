@@ -5,6 +5,25 @@ Local policy evaluation and enforcement for **tool calls routed through the MCP 
 Apache-2.0. No declared runtime dependencies. Node 20+; Python 3.9+.
 
 ## Quickstart
+### See a policy decision in about a minute
+
+From a Node 20+ project, run:
+
+```bash
+npx --yes @cirvix_ai/agent-control check --action fs.read --resource .env.production
+```
+
+Example output excerpt from `/workspace` (your path will differ):
+
+```text
+DENY  fs.read /workspace/.env.production
+rule    deny-dotenv-read
+```
+
+This exits `1` with the starter rules and no overriding workspace policy. It is a hypothetical policy check: it does **not** read `.env.production`, execute a tool, or write an audit decision. A workspace policy can change the result. To enforce a decision, route calls through the returned SDK wrappers or the MCP gateway; unwrapped tools, editor built-ins, and arbitrary subprocesses remain outside this boundary.
+
+For a runnable in-memory allow/deny wrapper example, continue below or open the [full Quickstart](./docs/quickstart.md).
+
 
 ```bash
 npm install @cirvix_ai/agent-control

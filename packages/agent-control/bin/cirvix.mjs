@@ -34,6 +34,13 @@ import * as policyCmd from "../src/commands/policy.mjs";
 import * as protectCmd from "../src/commands/protect.mjs";
 import * as proveCmd from "../src/commands/prove.mjs";
 import * as passportCmd from "../src/commands/passport.mjs";
+import * as enrollCmd from "../src/commands/enroll.mjs";
+import { createCallerVerifier } from "../src/core/identity.mjs";
+import { resolveIdentityMode } from "../src/core/identity-modes.mjs";
+import { SessionTracker } from "../src/core/session.mjs";
+import { BehavioralBaseline } from "../src/core/baseline.mjs";
+import { KEY_ROLE, loadRoleKey } from "../src/core/keys.mjs";
+import { RevocationEngine, REVOCATION_UNAVAILABLE } from "../src/core/revocation.mjs";
 import { init as initCmd } from "../src/commands/init.mjs";
 import { status as statusCmd } from "../src/commands/status.mjs";
 import { upgrade as upgradeCmd } from "../src/commands/upgrade.mjs";
@@ -42,7 +49,140 @@ import { commercialNotices } from "../src/core/notices.mjs";
 import { demo as demoCmd } from "../src/commands/demo.mjs";
 import { welcome } from "../src/commands/welcome.mjs";
 import { doctor } from "../src/commands/doctor.mjs";
+import { resolveAuthorityPosture, describeAuthorityPosture } from "../src/core/authority-posture.mjs";
 import { login, logout, readCredentials } from "../src/commands/login.mjs";
+
+/**
+ * The control plane's PINNED revocation public key(s), read from disk.
+ *
+ * An endpoint enrolled with a fleet trusts two things and nothing else: its
+ * own operator key (which lives in the state directory) and the control plane's
+ * key, which must be handed over as a FILE so the endpoint is not trusting
+ * "whatever the feed said". Absent means local-only trust, which is the
+ * correct default — a fleet path is an explicit operator decision.
+ */
+/**
+ * Keeps an endpoint's revocation state in step with the control plane.
+ *
+ * The fabric is only a FLEET fabric if something pulls: without this, an
+ * endpoint reads the feed exactly never and a control-plane kill would only
+ * arrive if an operator happened to run `sync`. The loop is deliberately
+ * boring — verify against the pinned key, append only newer epochs, log the
+ * measured latency — and its failure mode is the ENGINE's: a feed that stops
+ * arriving becomes stale, and staleness is DENY or HOLD by policy, never a
+ * quiet ALLOW. The timer is unref'd so it never holds a CLI process open.
+ */
+function startRevocationSync({ engine, flags, cwd, apiUrl = null, apiKey = null, log }) {
+  const feed = flags["revocation-feed"] ?? process.env.CIRVIX_REVOCATION_FEED ?? (apiUrl ? `${apiUrl}/v1/revocations` : null);
+  if (!feed) return () => {};
+  const intervalMs = Number(flags["revocation-interval"] ?? process.env.CIRVIX_REVOCATION_INTERVAL ?? 60_000);
+  if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
+    log("revocation feed configured with an unusable interval; fleet propagation is DISABLED");
+    return () => {};
+  }
+  const key = flags.key ?? apiKey ?? process.env.CIRVIX_API_KEY ?? null;
+  const run = async () => {
+    try {
+      const result = await engine.sync({
+        url: String(feed),
+        apiKey: key ? String(key) : null,
+        operatorPublicKey: engine.publicKeyOverride ?? engine.publicKey,
+      });
+      if (result.accepted) {
+        const worst = Math.max(...result.measurements.filter((m) => m.status === "applied").map((m) => m.propagationMs ?? 0));
+        log(`revocation feed: applied ${result.accepted} event(s), epoch ${result.epoch}, worst propagation ${worst}ms`);
+      }
+    } catch (err) {
+      log(`revocation feed unreachable (${err.message}); enforcement continues on local state and the staleness policy bounds it`);
+    }
+  };
+  void run();
+  const timer = setInterval(() => void run(), intervalMs);
+  if (typeof timer.unref === "function") timer.unref();
+  return () => clearInterval(timer);
+}
+
+async function revocationVerificationKeys(flags, cwd) {
+  const spec = flags["revocation-key"];
+  if (!spec) return [];
+  const paths = String(spec).split(",").map((p) => p.trim()).filter(Boolean);
+  const keys = [];
+  for (const path of paths) {
+    keys.push(await readFile(resolve(cwd, path), "utf8"));
+  }
+  return keys;
+}
+
+/**
+ * The live AUTHORITY context every shipped boundary runs on (P0-B closure).
+ *
+ * WHY THIS EXISTS. Three separate gaps made authority inert in production:
+ *
+ *   1. the MCP gateway built no delegation verifier at all, so a caller could
+ *      present a signed grant and the call proceeded as if it had not —
+ *      authority was decorative on the most-used transport;
+ *   2. the socket runtime built one with no tenant, no audience and no
+ *      principal store, so a grant from another tenant, issued for another
+ *      runtime, or rooted in a human who no longer exists still verified;
+ *   3. no composition root ever loaded a MISSION, so capabilities gated nothing.
+ *
+ * One helper, used by both roots, closes all three. `audience` is derived when
+ * the operator does not name it (`agent:<name>` on the gateway, `runtime:<env>`
+ * on the socket) because a boundary that names no audience accepts a grant
+ * issued for anywhere. `doctor` prints the derived value.
+ *
+ * Read failures are not fatal here: `cirvix enroll` generates the authority key
+ * on first use, and a host that has never enrolled has nothing to verify
+ * against — the delegation verifier then holds no keys and refuses every chain,
+ * which is the correct direction.
+ */
+/**
+ * The policy stamp published for this state directory, if any (P0-D §15).
+ *
+ * `<stateDir>/policy.stamp.json` as `{ version, hash }`, written by an operator
+ * or the control plane. The canonical core computes the fingerprint of the rule
+ * set it is ACTUALLY enforcing and compares; when they differ the runtime
+ * returns a `stale-policy` decision instead of claiming the published version.
+ *
+ * Absent is reported as "nothing published to compare against" — never as
+ * agreement. A version with no hash cannot be compared either, and saying so is
+ * the honest answer rather than a green light.
+ */
+async function readPublishedPolicyStamp(stateDir) {
+  try {
+    const raw = JSON.parse(await readFile(join(stateDir, "policy.stamp.json"), "utf8"));
+    if (!raw || typeof raw !== "object") return null;
+    const hash = typeof raw.hash === "string" && raw.hash ? raw.hash : null;
+    const version = raw.version ?? raw.policyVersion ?? null;
+    if (!hash && version === null) return null;
+    return { version, hash };
+  } catch {
+    return null;
+  }
+}
+
+async function authorityContextFor({ stateDir, flags, cwd, tenant = null, audience = null, log = () => {} }) {
+  const { Ed25519DelegationVerifier } = await import("../src/core/delegation-ed25519.mjs");
+  const { PrincipalStore } = await import("../src/core/principal.mjs");
+  const { MissionStore } = await import("../src/core/authority-store.mjs");
+  const authorityKey = await loadRoleKey(stateDir, KEY_ROLE.AUTHORITY).catch(() => null);
+  const principalStore = new PrincipalStore(stateDir);
+  const delegationVerifier = await new Ed25519DelegationVerifier({
+    stateDir,
+    expectedTenant: tenant,
+    expectedAudience: audience,
+    // A chain whose root names no authenticated principal is authority nobody
+    // can withdraw, so shipped boundaries refuse it unless an operator opts out.
+    requireIssuerPrincipal: !flags["allow-anonymous-root"],
+    principalStore,
+  }).init();
+  const missionStore = new MissionStore(stateDir);
+  const missions = await missionStore.registry({ tenantId: tenant, authorityPublicKey: authorityKey?.publicKey ?? null });
+  if (missions.rejected?.length) {
+    log(`${missions.rejected.length} mission record(s) refused: not signed by this host's authority key`);
+  }
+  return { delegationVerifier, principalStore, missionStore, missions, authorityKey, tenant, audience };
+}
 
 /**
  * Read from the manifest, never written down twice.
@@ -87,7 +227,7 @@ export function getHelpText() {
     policy list           Display active policy rules and match conditions
 
   ${bold("HISTORY")}
-    logs                  Inspect recent decisions (--last 50, --risk high, --tree <id>)
+    logs                  Inspect recent decisions (--last 50, --risk high, --consequence financial_transfer, --tree <id>)
     replay <id>           Re-evaluate a recorded call under a candidate policy
     audit verify          Cryptographically verify the hash chain of recorded decisions
 
@@ -102,9 +242,33 @@ export function getHelpText() {
     doctor                Diagnostic self-check: policy, socket, daemon, and permissions
     check                 Evaluate a single tool call directly against policy
     why <id>              Explain decision logic from local history or control plane
-    kill                  Emergency freeze: suspend active agent sessions
+    kill                  Durable revocation: sign a revocation event that every
+                          enforcement process honours (agent, tenant, delegation,
+                          mission, capability, credential, session, tool, resource)
+    kill --list           Show the revocation journal's real posture
+    kill --release <id>   Release a revocation — requires an authenticated release
+                          officer and the separately-registered release key
+    authority principal   Enrol an authenticated human/org principal (its own key,
+                          role, tenant, status) that may issue authority
+    authority grant       Issue a signed grant for one agent and AUDIENCE, from an
+                          authenticated principal (issue | list | show | revoke)
+    authority mission     Durable, host-signed missions and capabilities for one
+                          tenant (create | list | show | revoke | rotate | capability)
+    authority verify      Resolve a grant the way a boundary would: who issued it,
+                          for which audience and tenant, and whether it still holds
+    authority release-key Register the release officer's PUBLIC key, so this host
+                          can verify a release it cannot mint
+    --require-authority   Refuse any governed call that presents no signed human
+                          authority (also the hardened default when this host has
+                          an authority model: ≥1 registered principal)
+    --authority-policy <p>  required | policy-only — override the derived posture
+                          explicitly; policy-only is the compatibility posture
+                          and is reported as such by doctor and by status
     shadow                Run candidate policy alongside active rules in shadow mode
     redteam               Adversarial simulation against active policy
+    enroll <agent>        Give an agent a verifiable identity (signed credential + runtime key)
+    identity              List enrolled agents, their keys, and their status
+    --identity-mode <m>   production (default) | bootstrap | dev-insecure — how the gateway and runtime treat unverified callers; never inferred from enrolment state
     passport              Inspect or sign agent authorization passports
     prove                 Generate cryptographic proofs for compliance audit
     login / logout        Link local machine with Cirvix Cloud control plane
@@ -178,7 +342,14 @@ async function controlPlane(flags) {
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
-  const booleans = new Set(["json", "help", "version", "verbose", "v", "deep", "fast", "no-animation", "fail-on-risk", "sign", "badge", "http", "diff", "strict", "source", "force", "apply", "dry-run", "list", "watch", "follow", "w", "status", "browser", "all", "vault"]);
+  const booleans = new Set([
+    "json", "help", "version", "verbose", "v", "deep", "fast", "no-animation", "fail-on-risk", "sign", "badge",
+    "http", "diff", "strict", "source", "force", "apply", "dry-run", "list", "watch", "follow", "w", "status",
+    "browser", "all", "vault",
+    // Authority lifecycle (P0-B): these are postures, not values. Without them
+    // here the parser demands a value and `--single-use --max-uses 2` fails.
+    "single-use", "require-authority", "allow-anonymous-root", "no-cascade",
+  ]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-v") {
@@ -443,6 +614,54 @@ async function main() {
       return;
     }
 
+    case "enroll": {
+      const sub = positional[1];
+      const { output, exitCode } = await enrollCmd.enroll({
+        agentId: sub && !sub.startsWith("-") ? sub : null,
+        stateDir: stateDirFor(flags, cwd),
+        runtime: flags.runtime ? String(flags.runtime) : null,
+        tenant: flags.tenant ? String(flags.tenant) : "local",
+        environment: flags.env ? String(flags.env) : "local",
+        owner: flags.owner ? String(flags.owner) : null,
+        ttlHours: flags["ttl-hours"] ? Number(flags["ttl-hours"]) : null,
+        json: Boolean(flags.json),
+      });
+      if (output) process.stdout.write(output + "\n");
+      return exitCode ?? 0;
+    }
+
+    case "identity": {
+      const { output, exitCode } = await enrollCmd.identity({
+        stateDir: stateDirFor(flags, cwd),
+        json: Boolean(flags.json),
+      });
+      if (output) process.stdout.write(output + "\n");
+      return exitCode ?? 0;
+    }
+
+    /* ---------------------------------------------------------- authority */
+    case "authority": {
+      /* The production lifecycle for WHO may authorize WHAT. Every mutating
+         act is authenticated as an enrolled PRINCIPAL (its own key over a
+         fresh challenge), so "a human authorized this" is answerable at
+         runtime and in an incident review. */
+      const { executeAuthorityCommand } = await import("../src/commands/authority.mjs");
+      const authorityResult = await executeAuthorityCommand({
+        stateDir: stateDirFor(flags, cwd),
+        group: positional[1] ?? null,
+        action: positional[2] ?? null,
+        args: positional.slice(3),
+        flags,
+        json: Boolean(flags.json),
+        cwd,
+      });
+      if (authorityResult.output) process.stdout.write(authorityResult.output + "\n");
+      // The EXIT CODE is the contract for a scripted lifecycle: a refused act
+      // must not look like a successful one. (main() exits with its return
+      // value, so assigning process.exitCode here would be overwritten.)
+      return authorityResult.code;
+    }
+
     case "passport": {
       const policyFile = await loadPolicy(flags.policy, cwd);
       const { output, exitCode } = await passportCmd.passport({
@@ -559,6 +778,19 @@ async function main() {
       const agentName = String(flags.agent ?? "local");
       const environment = String(flags.env ?? "local");
 
+      /* Identity mode is EXPLICIT: --identity-mode flag, then
+         CIRVIX_IDENTITY_MODE, then PRODUCTION. Never inferred from enrolment
+         state — an unenrolled production gateway REFUSES callers instead of
+         silently accepting self-declared agent names (doctor reports the
+         active mode). Set --identity-mode bootstrap for the one-command
+         enrollment window, or --identity-mode dev-insecure for the explicit
+         developer compatibility profile. */
+      const identityMode = resolveIdentityMode({ flag: flags["identity-mode"], env: process.env.CIRVIX_IDENTITY_MODE });
+      const gwIdentity = await createCallerVerifier({ stateDir });
+      if (!gwIdentity && identityMode === "production") {
+        log("identity mode = production, but no agents are enrolled yet: callers will be REFUSED until you run `cirvix enroll AGENT_ID` (or start an explicit window with --identity-mode bootstrap).");
+      }
+
       // Metered on the same terms as the local socket. The gateway is the path
       // most Free-tier traffic actually takes, and it was the one measuring
       // nothing.
@@ -571,9 +803,77 @@ async function main() {
         meter: gwMeter,
         write: (s) => process.stderr.write(s),
       });
+      /* The durable revocation fabric, on the MCP path too (P0-C). Without
+         it, `cirvix kill` reached the socket engine and never the gateway —
+         the transport most traffic actually takes. */
+      const gwRevocationKeys = await revocationVerificationKeys(flags, cwd);
+      /* A gateway enrolled with a control plane follows its revocation feed by
+         default: an endpoint that must be told to listen is an endpoint that
+         will not. `--revocation-feed off` opts out explicitly. */
+      const gwFeed =
+        flags["revocation-feed"] === "off"
+          ? null
+          : flags["revocation-feed"] ?? process.env.CIRVIX_REVOCATION_FEED ?? (daemon && apiUrl ? `${apiUrl}/v1/revocations` : null);
+      const gwRevocation = await new RevocationEngine({
+        stateDir,
+        onUnavailable: flags["revocation-policy"] === "hold" ? REVOCATION_UNAVAILABLE.HOLD : REVOCATION_UNAVAILABLE.DENY,
+        federation: gwFeed ? { url: String(gwFeed) } : null,
+        publicKeys: gwRevocationKeys,
+        log,
+      }).init();
+      startRevocationSync({ engine: gwRevocation, flags, cwd, apiUrl, apiKey, log });
+      /* HUMAN-AUTHORITY ENFORCEMENT ON THE MCP PATH (P0-B). Without this the
+         gateway accepted whatever `_meta.cirvix.delegation` it was handed and
+         enforced policy alone — a signed grant was advisory. */
+      const gwTenant = String(flags.tenant ?? process.env.CIRVIX_TENANT ?? "local");
+      const gwAudience = String(flags.audience ?? process.env.CIRVIX_AUDIENCE ?? `agent:${agentName}`);
+      const gwAuthority = await authorityContextFor({ stateDir, flags, cwd, tenant: gwTenant, audience: gwAudience, log });
+      /* `--require-authority`: every governed call must carry signed human
+         authority, or it is refused. Without it, policy alone still decides a
+         call that presents none — but a grant that IS presented is always
+         verified, never ignored. */
+      const requireAuthority = Boolean(flags["require-authority"] ?? process.env.CIRVIX_REQUIRE_AUTHORITY ?? false);
+      /* THE AUTHORITY POSTURE IS DERIVED, NOT ASSUMED (P0-D gate item 5). An
+         explicit --authority-policy or --require-authority wins; otherwise an
+         authority model on this host makes REQUIRED the hardened default, and
+         only a host with NO authority model runs policy-only — stated as the
+         compatibility posture it is. Same derivation both surfaces. */
+      const gwPosture = await resolveAuthorityPosture({
+        requireAuthority,
+        authorityPolicy: flags["authority-policy"] ?? process.env.CIRVIX_AUTHORITY_POLICY ?? null,
+        principalStore: gwAuthority.principalStore,
+        log,
+      });
+      const requireDelegation = gwPosture.required;
+      log(describeAuthorityPosture(gwPosture));
+      /* The published stamp, so the MCP boundary can tell an operator when it is
+         enforcing an older policy than the one that was published. */
+      const gwPublishedPolicy = await readPublishedPolicyStamp(stateDir);
+      /* THE CREDENTIAL BROKER, on the MCP path (P0-D). The socket runtime held
+         the vault and this boundary did not, so a call carrying a secret handle
+         was substituted on the local socket and passed through UNSUBSTITUTED to
+         the upstream server here — the same policy, two different answers, on
+         the transport most traffic takes. Same construction, same `held` gate,
+         as the runtime: a vault holding nothing is null, and the stage reports
+         itself not-applicable rather than pretending to broker. */
+      const gwVault = new Vault({ log: (m) => process.stderr.write(`[cirvix] ${m}\n`) });
+      if (flags.vault) gwVault.loadFromEnv();
+      const gwMode = flags.mode === "audit" ? MODE.AUDIT : MODE.ENFORCE;
       const gw = new Gateway({
         servers,
         rules: daemon?.currentRules().length ? daemon.currentRules() : rules,
+        revocation: gwRevocation,
+        delegation: gwAuthority.delegationVerifier,
+        requireDelegation,
+        /* P0-D: the stages the gateway used to skip. Session tracking and the
+           behavioural baseline are the production implementations (the Gateway
+           constructs them); the policy stamp and the engine mode are stated
+           here; and `compatibility: false` is what stops a shipped boundary
+           from being described as an in-process library. */
+        mode: gwMode,
+        publishedPolicy: gwPublishedPolicy,
+        compatibility: false,
+        missions: gwAuthority.missions,
         audit: chain,
         approvals,
         cwd,
@@ -581,6 +881,13 @@ async function main() {
         licence: gwLicence,
         meter: gwMeter,
         agents: new AgentRegistry(),
+        secrets: gwVault.held ? gwVault : null,
+        // Identity enforcement: callers must present a credential and a signed
+        // proof before policy runs, and the EXPLICIT mode decides what happens
+        // when they cannot — production refuses, bootstrap/dev-insecure accept
+        // unverified callers with a loud, per-decision marker.
+        identity: gwIdentity,
+        identityMode,
         log,
         onDecision: (d) => {
           if (d.kind === "decision") gwNotice(d);
@@ -1103,8 +1410,12 @@ async function main() {
         apply: Boolean(flags.apply),
         dryRun: Boolean(flags["dry-run"]),
         rollback: flags.rollback ? (typeof flags.rollback === "string" ? flags.rollback : true) : false,
+        pace: flags.fast ? 0 : undefined,
+        animate: flags["no-animation"] ? false : undefined,
       });
-      process.stdout.write(output + "\n");
+      // When the plate played, init wrote its own report staggered and returns
+      // an empty string — same contract `protect` uses.
+      if (output) process.stdout.write(output + "\n");
       return result.ok ? 0 : 1;
     }
 
@@ -1128,12 +1439,29 @@ async function main() {
 
     /* ----------------------------------------------------------------- kill */
     case "kill": {
+      /* DURABLE REVOCATION (P0-C). The state directory is not optional: the
+         whole point of this command is that the freeze outlives the process
+         that issued it, so it needs somewhere to live that every enforcement
+         process reads. `--scope` uses the revocation vocabulary. */
+      const killStateDir = stateDirFor(flags, cwd);
       const { executeKillCommand } = await import("../src/commands/kill.mjs");
       const { output, code } = await executeKillCommand({
+        stateDir: killStateDir,
         scope: flags.scope ?? "agent",
         target: positional[1] ?? flags.target ?? null,
         reason: flags.reason ?? "Emergency freeze triggered via CLI",
         release: flags.release ?? null,
+        // Releasing a containment is authenticated: a signed authorization from
+        // a release officer, or their own key signing a challenge here.
+        authorization: flags.authorization ?? null,
+        principal: flags.principal ?? null,
+        principalKey: flags["principal-key"] ?? null,
+        // The release officer's own authority key, wherever they keep it.
+        releaseKey: flags["release-key"] ?? null,
+        ttlMs: flags.ttl ? Number(flags.ttl) : null,
+        cascade: flags["no-cascade"] ? false : true,
+        issuer: flags.issuer ?? null,
+        policyVersion: flags["policy-version"] ?? null,
         list: Boolean(flags.list),
         json: Boolean(flags.json),
       });
@@ -1278,6 +1606,7 @@ async function main() {
         const tail = journal.query(existing, {
           last: flags.last ? Number(flags.last) : 10,
           risk: typeof flags.risk === "string" ? flags.risk : undefined,
+          consequence: typeof flags.consequence === "string" ? flags.consequence : undefined,
           decision: typeof flags.decision === "string" ? flags.decision : undefined,
         });
         live.header();
@@ -1295,6 +1624,7 @@ async function main() {
             const fresh = all.slice(known);
             const filtered = journal.query(fresh, {
               risk: typeof flags.risk === "string" ? flags.risk : undefined,
+              consequence: typeof flags.consequence === "string" ? flags.consequence : undefined,
               decision: typeof flags.decision === "string" ? flags.decision : undefined,
               agent: typeof flags.agent === "string" ? flags.agent : undefined,
               tool: typeof flags.tool === "string" ? flags.tool : undefined,
@@ -1345,6 +1675,7 @@ async function main() {
       const selected = journal.query(records, {
         last: flags.last ? Number(flags.last) : 25,
         risk: typeof flags.risk === "string" ? flags.risk : undefined,
+        consequence: typeof flags.consequence === "string" ? flags.consequence : undefined,
         decision: typeof flags.decision === "string" ? flags.decision : undefined,
         agent: typeof flags.agent === "string" ? flags.agent : undefined,
         tool: typeof flags.tool === "string" ? flags.tool : undefined,
@@ -1520,6 +1851,65 @@ async function main() {
          honest source for them is the decision stream itself. */
       const counters = { blocked: 0, approvals: 0, violations: 0 };
       const seenAgents = new Set();
+      /* P0-B: delegation is LIVE production enforcement. Signed Ed25519
+         grants are verified on this path — a socket caller presenting a chain
+         or a one-time envelope is narrowed to exactly its intersection, and a
+         grant that widens, expires, is revoked, or belongs to another agent
+         is refused by rule, not by policy's good mood. */
+      const rtTenant = String(flags.tenant ?? process.env.CIRVIX_TENANT ?? "local");
+      const rtAudience = String(flags.audience ?? process.env.CIRVIX_AUDIENCE ?? `runtime:${String(flags.env ?? "local")}`);
+      const rtAuthority = await authorityContextFor({
+        stateDir,
+        flags,
+        cwd,
+        tenant: rtTenant,
+        audience: rtAudience,
+        log: (m) => process.stderr.write(`[cirvix] ${m}\n`),
+      });
+      const delegationVerifier = rtAuthority.delegationVerifier;
+
+      /* P0-C: the durable revocation fabric. Revocations written by ANY
+         process (including `cirvix kill` in another shell) are read before
+         every decision, so a kill reaches a running runtime without a
+         restart. The staleness policy is explicit: `--revocation-policy hold`
+         escalates to approval when the state cannot be trusted, anything else
+         refuses. */
+      const runtimeRevocationFeed = flags["revocation-feed"] ?? process.env.CIRVIX_REVOCATION_FEED ?? null;
+      const revocationEngine = await new RevocationEngine({
+        stateDir,
+        onUnavailable: flags["revocation-policy"] === "hold" ? REVOCATION_UNAVAILABLE.HOLD : REVOCATION_UNAVAILABLE.DENY,
+        federation: runtimeRevocationFeed ? { url: String(runtimeRevocationFeed) } : null,
+        publicKeys: await revocationVerificationKeys(flags, cwd),
+        log: (m) => process.stderr.write(`[cirvix] ${m}\n`),
+      }).init();
+      startRevocationSync({
+        engine: revocationEngine,
+        flags,
+        cwd,
+        log: (m) => process.stderr.write(`[cirvix] ${m}\n`),
+      });
+
+      /* Identity is resolved BEFORE the engine is built (P0-D). The socket
+         engine used to be constructed with no identity at all: the server
+         verified the caller and handed the engine a bare name, so the engine
+         that decided did not know who had been authenticated and could not say
+         so on the record. */
+      const rtIdentityMode = resolveIdentityMode({ flag: flags["identity-mode"], env: process.env.CIRVIX_IDENTITY_MODE });
+      /* Same statement, same words, same derivation as the gateway: the socket
+         may not run a different authority posture from the MCP path by accident
+         (P0-D gate item 5). */
+      const rtRequireAuthority = Boolean(flags["require-authority"] ?? process.env.CIRVIX_REQUIRE_AUTHORITY ?? false);
+      const rtPosture = await resolveAuthorityPosture({
+        requireAuthority: rtRequireAuthority,
+        authorityPolicy: flags["authority-policy"] ?? process.env.CIRVIX_AUTHORITY_POLICY ?? null,
+        principalStore: rtAuthority.principalStore,
+        log: (m) => process.stderr.write(`[cirvix] ${m}\n`),
+      });
+      const rtRequireDelegation = rtPosture.required;
+      process.stderr.write(`[cirvix] ${describeAuthorityPosture(rtPosture)}\n`);
+      const rtIdentity = await createCallerVerifier({ stateDir });
+      const publishedPolicy = await readPublishedPolicyStamp(stateDir);
+
       const pipeline = new Pipeline({
         rules,
         cwd,
@@ -1529,9 +1919,22 @@ async function main() {
         audit: chain,
         secrets: vault.held ? vault : null,
         approvals,
+        delegation: delegationVerifier,
+        requireDelegation: rtRequireDelegation,
+        missions: rtAuthority.missions,
+        revocation: revocationEngine,
         licence: runtimeLicence,
         meter: runtimeMeter,
         agents: new AgentRegistry(),
+        /* The stages this surface already ran, plus the one it did not have.
+           Session tracking, the behavioural baseline and drift are production
+           implementations here, not test fixtures. */
+        identity: rtIdentity,
+        identityMode: rtIdentityMode,
+        sessionTracker: new SessionTracker(),
+        baseline: new BehavioralBaseline(),
+        publishedPolicy,
+        compatibility: false,
         onEvent: (e) => {
           if (e.kind === "decision") {
             notice(e);
@@ -1547,10 +1950,14 @@ async function main() {
 
       const token = await writeToken(stateDir);
       const endpoint = defaultEndpoint(stateDir);
+      // Same EXPLICIT identity mode as the gateway — never enrolment-state
+      // inference. PRODUCTION refuses socket callers it cannot verify.
       const server = new UdsServer({
         pipeline,
         endpoint,
         token,
+        identity: rtIdentity,
+        identityMode: rtIdentityMode,
         log: (m) => process.stdout.write(`[cirvix] ${m}\n`),
         status: () => ({
           mode: pipeline.mode,
@@ -1648,7 +2055,16 @@ async function main() {
     }
 
     case "doctor": {
-      return doctor({ cwd, json: Boolean(flags.json) });
+      return doctor({
+        cwd,
+        stateDir: stateDirFor(flags, cwd),
+        json: Boolean(flags.json),
+        identityModeFlag: flags["identity-mode"],
+        revocationPolicy: flags["revocation-policy"] === "hold" ? "hold" : "deny",
+        revocationFeed: flags["revocation-feed"] ?? process.env.CIRVIX_REVOCATION_FEED ?? null,
+        requireAuthorityFlag: Boolean(flags["require-authority"] ?? false),
+        authorityPolicyFlag: flags["authority-policy"] ?? null,
+      });
     }
 
     case "login": {

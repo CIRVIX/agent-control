@@ -34,10 +34,12 @@ const DRIFT = process.env.CIRVIX_TEST_DRIFT === "1";
 const ACCESS_LOG = process.env.CIRVIX_TEST_ACCESS_LOG ?? null;
 
 /** The receipt. Written before the read is attempted, never after. */
-function recordAccess(kind, target) {
+function recordAccess(kind, target, detail = undefined) {
   if (!ACCESS_LOG) return;
   try {
-    appendFileSync(ACCESS_LOG, JSON.stringify({ kind, target, at: Date.now() }) + "\n", "utf8");
+    /* `detail` carries the evidence a credential-substitution test needs: what
+       the upstream ACTUALLY received, not what a boundary claimed it sent. */
+    appendFileSync(ACCESS_LOG, JSON.stringify(detail === undefined ? { kind, target, at: Date.now() } : { kind, target, detail, at: Date.now() }) + "\n", "utf8");
   } catch {
     /* the test will notice an empty log */
   }
@@ -188,7 +190,7 @@ const framer = new MessageFramer({
       // A fetch returns hostile content, so the return-path sanitizer has
       // something real to strip.
       if (name === "fetch_url") {
-        recordAccess("tools/call:fetch_url", args?.url ?? "");
+        recordAccess("tools/call:fetch_url", args?.url ?? "", args?.headers?.Authorization ?? null);
         return write({
           jsonrpc: "2.0",
           id: m.id,

@@ -40,9 +40,22 @@ class ArtifactInventory(unittest.TestCase):
             sdist[name] = (ROOT / name).read_bytes()
         for path in (ROOT / "tests").glob("*.py"):
             sdist[f"tests/{path.name}"] = path.read_bytes()
-        fixture = ROOT / "conformance" / "policy-conformance.json"
-        if not fixture.is_file():
-            fixture = ROOT.parent / "conformance" / "policy-conformance.json"
+        # The fixture is beside the package in this repository and is
+        # force-included under tests/fixtures in the sdist. Both layouts run
+        # this suite — the release verifier runs it from the extracted sdist —
+        # so both are looked up. A distribution whose tests cannot find their
+        # own fixture is a distribution whose tests cannot be run.
+        fixture = None
+        for candidate in (
+            ROOT / "conformance" / "policy-conformance.json",
+            ROOT.parent / "conformance" / "policy-conformance.json",
+            ROOT / "tests" / "fixtures" / "policy-conformance.json",
+        ):
+            if candidate.is_file():
+                fixture = candidate
+                break
+        if fixture is None:
+            raise FileNotFoundError("conformance fixture not found in this layout")
         sdist["conformance/policy-conformance.json"] = fixture.read_bytes()
         sdist["PKG-INFO"] = metadata.encode()
         sdist.update(sdist_extra or {})

@@ -63,6 +63,30 @@ export {
   requestId,
 } from "./core/normalize.mjs";
 
+/* THE CANONICAL AUTHORIZATION CORE (P0-D) -------------------------------- */
+/* The one implementation of the stage order and of what each stage means.
+   `Guard` and `Pipeline` are transport adapters over it; an embedder that
+   wants the decisions without either adapter — or that wants to assert the
+   posture its boundary actually enforces — uses these. */
+export {
+  AUTHORITY_POSTURE,
+  CANONICAL_STAGES,
+  CANONICAL_VERB,
+  DECISION_PRECEDENCE,
+  SANDBOXED_PRINCIPAL as CANONICAL_SANDBOXED_PRINCIPAL,
+  SECURITY_PROFILE,
+  STAGE_CONTRACT,
+  STAGE_STATUS,
+  SURFACE,
+  VERB_PRODUCER,
+  authorize,
+  defaultValidateRequest,
+  describeCanonicalPosture,
+  policyStamp,
+  resolveSecurityProfile,
+  stagePlan,
+} from "./core/authorize.mjs";
+
 /* The runtime ------------------------------------------------------------- */
 export { Pipeline } from "./core/pipeline.mjs";
 export { UdsClient, UdsServer, defaultEndpoint, readToken, tokenPath, writeToken } from "./core/uds.mjs";
@@ -132,6 +156,50 @@ export {
   scopePermits,
 } from "./core/delegation.mjs";
 
+/* Human / organization principals ---------------------------------------- */
+export {
+  PrincipalStore,
+  PRINCIPAL_VERSION,
+  PRINCIPAL_KIND,
+  PRINCIPAL_STATUS,
+  PRINCIPAL_STATUSES,
+  PRINCIPAL_ROLE,
+  PRINCIPAL_ROLES,
+  PRINCIPAL_AUTH_METHOD,
+  PRINCIPAL_ERROR,
+  ISSUER_ROLES,
+  RELEASE_ROLES,
+  authenticatePrincipal,
+  challengeBody,
+  issueChallenge,
+  principalRecordPath,
+  principalStatusAt,
+  principalsDir,
+  releaseAuthorities,
+} from "./core/principal.mjs";
+
+/* Ed25519 delegation (the production authority path) ---------------------- */
+export {
+  Ed25519DelegationIssuer,
+  Ed25519DelegationVerifier,
+  DelegationStore,
+  DELEGATION_TOKEN_VERSION,
+  DELEGATION_KIND,
+  buildCrossInstanceEnvelope,
+  buildGrantPayload,
+  signGrant,
+  verifyEnvelopeToken,
+  verifyGrantToken,
+} from "./core/delegation-ed25519.mjs";
+
+/* Durable missions and capabilities --------------------------------------- */
+export {
+  MissionStore,
+  AUTHORITY_RECORD_KIND,
+  AUTHORITY_RECORD_VERSION,
+  AUTHORITY_RECORD_ERROR,
+} from "./core/authority-store.mjs";
+
 /* Approvals --------------------------------------------------------------- */
 export { ApprovalStore, STATE as APPROVAL_STATE, approvalFingerprint } from "./core/approvals.mjs";
 
@@ -193,7 +261,51 @@ export { ConfigBackupManager, SafeConfigPatcher, parseConfigJson, stripJsonComme
 export { evaluateIntent, classifyIntent, INTENT_CATEGORIES } from "./core/intent.mjs";
 export { SessionTracker, CHAIN_TYPES } from "./core/session.mjs";
 export { BehavioralBaseline } from "./core/baseline.mjs";
+export {
+  CallerVerifier,
+  NonceCache,
+  createCallerVerifier,
+  createIdentityCredential,
+  enrollAgent,
+  requestDigest,
+  signIdentityCredential,
+  signRequest,
+  verifyIdentityCredential,
+} from "./core/identity.mjs";
+export { AGENT_STATUS, AgentStore, agentsDir, agentRecordPath } from "./core/identity-store.mjs";
+export { IDENTITY_MODE, IDENTITY_MODES, normalizeIdentityMode, resolveIdentityMode } from "./core/identity-modes.mjs";
+export {
+  ensureRoleKey,
+  loadRoleKey,
+  loadRolePublicKey,
+  publicRoleKey,
+  registerRolePublicKey,
+  roleKeyPath,
+  rolePublicKeyPath,
+  KEY_ROLE,
+  KEY_ROLES,
+} from "./core/keys.mjs";
 export { KillSwitchEngine, globalKillSwitch, KILL_SCOPES } from "./core/kill-switch.mjs";
+export {
+  RevocationStore,
+  RevocationEngine,
+  REVOCATION_ACTION,
+  REVOCATION_SCOPE,
+  REVOCATION_SCOPES,
+  REVOCATION_PRECEDENCE,
+  REVOCATION_UNAVAILABLE,
+  buildRevocationEvent,
+  signRevocationEvent,
+  verifyRevocationEvent,
+  revocationEventHash,
+  foldRevocations,
+  evaluateRevocations,
+  scopeSubjects,
+  cascadeRevocation,
+  enforceRevocation,
+  enforceRevocationAsync,
+  revocationContextFor,
+} from "./core/revocation.mjs";
 export { AgentSandbox, SANDBOX_ADAPTERS } from "./core/sandbox.mjs";
 export { ShadowEngine } from "./core/shadow.mjs";
 export { runRedTeamSuite, BUILTIN_ATTACK_PLUGINS, ATTACK_VECTORS } from "./core/redteam/index.mjs";

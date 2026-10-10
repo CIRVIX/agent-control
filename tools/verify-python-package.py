@@ -50,7 +50,7 @@ def extract_checked(archive, destination, canonical, version):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--temp-parent", type=Path, default=Path(tempfile.gettempdir()))
-    parser.add_argument("--expected-version", default="0.2.1")
+    parser.add_argument("--expected-version", default="0.3.0")
     args = parser.parse_args()
     output = Path(tempfile.mkdtemp(prefix="cirvix-sdist-", dir=args.temp_parent)).resolve()
     print(f"Artifacts retained at: {output}", flush=True)

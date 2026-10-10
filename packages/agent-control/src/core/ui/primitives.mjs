@@ -8,6 +8,17 @@ import { bold, dim, stripAnsi, supportsUnicode } from "../format.mjs";
 import { gradient } from "../theme.mjs";
 import { boxChars, truncate, padVisible } from "./theme.mjs";
 
+/**
+ * Validate a calculated dimension before it reaches `String.prototype.repeat`.
+ * A NaN, Infinity, zero, or negative width from a caller (or a bad terminal
+ * probe) must fall back to the documented default, never throw or emit a
+ * garbage-length rule.
+ */
+export function safeWidth(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
 /** CIRVIX ASCII logo (5 lines). Compact, premium, not gamey. */
 export const LOGO_LINES = [
   " ██████╗██╗██████╗ ██╗   ██╗██╗██╗  ██╗",
@@ -35,8 +46,8 @@ export function panel({ title, lines = [], width = 58, heavy = false } = {}) {
   const v = heavy ? ch.vHeavy : ch.v;
 
   // Compute actual inner width from content if not provided.
-  let inner = width;
-  if (!width) {
+  let inner = safeWidth(width, 0);
+  if (!inner) {
     inner = Math.max(...lines.map((l) => stripAnsi(l).length), title ? stripAnsi(title).length : 0) + 2;
     inner = Math.max(40, Math.min(72, inner));
   }
@@ -84,12 +95,14 @@ export function panel({ title, lines = [], width = 58, heavy = false } = {}) {
  * two different brands depending on whether motion was enabled.
  */
 export function logoRows(width = 58) {
-  return LOGO_LINES.map((l) => l.padStart(Math.floor((width + l.length) / 2)).padEnd(width));
+  const w = safeWidth(width, 58);
+  return LOGO_LINES.map((l) => l.padStart(Math.floor((w + l.length) / 2)).padEnd(w));
 }
 
 /** The subtitle row, centred the same way. */
 export function subtitleRow(width = 58) {
-  return LOGO_SUBTITLE.padStart(Math.floor((width + LOGO_SUBTITLE.length) / 2)).padEnd(width);
+  const w = safeWidth(width, 58);
+  return LOGO_SUBTITLE.padStart(Math.floor((w + LOGO_SUBTITLE.length) / 2)).padEnd(w);
 }
 
 /**
@@ -102,21 +115,22 @@ export function subtitleRow(width = 58) {
  */
 export function brandHeader({ width = 58, accent = false } = {}) {
   const ch = boxChars();
+  const w = safeWidth(width, 58);
   const useAscii = !supportsUnicode();
   const h = ch.h;
-  const top = useAscii ? `${ch.tl}${h.repeat(width + 2)}${ch.tr}` : `╭${h.repeat(width + 2)}╮`;
-  const bottom = useAscii ? `${ch.bl}${h.repeat(width + 2)}${ch.br}` : `╰${h.repeat(width + 2)}╯`;
+  const top = useAscii ? `${ch.tl}${h.repeat(w + 2)}${ch.tr}` : `╭${h.repeat(w + 2)}╮`;
+  const bottom = useAscii ? `${ch.bl}${h.repeat(w + 2)}${ch.br}` : `╰${h.repeat(w + 2)}╯`;
   const vert = useAscii ? ch.v : ch.v;
 
   const lines = [];
   lines.push(`  ${top}`);
-  lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
-  for (const padded of logoRows(width)) {
+  lines.push(`  ${vert} ${" ".repeat(w)} ${vert}`);
+  for (const padded of logoRows(w)) {
     lines.push(`  ${vert} ${accent ? gradient(padded) : padded} ${vert}`);
   }
-  lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
-  lines.push(`  ${vert} ${dim(subtitleRow(width))} ${vert}`);
-  lines.push(`  ${vert} ${" ".repeat(width)} ${vert}`);
+  lines.push(`  ${vert} ${" ".repeat(w)} ${vert}`);
+  lines.push(`  ${vert} ${dim(subtitleRow(w))} ${vert}`);
+  lines.push(`  ${vert} ${" ".repeat(w)} ${vert}`);
   lines.push(`  ${bottom}`);
   return lines.join("\n");
 }
@@ -130,7 +144,7 @@ export function keyValueRows(rows, { keyWidth } = {}) {
 /** Separator line. */
 export function separator(width = 60, char = "─") {
   const ch = supportsUnicode() ? char : "-";
-  return dim("  " + ch.repeat(width));
+  return dim("  " + ch.repeat(safeWidth(width, 60)));
 }
 
 /** Badge: ● ONLINE / ● ENFORCING etc. with color. */

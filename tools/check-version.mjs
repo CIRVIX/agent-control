@@ -9,6 +9,16 @@ const text = async (file) => readFile(join(root, file), "utf8");
 const version = (await text("VERSION")).trim();
 const rootManifest = JSON.parse(await text("package.json"));
 const nodeManifest = JSON.parse(await text("packages/agent-control/package.json"));
+// The control plane is proprietary: `packages/control-plane/` is gitignored in
+// this repository and simply is not present in a fresh public clone. When it
+// is here it must agree with the canonical version — /health serves its value —
+// and when it is absent there is nothing to check rather than an error to raise.
+let controlManifest = null;
+try {
+  controlManifest = JSON.parse(await text("packages/control-plane/package.json"));
+} catch (err) {
+  if (err?.code !== "ENOENT") throw err;
+}
 const lock = JSON.parse(await text("package-lock.json"));
 const pyproject = await text("packages/cirvix-python/pyproject.toml");
 const pythonInit = await text("packages/cirvix-python/cirvix/__init__.py");
@@ -19,6 +29,9 @@ const checks = [
   ["Python source version", pythonInit.match(/^\s+__version__\s*=\s*"([^"]+)"/m)?.[1]],
   ["package.json", rootManifest.version],
   ["packages/agent-control/package.json", nodeManifest.version],
+  ...(controlManifest
+    ? [["packages/control-plane/package.json", controlManifest.version]]
+    : []),
   ["package-lock.json root", lock.version],
   ["package-lock.json workspace root", lock.packages?.[""]?.version],
   ["package-lock.json package", lock.packages?.["packages/agent-control"]?.version],

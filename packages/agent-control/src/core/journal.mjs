@@ -72,6 +72,7 @@ export async function read(path) {
  * @typedef {object} Query
  * @property {number} [last]        most recent N
  * @property {string} [risk]        minimum risk level
+ * @property {string} [consequence] exact consequence kind (`data_export`, …)
  * @property {string} [decision]    exact decision
  * @property {string} [agent]
  * @property {string} [tool]        substring match
@@ -87,6 +88,13 @@ export function query(records, q = {}) {
   if (q.risk) {
     const floor = riskRank(q.risk);
     out = out.filter((r) => riskRank(r.risk) >= floor);
+  }
+  /* Exact kind, not a floor: consequence kinds are not a single chain (two
+     dominant kinds are incomparable), so "at least" would silently drop the
+     ones an operator was looking for. */
+  if (q.consequence) {
+    const want = String(q.consequence).toLowerCase();
+    out = out.filter((r) => String(r.consequence ?? "").toLowerCase() === want);
   }
   if (q.decision) {
     const want = String(q.decision).toLowerCase();
@@ -284,6 +292,9 @@ export function renderTree(record, { indent = "  " } = {}) {
   const decisionTone = isDeny ? red : isHold ? amber : isSanitize ? blue : green;
   lines.push(`${indent}${dim("Decision".padEnd(12))} ${decisionTone(bold(decisionLabel))}${record.enforced === false ? dim("  (not enforced — audit mode)") : ""}`);
   lines.push(`${indent}${dim("Risk".padEnd(12))} ${riskTone(bold(String(record.risk ?? "unknown").toUpperCase()))}${record.risk_signals?.length ? dim(`  ${record.risk_signals.join(", ")}`) : ""}`);
+  if (record.consequence) {
+    lines.push(`${indent}${dim("Consequence".padEnd(12))} ${bold(String(record.consequence))}`);
+  }
   lines.push("");
 
   // Tool / Target / Policy / Latency / Request

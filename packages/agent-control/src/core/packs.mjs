@@ -141,7 +141,7 @@ export function forkPack(pack, { id, name, author = "unknown", now = new Date() 
       ...pack.manifest,
       id,
       name: name ?? `${pack.manifest.name} (fork)`,
-      version: "0.1.0",
+      version: pack.manifest.version ?? "0.0.0",
       author,
       official: false,
       forkedFrom: `${pack.manifest.id ?? "unknown"}@${hashRules(pack.rules)}`,

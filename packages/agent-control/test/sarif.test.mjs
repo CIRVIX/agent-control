@@ -148,6 +148,23 @@ test("the CLI writes SARIF where it is told", async () => {
   const written = JSON.parse(await readFile(out, "utf8"));
   assert.equal(written.version, "2.1.0");
   assert.ok(Array.isArray(written.runs[0].results));
+  // The SARIF tool version must be the package version, not a hardcoded stale
+  // number — a SARIF upload that advertises a release npm never published is the
+  // version-drift bug this test exists to catch.
+  assert.equal(written.runs[0].tool.driver.version, "0.3.0");
+  assert.equal(written.runs[0].tool.driver.semanticVersion, "0.3.0");
+});
+
+test("the SARIF tool version comes from the manifest, not a hardcoded constant", () => {
+  // The old bug was a hardcoded "0.1.0" in sarif.mjs while package.json said
+  // something else. Keep that from coming back: the tool metadata must reflect
+  // the real installed package version.
+  const sarif = toSarif(
+    { scannedAt: "2026-08-07T00:00:00.000Z", findings: [], counts: {} },
+    { root: "/repo" },
+  );
+  assert.equal(sarif.runs[0].tool.driver.version, "0.3.0");
+  assert.equal(sarif.runs[0].tool.driver.semanticVersion, "0.3.0");
 });
 
 /* -------------------------------------------------------------------------- */

@@ -63,6 +63,41 @@ operator wants in the log.
 |---|---|---|
 | `ttlMs` | 15 min | Delegation is for a task, not for a quarter |
 | `tenant` (on `root`) | `null` | Which tenant this agent belongs to |
+| `constraints` | `null` | The circumstances the grant is spendable in — see below |
+
+### Constraints: the consequence ceiling
+
+Scope says which actions and resources a grant covers; **constraints** say what
+the call may effect when it gets there. The one this build derives from the call
+itself is `maxConsequence`:
+
+```js
+const planner = broker.root("planner", { actions: ["*"], resources: ["*"] }, {
+  constraints: { maxConsequence: "financial_transfer" },
+});
+
+// A delegation narrows the ceiling. Widening it is refused, not clamped —
+// same posture as scope.
+const result = broker.delegate(planner, "summariser", { actions: ["fs.read"], resources: ["*"] }, {
+  constraints: { maxConsequence: "data_write" },
+});
+```
+
+"Narrower" is the consequence lattice from
+[Policy → Consequences](./policy.md#consequences), so a child may move down the
+chain or replace a dominant kind with a chain kind, and two different dominant
+kinds are incomparable — a child naming one its parent did not is refused as a
+widening. This is what makes "the invoice-processing agent may not create a
+payment" expressible: the delegation carries the money axis, not just the tool
+axis.
+
+Constraints are part of the signed grant. Every link's constraints are
+evaluated at presentation, and a child may not drop one. A constraint kind this
+build cannot evaluate is refused where the grant is signed, and a
+`maxConsequence` value that names no consequence is refused the same way — a
+restriction that cannot be checked is not a restriction. The same applies to a
+grant arriving from another process: verification refuses an unknown key or an
+unreadable ceiling rather than carrying a restriction that never fires.
 
 ## Presenting
 
@@ -120,6 +155,8 @@ narrowing from a forgery:
 | `delegation-expired` | The grant or an ancestor lapsed |
 | `delegation-unknown_tenant` | The presenter belongs to a different tenant |
 | `delegation-broken_chain` | The chain does not terminate in a root |
+| `delegation-constraint-violated` | Policy permits it; the grant's constraints (e.g. `maxConsequence`) do not |
+| `delegation-constraint-unknown` | The grant declares a constraint or a ceiling this build cannot evaluate |
 | `delegation-cycle` / `-too_deep` | Refused at issue |
 
 A refusal names the chain — `planner → researcher → summariser` — so the deputy
@@ -180,6 +217,12 @@ appears in arguments, in audit records, and in results other agents read.
 - **Chains are bounded at depth 8.** Not a security boundary — narrowing already
   makes depth harmless — but an unbounded chain is an unbounded verification
   loop over attacker-supplied data.
+- **The constraint vocabulary is small.** `network`, `data`, `tools`, `spend`,
+  `rate`, `delegation`, `environment`, `maxConsequence`. A grant carrying
+  anything else is refused at issue and at verification; a *mission* carrying an
+  unknown key is warned about by `lintMission` and recorded in the authority
+  context as unevaluated, because a mission is hand-written configuration rather
+  than an artifact that travels between agents.
 
 ## The attacks this is tested against
 

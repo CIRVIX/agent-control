@@ -33,16 +33,103 @@
  * is what applies when no rule matches at all — it is a floor, not an override.
  * A policy that explicitly permits a CRITICAL call wins, because the operator
  * who wrote that rule knew something this table cannot.
- */
-
-/** @typedef {"low"|"medium"|"high"|"critical"} RiskLevel */
-
+ *//** @typedef {"low"|"medium"|"high"|"critical"} RiskLevel */
 export const RISK = {
   LOW: "low",
   MEDIUM: "medium",
   HIGH: "high",
   CRITICAL: "critical",
 };
+
+/**
+ * Consequence kinds.
+ *
+ * A consequence is what happens in the world if the call succeeds — not what
+ * the call does to a file or a process, but what it effects beyond the
+ * machine. `fs.write` to a log file and `fs.write` to a payment instruction
+ * file are the same tool and the same action; they are different consequences.
+ *
+ * Consequence is derived, not declared by the caller. The agent names a tool;
+ * the runtime names what that tool effects. Like risk, it is deterministic and
+ * reproducible — the same call always produces the same consequence — because
+ * a consequence that changes between two identical calls is a claim nobody can
+ * audit.
+ *
+ * Consequence is an input to policy and to authority, never a decision by
+ * itself. A mission may be scoped to "only actions whose consequence is at
+ * most data_write" — which is the question this exists to answer: "is this
+ * consequence inside the authority delegated to this agent?".
+ */
+export const CONSEQUENCE = Object.freeze({
+  /** No effect beyond the machine — reads, computations, local state. */
+  NONE: "none",
+  /** Reads data out of the environment: file reads, DB queries, API reads. */
+  DATA_READ: "data_read",
+  /** Writes data within the environment: file writes, DB mutations, cache updates. */
+  DATA_WRITE: "data_write",
+  /** Data leaves the environment to an external destination — exfiltration risk. */
+  DATA_EXPORT: "data_export",
+  /** A human-facing communication is sent: email, Slack, SMS, push. */
+  COMMUNICATION: "communication",
+  /** Money moves, outside the environment: payments, transfers, charges, refunds. */
+  FINANCIAL_TRANSFER: "financial_transfer",
+  /** Credentials or secrets are created, rotated, or disclosed. */
+  CREDENTIAL_DISCLOSURE: "credential_disclosure",
+  /** Privilege, role, or permission changes — who can do what. */
+  PRIVILEGE_CHANGE: "privilege_change",
+  /** Infrastructure is created, destroyed, or reconfigured. */
+  INFRASTRUCTURE_CHANGE: "infrastructure_change",
+  /** Code is executed that was not present before — remote or dynamic code. */
+  CODE_EXECUTION: "code_execution",
+  /** The agent acts on behalf of a specific human or system identity. */
+  IMPERSONATION: "impersonation",
+  /** A workflow or business process advances to a new state. */
+  PROCESS_ADVANCE: "process_advance",
+});
+export const CONSEQUENCE_KINDS = Object.freeze(Object.keys(CONSEQUENCE));
+export const CONSEQUENCE_ORDER = Object.freeze(Object.values(CONSEQUENCE));
+
+/*
+ * THE CONSEQUENCE LATTICE.
+ *
+ * A chain, plus six dominant kinds:
+ *
+ *   none < data_read < data_write < data_export < communication < financial_transfer
+ *
+ *   credential_disclosure, privilege_change, infrastructure_change,
+ *   code_execution, impersonation, process_advance
+ *
+ * Each dominant kind outranks the ENTIRE chain (disclosing a credential can
+ * lead to anything), but two distinct dominant kinds are INCOMPARABLE — being
+ * able to change privileges says nothing about being able to execute code.
+ * Incomparability is the safe direction for maxConsequence narrowing: a child
+ * ceiling naming a dominant kind the parent's ceiling lacks is refused as a
+ * widening, which is exactly right.
+ *
+ * Unknown kinds rank below everything and compare false, so a typo in a rule
+ * fails closed rather than matching.
+ */
+const SIGNIFICANT_INDEX = CONSEQUENCE_ORDER.indexOf(CONSEQUENCE.CREDENTIAL_DISCLOSURE);
+
+/**
+ * True when `kind` is at least as significant as `floor` in the consequence
+ * lattice. Used by policy conditions (`consequence >= data_export`) and by the
+ * maxConsequence narrowing checks in authority and delegation.
+ */
+export function consequenceAtLeast(kind, floor) {
+  if (kind === floor) return true;
+  const ki = CONSEQUENCE_ORDER.indexOf(kind);
+  const fi = CONSEQUENCE_ORDER.indexOf(floor);
+  if (ki === -1 || fi === -1) return false;
+  // A dominant kind outranks the whole chain; a chain kind never outranks a
+  // dominant floor.
+  if (ki >= SIGNIFICANT_INDEX && fi < SIGNIFICANT_INDEX) return true;
+  if (fi >= SIGNIFICANT_INDEX && ki < SIGNIFICANT_INDEX) return false;
+  // Two distinct dominant kinds are incomparable by construction.
+  if (ki >= SIGNIFICANT_INDEX && fi >= SIGNIFICANT_INDEX) return false;
+  return ki >= fi;
+}
+
 
 /** Ordered least → most severe. Used for `risk >= HIGH` comparisons. */
 export const RISK_ORDER = [RISK.LOW, RISK.MEDIUM, RISK.HIGH, RISK.CRITICAL];
@@ -157,8 +244,8 @@ const PRODUCTION_MARKERS =
   /\b(prod|production|live)\b|(^|[-_.])prd([-_.]|$)/i;
 
 const SHELL_ACTIONS = new Set(["shell.exec", "process.spawn"]);
-const WRITE_ACTIONS = new Set(["fs.write", "fs.delete", "fs.move", "fs.chmod"]);
-const READ_ACTIONS = new Set(["fs.read", "fs.list", "fs.stat", "fs.search"]);
+const WRITE_ACTIONS = new Set(["fs.write", "fs.delete", "fs.move", "fs.chmod", "db.write", "vcs.write"]);
+const READ_ACTIONS = new Set(["fs.read", "fs.list", "fs.stat", "fs.search", "db.read", "vcs.read"]);
 
 /** Read-only VCS and inspection tools — the LOW baseline in the blueprint. */
 const READ_ONLY_TOOLS =
@@ -507,3 +594,253 @@ function egressOf(call) {
 export function riskLabel(level) {
   return String(level ?? "unknown").toUpperCase();
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Consequence derivation                                                     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * A LIGHTWEIGHT COPY of the action aliases, and why it exists.
+ *
+ * `normalize.mjs` owns the real alias table and calls THIS module's
+ * `deriveConsequence` — so risk.mjs cannot import canonicalAction back without
+ * a circular import that breaks module evaluation order (it was tried; Node
+ * refused with "Cannot access 'EFFECT' before initialization"). On the hot
+ * path this table is never consulted: `normalize()` derives the canonical
+ * action BEFORE calling `deriveConsequence`, so the action it receives is
+ * already canonical. The table only matters when `deriveConsequence` is called
+ * directly with a raw tool spelling, and it must stay in sync with
+ * normalize.mjs's ALIASES — which `consequence.test.mjs` asserts for every
+ * taxonomy entry, so drift fails a test rather than a customer's rule.
+ */
+export const ACTION_ALIASES = new Map([
+  // Filesystem
+  ["filesystem.read", "fs.read"],
+  ["filesystem.write", "fs.write"],
+  ["filesystem.list", "fs.list"],
+  ["filesystem.delete", "fs.delete"],
+  ["filesystem.search", "fs.search"],
+  ["filesystem.stat", "fs.stat"],
+  ["filesystem.move", "fs.move"],
+  ["file.read", "fs.read"],
+  ["file.write", "fs.write"],
+  ["files.read", "fs.read"],
+  ["files.write", "fs.write"],
+  // Database
+  ["database.query", "db.read"],
+  ["database.write", "db.write"],
+  ["database.migrate", "db.migrate"],
+  ["db.query", "db.read"],
+  ["db.write", "db.write"],
+  ["db.migrate", "db.migrate"],
+  ["sql.execute", "db.write"],
+  ["sql.query", "db.read"],
+  // Network
+  ["network.request", "http.request"],
+  ["network.get", "http.request"],
+  ["network.post", "http.request"],
+  ["http.get", "http.request"],
+  ["http.post", "http.request"],
+  ["http.request", "http.request"],
+  ["net.request", "http.request"],
+  // Deploy
+  ["deploy.apply", "k8s.apply"],
+  ["kubernetes.apply", "k8s.apply"],
+  ["k8s.apply", "k8s.apply"],
+  ["k8s.deploy", "k8s.apply"],
+  // Secrets
+  ["secrets.get", "secrets.read"],
+  // Packages
+  ["package.install", "pkg.install"],
+  ["npm.install", "pkg.install"],
+  ["pip.install", "pkg.install"],
+  // Git
+  ["git.status", "vcs.read"],
+  ["git.log", "vcs.read"],
+  ["git.diff", "vcs.read"],
+  ["git.branch", "vcs.write"],
+  ["git.commit", "vcs.write"],
+  ["git.push", "vcs.push"],
+]);
+export function canonicalActionLight(name) {
+  if (!name) return "";
+  if (ACTION_ALIASES.has(name)) return ACTION_ALIASES.get(name);
+  // Handle "fs.*" style globs — pass through.
+  if (name.endsWith(".*") || name === "**") return name;
+  return name;
+}
+
+/**
+ * Derives the consequence of a call — what happens in the world if it succeeds.
+ *
+ * Like risk, this is deterministic and based on the call's action, its tool
+ * name (canonical and raw), its destination, and its environment — never on the
+ * arguments' contents (which are attacker-controlled). A consequence is a
+ * property of the *kind* of thing the call effects, not of the specific values
+ * it carries.
+ *
+ * This is NOT a full semantic model of every possible tool. It is a conservative
+ * derivation: when in doubt, the consequence is `none` (reads are reads, writes
+ * are writes) unless the call's shape clearly effects one of the named
+ * consequences above. A policy that needs finer granularity must name the tool,
+ * the resource, or the destination explicitly — consequence is a coarse filter,
+ * not a substitute for those.
+ *
+ * The call's `action` should already be canonical (derived by `normalize`), but
+ * we re-canonicalize defensively in case `deriveConsequence` is called directly.
+ */
+export function deriveConsequence(call = {}) {
+  const action = canonicalActionLight(String(call.action ?? ""));
+  const tool = String(call.tool ?? "");
+  /*
+   * THE TOOL'S OWN NAME, WHICH normalize HAS ALREADY REWRITTEN.
+   *
+   * By the time this runs, `call.tool` is the canonical taxonomy name —
+   * `create_payment` became `filesystem.write` and `send_email` became
+   * `tool.send_email`. The pattern libraries below are written against TOOL
+   * NAMES (`payment`, `refund`, `send_email`, `rotate_api_key`), so reading
+   * only the canonical name would silently un-detect every tool the taxonomy
+   * does not know — and that is precisely the set whose own name is the only
+   * signal available. A money-moving tool that ends up classified as a file
+   * write must still derive financial_transfer, or the mission ceiling the
+   * whole feature exists for never fires on it.
+   *
+   * The canonical name is still checked, because it carries the taxonomy's
+   * answer for the tools the classifier does know.
+   */
+  const rawTool = String(call.raw_tool ?? "");
+  const names = rawTool && rawTool !== tool ? [tool, rawTool, action] : [tool, action];
+  const namesMatch = (pattern) => names.some((n) => pattern.test(n));
+  const destination = call.destination ?? null;
+  const hasDestination = typeof destination === "string" && /^https?:\/\//i.test(destination);
+  const isExternal = hasDestination && !isLocalDestination(destination);
+
+  // --- Code execution ---
+  // `shell.exec`, `process.spawn`, and anything that runs code not present before.
+  if (action === "shell.exec" || action === "process.spawn" || /^(pkg\.install|cargo\.install|go\.install)$/.test(action)) {
+    return CONSEQUENCE.CODE_EXECUTION;
+  }
+
+  // --- Financial transfer ---
+  // Tools whose purpose is to move money. Detected by tool name patterns and
+  // destination hints — a payment API, a banking endpoint, a charges/create call.
+  if (namesMatch(FINANCIAL_TOOL_PATTERN)) {
+    return CONSEQUENCE.FINANCIAL_TRANSFER;
+  }
+  if (isExternal && FINANCIAL_HOST_PATTERN.test(new URL(destination).hostname)) {
+    return CONSEQUENCE.FINANCIAL_TRANSFER;
+  }
+
+  // --- Communication ---
+  // Tools whose purpose is to send a message to a human: email, Slack, SMS, push.
+  if (namesMatch(COMMUNICATION_TOOL_PATTERN)) {
+    return CONSEQUENCE.COMMUNICATION;
+  }
+
+  // --- Credential disclosure ---
+  // Tools whose purpose is to read, rotate, or disclose credentials. A file
+  // read that happens to hit a credential PATH is data_read, not this — the
+  // path rules in the risk engine own that case.
+  if (namesMatch(CREDENTIAL_TOOL_PATTERN)) {
+    return CONSEQUENCE.CREDENTIAL_DISCLOSURE;
+  }
+
+  // --- Infrastructure change ---
+  // Deployments, migrations, and cluster work: infrastructure is created,
+  // destroyed, or reconfigured. NOT privilege_change — a schema migration or
+  // a manifest apply reconfigures systems; it does not decide who may act.
+  if (action === "k8s.apply" || action === "db.migrate") {
+    return CONSEQUENCE.INFRASTRUCTURE_CHANGE;
+  }
+  if (namesMatch(INFRASTRUCTURE_TOOL_PATTERN)) {
+    return CONSEQUENCE.INFRASTRUCTURE_CHANGE;
+  }
+
+  // --- Privilege change ---
+  // Tools whose purpose is to change who can do what.
+  if (namesMatch(PRIVILEGE_TOOL_PATTERN)) {
+    return CONSEQUENCE.PRIVILEGE_CHANGE;
+  }
+
+  // --- Data export ---
+  // External egress is the export case; a push to a remote transfers commits
+  // (data) out of the environment even though no URL rides in the arguments.
+  if (isExternal && (action === "http.request" || action === "net.request" || action === "http.get" || action === "http.post")) {
+    return CONSEQUENCE.DATA_EXPORT;
+  }
+  if (action === "vcs.push") {
+    return CONSEQUENCE.DATA_EXPORT;
+  }
+  // --- Internal network calls are reads ---
+  if (action === "http.request" || action === "net.request" || action === "http.get" || action === "http.post") {
+    return CONSEQUENCE.DATA_READ;
+  }
+
+  // --- Data write ---
+  if (WRITE_ACTIONS.has(action)) {
+    return CONSEQUENCE.DATA_WRITE;
+  }
+
+  // --- Data read ---
+  if (READ_ACTIONS.has(action)) {
+    return CONSEQUENCE.DATA_READ;
+  }
+
+  // --- Impersonation ---
+  // Tools that act as or on behalf of a specific identity.
+  if (namesMatch(IMPERSONATION_TOOL_PATTERN)) {
+    return CONSEQUENCE.IMPERSONATION;
+  }
+
+  // --- Process advance ---
+  // Workflow/business-process tools.
+  if (namesMatch(PROCESS_TOOL_PATTERN)) {
+    return CONSEQUENCE.PROCESS_ADVANCE;
+  }
+
+  return CONSEQUENCE.NONE;
+}
+
+function isLocalDestination(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /^(localhost|127\.|0\.0\.0\.0|::1|\[?::1\]?|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+// --- Pattern helpers ---
+/*
+ * Every stem below is written against the failure modes of both directions:
+ *
+ *   · too loose and a benign tool inherits a dominant consequence —
+ *     `transfer_files` is not a payment, `tokenize_text` is not a credential
+ *     read, `resize_image` does not reconfigure infrastructure — and a
+ *     mission tightened to data_read starts refusing ordinary work, which is
+ *     exactly the pressure that gets the whole control switched off;
+ *   · too tight and a real payment or disclosure reads as data_read and
+ *     passes a data_read ceiling. Compounds win over loose stems because the
+ *     benign spellings (`transfer_files`) and the dangerous ones
+ *     (`transfer_funds`) differ in the second word.
+ */
+/* Verb-first money compounds are named explicitly. An anchored noun list alone
+ * misses the way payment tools are actually spelled (`create_payment`,
+ * `process_refund`, `pay_invoice`) — and those are exactly the calls the
+ * delegated-authority question is asked about. The object list is deliberately
+ * restricted to UNAMBIGUOUS money nouns, so a verb-first match cannot be a
+ * file or a message: `send_email` and `transfer_files` stay out. */
+const FINANCIAL_TOOL_PATTERN = /^(payment|payments|charge|charges|refund|refunds|bank|banking|stripe|adyen|paypal|squareup|braintree|worldpay|mollie|checkout|financial|fintech|ledger|invoice|invoices|funds?[._-]?transfer|money[._-]?transfer|transfer[._-]?(funds|money|cash|payment)|account[._-]?(balance|debit|credit|charge)|(create|make|send|initiate|process|issue|submit|execute|authorize|capture|void|pay|settle)[._-]?(payment|payments|charge|charges|refund|refunds|invoice|invoices|payout|payouts|disbursement|remittance|transfer))/i;
+const FINANCIAL_HOST_PATTERN = /^(api\.(stripe|adyen|paypal|square|braintree|worldpay|checkout|mollie)|sandbox\.(stripe|paypal)|money|pay|charge|transfer|bank|billing)/i;
+
+const COMMUNICATION_TOOL_PATTERN = /^(sendmail|send_email|send_slack|slack_post|send_sms|push_notification|notify|review_request|mention|comments?([._-]?(create|add|post|send|reply|new)))/i;
+
+const CREDENTIAL_TOOL_PATTERN = /^(secrets?([._-]|$)|credentials?([._-]|$)|tokens?([._-]|$)|passwords?([._-]|$)|api[._-]?key|private[._-]?key|rotate([._-]?(secret|credential|key|token|password|api))|revoke[._-]?(credential|secret|token|key)|vault\.)/i;
+
+const PRIVILEGE_TOOL_PATTERN = /^(grant|revoke|add[._-]?role|remove[._-]?role|assign[._-]?role|change[._-]?role|promote|demote|invite|onboard|provision[._-]?user|deactivate[._-]?user|lock[._-]?user|sudo|set[._-]?permission|chmod|acl[._-])/i;
+
+const INFRASTRUCTURE_TOOL_PATTERN = /^(deploy|provision|terraform|kubectl|helm|cloud_formation|ec2|vm([._-]|$)|container([._-]|$)|terminate|rebuild|autoscale|scale([._-]?(up|down|out|in|cluster|node|vm|instance|service|deployment)))/i;
+
+const IMPERSONATION_TOOL_PATTERN = /^(act_as|impersonate|on_behalf_of|delegate_to|run_as|assume_role|sts\.assume)/i;
+
+const PROCESS_TOOL_PATTERN = /^(approve|reject|advance|transition|submit_for|start_workflow|complete_task|escalate|ticket([._-]|$)|jira|linear|board([._-]|$))/i;

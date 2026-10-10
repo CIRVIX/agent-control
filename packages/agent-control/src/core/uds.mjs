@@ -44,6 +44,7 @@ import { tmpdir } from "node:os";
 import { MessageFramer, serialize } from "./jsonrpc.mjs";
 import { DECISION } from "./decisions.mjs";
 import { SOURCE } from "./normalize.mjs";
+import { IDENTITY_MODE, normalizeIdentityMode } from "./identity-modes.mjs";
 
 /** JSON-RPC error codes this server returns. */
 export const UDS_ERROR = {
@@ -112,9 +113,23 @@ export class UdsServer {
    * @param {(m:string,extra?:object)=>void} [opts.log]
    * @param {() => object} [opts.status]  supplies `cirvix/status`
    * @param {() => Promise<Array>} [opts.recent]  supplies `cirvix/logs`
+   * @param {string} [opts.identityMode]  explicit identity mode (core/identity-modes.mjs).
+   *   Null keeps the library default (COMPAT) for embedded use; the shipped
+   *   runtime passes PRODUCTION unless the operator chose otherwise.
    */
-  constructor({ pipeline, endpoint, token, log = () => {}, status = () => ({}), recent = async () => [] }) {
+  constructor({ pipeline, endpoint, token, log = () => {}, status = () => ({}), recent = async () => [], identity = null, identityMode = null }) {
     this.pipeline = pipeline;
+    /* Boundary identity verifier (core/identity.mjs). Null keeps the historic
+       behaviour: the socket token authenticates the process, and any agent
+       name it supplies is treated as a claim. With a verifier, each authorize
+       request must carry a credential and a signed proof, and the verified
+       agent replaces the claimed name. */
+    this.identity = identity;
+    /* Explicit identity mode (core/identity-modes.mjs). NEVER inferred from
+       enrolment state: a production daemon with no verifier refuses unverified
+       callers instead of silently accepting self-declared agent names — the
+       socket token authenticates the PROCESS, not the agent. */
+    this.identityMode = identityMode ? normalizeIdentityMode(identityMode).mode : null;
     this.endpoint = endpoint;
     this.token = token;
     this.log = log;
@@ -191,6 +206,20 @@ export class UdsServer {
     socket.on("close", () => this.#connections.delete(socket));
   }
 
+  /**
+   * The posture this socket enforces — which is the posture of the pipeline it
+   * fronts, reported THROUGH the canonical core rather than re-derived here.
+   *
+   * A socket owns a peer, a token and a session; it owns no stage dependencies,
+   * so it cannot answer "which stages are wired" by itself. Delegating keeps a
+   * transport from growing its own opinion about what it enforces (P0-D
+   * structural discipline), and gives `doctor`/`status` one object per surface
+   * to ask.
+   */
+  securityPosture() {
+    return this.pipeline.securityPosture();
+  }
+
   async #dispatch(message, session) {
     const id = message?.id ?? null;
     const ok = (result) => ({ jsonrpc: "2.0", id, result });
@@ -230,10 +259,62 @@ export class UdsServer {
         const params = message.params ?? {};
         if (!params.tool) return fail(UDS_ERROR.INVALID_PARAMS, "authorize needs a tool name.");
 
+        /* STAGE 0 — TRANSPORT AUTHENTICATION, then the core decides.
+         *
+         * The socket token authenticates a PROCESS. When the host has enrolled
+         * agents, a credential plus a signed proof authenticates the AGENT, and
+         * that verification happens here because this is the boundary that owns
+         * the peer. What changed in P0-D is only where the RESULT goes: it is
+         * now handed to the pipeline as trusted input so the engine that
+         * decides knows who was authenticated.
+         *
+         * Before, the socket verified the caller and then passed a bare agent
+         * name, so the pipeline's own record could not distinguish a proven
+         * agent from a claimed one — and the engine had no identity stage at
+         * all. The refusal semantics (unverified caller, no verifier in
+         * PRODUCTION, replay, revoked, expired) live in the canonical core
+         * (core/authorize.mjs), once, and are reached from here by handing it
+         * the verification result and this boundary's explicit mode.
+         */
+        const identityMode = this.identityMode ?? IDENTITY_MODE.COMPAT;
+        let check = null;
+        if (this.identity) {
+          const meta = params._meta?.cirvix ?? null;
+          check = await this.identity.verify({ meta, method: "cirvix/authorize", params });
+          if (!check.verified) {
+            this.log("control socket: identity-unverified (" + (check.reason ?? "unknown") + ")");
+          }
+        }
+        const claimedAgent = typeof params.agent === "string" && params.agent ? params.agent : null;
+        const principal = check?.verified ? check.agentId : (claimedAgent ?? "local");
+
         const result = await this.pipeline.submit(
-          { tool: params.tool, server: params.server ?? null, arguments: params.arguments ?? {} },
+          /* `agent` is the CLAIM. The core never lets it become the principal
+             without a proof; with a verifier it is replaced by the verified
+             agent, and without one it is recorded as untrusted. */
+          { tool: params.tool, server: params.server ?? null, arguments: params.arguments ?? {}, agent: claimedAgent },
           {
-            agent: params.agent,
+            agent: principal,
+            /* The authenticated identity, as trusted input. `null` when this
+               boundary has no verifier at all, which the core turns into its
+               own mode-dependent refusal rather than a silent acceptance. */
+            identityVerification: this.identity
+              ? {
+                  verified: check.verified === true,
+                  agentId: check.verified ? check.agentId : null,
+                  keyId: check.keyId ?? null,
+                  issuer: check.issuer ?? null,
+                  binding: check.binding ?? null,
+                  reason: check.reason ?? null,
+                  identity: check.identity ?? null,
+                }
+              : null,
+            identityMode,
+            /* Which runtime and tenant this boundary was configured for, so a
+               credential issued for another one cannot be presented here. */
+            runtime: check?.runtime ?? null,
+            tenant: check?.tenant ?? null,
+            keyId: check?.keyId ?? null,
             source: params.source ?? SOURCE.UDS,
             environment: params.environment,
             /*
@@ -279,6 +360,10 @@ export class UdsServer {
           approvers: decision.approvers ?? [],
           latency_ms: event.latency_ms,
           enforced: event.enforced,
+          /* The canonical identity evidence: verified or not, and the mode
+             that decided. Every refusal path now flows through here too, so an
+             operator sees the same fields whichever stage refused. */
+          ...(event.identity ? { identity: event.identity } : {}),
           // Substituted arguments go back so the client sends what Cirvix
           // authorized rather than what it proposed.
           arguments: outgoing,

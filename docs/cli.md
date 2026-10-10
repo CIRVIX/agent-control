@@ -13,7 +13,7 @@ Requires Node 20 or later.
 
 ## Current checkout and default invocation
 
-The package metadata and `cirvix --version` report **0.2.1**.
+The package metadata and `cirvix --version` report **0.3.0**.
 
 - Bare `cirvix` shows onboarding when `<cwd>/.cirvix` is absent. In an existing
   workspace it opens the legacy interactive screen only when its TTY/environment

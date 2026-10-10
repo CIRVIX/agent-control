@@ -48,6 +48,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { matchGlob } from "./policy.mjs";
+import { evaluateConstraints, CONSTRAINT_KINDS, maxConsequenceKind, consequenceAtLeast } from "./authority.mjs";
 import { canonicalAction } from "./normalize.mjs";
 import { DECISION, isForwarded } from "./decisions.mjs";
 
@@ -74,6 +75,15 @@ export const DELEGATION_ERROR = {
   BROKEN_CHAIN: "broken_chain",
   WIDENED: "widened",
   UNKNOWN_TENANT: "unknown_tenant",
+  /* The grant is bound to a different AUDIENCE than this boundary. Tenancy
+     alone is not enough: a grant issued for a runtime or an agent must not
+     become valid merely because the tenant matches. */
+  AUDIENCE_MISMATCH: "audience_mismatch",
+  /* The issuer PRINCIPAL could not be resolved, or is no longer authorized:
+     the human/organization behind the grant is gone, so the grant is too. */
+  PRINCIPAL_INVALID: "principal_invalid",
+  /* A bounded-use grant whose allowance is spent (or lost the race for it). */
+  CONSUMED: "consumed",
 };
 
 /* -------------------------------------------------------------------------- */
@@ -206,6 +216,13 @@ export function scopePermits(scope, { action, resource }) {
 /** Deterministic serialization, so a signature covers meaning rather than spacing. */
 function canonicalGrant(grant) {
   const scope = normalizeScope(grant.scope);
+  /* Constraints are part of what is signed. A grant's constraints narrow what
+     it authorizes; leaving them outside the signature would let an in-memory
+     tamper widen a grant's consequence boundary without invalidating it. Keys
+     are sorted so the serialization is deterministic. */
+  const constraints = grant.constraints
+    ? Object.fromEntries(Object.entries(grant.constraints).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    : null;
   return JSON.stringify({
     id: grant.id,
     issuer: grant.issuer,
@@ -214,6 +231,7 @@ function canonicalGrant(grant) {
     parent: grant.parent ?? null,
     depth: grant.depth,
     scope: { actions: [...scope.actions].sort(), resources: [...scope.resources].sort() },
+    ...(constraints ? { constraints } : {}),
     issuedAt: grant.issuedAt,
     expiresAt: grant.expiresAt,
   });
@@ -271,7 +289,7 @@ export class DelegationBroker {
    * have no issuer; an operator creates them, and nothing an agent does can
    * mint one.
    */
-  root(agent, scope, { tenant = null } = {}) {
+  root(agent, scope, { tenant = null, constraints = null } = {}) {
     /*
      * An agent belongs to exactly one tenant.
      *
@@ -291,6 +309,46 @@ export class DelegationBroker {
     }
     this.#tenancy.set(String(agent), tenant);
 
+    /*
+     * CONSTRAINTS ARE VALIDATED WHERE THEY ARE SIGNED, not discovered at call
+     * time. A root carrying a misspelled constraint kind would load, sign, and
+     * appear restricted while restricting nothing — the constraint stage would
+     * refuse every call under it as `delegation-constraint-unknown`, which is
+     * fail-closed but opaque. The same check delegate() applies to children
+     * applies here, at the moment an operator can still fix the spelling.
+     */
+    /*
+     * THE CANONICAL FORM IS WHAT GETS SIGNED, and a known key with an
+     * unreadable VALUE is refused here too — `maxConsequence: "data_writ"`
+     * would otherwise sign a ceiling no comparison can ever satisfy, which is
+     * a restriction that does not exist. Canonicalizing also makes the
+     * narrowing check in delegate() comparable: `data_write`, `DATA_WRITE` and
+     * `{max:"data_write"}` are one kind.
+     */
+    let grantConstraints = null;
+    if (constraints) {
+      if (typeof constraints !== "object" || Array.isArray(constraints)) {
+        throw new Error("Root constraints must be an object keyed by constraint kind.");
+      }
+      grantConstraints = {};
+      for (const [key, value] of Object.entries(constraints)) {
+        if (!CONSTRAINT_KINDS.includes(key)) {
+          throw new Error(`Unknown root constraint "${key}". Known: ${CONSTRAINT_KINDS.join(", ")}.`);
+        }
+        if (key === "maxConsequence") {
+          const kind = maxConsequenceKind(value);
+          if (!kind) {
+            throw new Error(
+              `Root maxConsequence "${typeof value === "string" ? value : value?.max}" is not a consequence this build derives; a boundary that cannot be evaluated is not a boundary.`,
+            );
+          }
+          grantConstraints[key] = kind;
+          continue;
+        }
+        grantConstraints[key] = value;
+      }
+    }
+
     const grant = {
       id: `dlg_root_${this.#next++}`,
       issuer: null,
@@ -301,6 +359,7 @@ export class DelegationBroker {
       scope: normalizeScope(scope),
       issuedAt: Date.now(),
       expiresAt: null,
+      ...(grantConstraints ? { constraints: grantConstraints } : {}),
     };
     grant.signature = sign(grant, this.#key);
     this.#grants.set(grant.id, grant);
@@ -315,8 +374,19 @@ export class DelegationBroker {
    *
    * @returns {{ok:true, grant:object}|{ok:false, error:string, reason:string}}
    */
-  delegate(parentGrant, subject, scope, { ttlMs = this.ttlMs } = {}) {
-    const parent = typeof parentGrant === "string" ? this.#grants.get(parentGrant) : parentGrant;
+  delegate(parentGrant, subject, scope, { ttlMs = this.ttlMs, constraints = null } = {}) {
+    /*
+     * THE STORED GRANT IS THE PARENT, NOT THE OBJECT THE CALLER PASSED.
+     *
+     * `broker.inventory()` returns sanitized copies, and any caller can pass a
+     * hand-built object carrying a real id. Trusting the passed object's scope
+     * or constraints would let a stripped or tampered parent launder a wider
+     * delegation past the narrowing check — so the id is only used to LOOK UP
+     * the parent; scope, constraints, depth and tenancy all come from the
+     * broker's own record.
+     */
+    const parentId = typeof parentGrant === "string" ? parentGrant : parentGrant?.id;
+    const parent = parentId != null ? this.#grants.get(String(parentId)) : null;
 
     if (!parent || !this.#grants.has(parent.id)) {
       return { ok: false, error: DELEGATION_ERROR.BROKEN_CHAIN, reason: "The parent grant is not known to this broker." };
@@ -370,6 +440,72 @@ export class DelegationBroker {
       };
     }
 
+    /* Constraints are validated and CANONICALIZED before they are signed, for
+       the same reason the root does it: an unreadable ceiling is not a
+       restriction, and two spellings of one kind must compare equal when the
+       child is checked against its parent. */
+    let nextConstraints = null;
+    if (constraints) {
+      if (typeof constraints !== "object" || Array.isArray(constraints)) {
+        return { ok: false, error: "unknown_constraint", reason: "Constraints must be an object keyed by constraint kind." };
+      }
+      nextConstraints = {};
+      for (const [key, value] of Object.entries(constraints)) {
+        if (!CONSTRAINT_KINDS.includes(key)) {
+          return {
+            ok: false,
+            error: "unknown_constraint",
+            reason: `Unknown constraint "${key}". Known: ${CONSTRAINT_KINDS.join(", ")}.`,
+          };
+        }
+        if (key === "maxConsequence") {
+          const kind = maxConsequenceKind(value);
+          if (!kind) {
+            return {
+              ok: false,
+              error: "unknown_constraint",
+              reason: `maxConsequence "${typeof value === "string" ? value : value?.max}" is not a consequence this build derives; a boundary that cannot be evaluated is not a boundary.`,
+            };
+          }
+          nextConstraints[key] = kind;
+          continue;
+        }
+        nextConstraints[key] = value;
+      }
+      if (parent.constraints) {
+        for (const key of Object.keys(parent.constraints)) {
+          // A child may not drop a parent's constraint.
+          if (!Object.hasOwn(nextConstraints, key)) {
+            return {
+              ok: false,
+              error: DELEGATION_ERROR.WIDENED,
+              reason: `A delegation cannot drop the "${key}" constraint its parent declared.`,
+            };
+          }
+          if (key !== "maxConsequence") continue;
+          /* KEEPING THE KEY IS NOT ENOUGH FOR A CEILING: the child's value must
+             be at most the parent's. The parent must allow everything the child
+             allows — consequenceAtLeast(parentMax, childMax) — or the child has
+             widened the exact axis the constraint exists to bound. */
+          const parentMax = maxConsequenceKind(parent.constraints[key]);
+          if (parentMax === null) {
+            return {
+              ok: false,
+              error: "unknown_constraint",
+              reason: "The parent grant's maxConsequence is not a consequence this build derives; a chain cannot be narrowed through an unreadable ceiling.",
+            };
+          }
+          if (!consequenceAtLeast(parentMax, nextConstraints[key])) {
+            return {
+              ok: false,
+              error: DELEGATION_ERROR.WIDENED,
+              reason: `A delegation cannot widen "${key}" from "${parentMax}" to "${nextConstraints[key]}".`,
+            };
+          }
+        }
+      }
+    }
+
     const grant = {
       id: `dlg_${this.#next++}`,
       issuer: parent.subject,
@@ -382,6 +518,7 @@ export class DelegationBroker {
       scope: normalizeScope(scope),
       issuedAt: Date.now(),
       expiresAt: Date.now() + ttlMs,
+      ...(nextConstraints ? { constraints: nextConstraints } : {}),
     };
     grant.signature = sign(grant, this.#key);
     this.#grants.set(grant.id, grant);
@@ -527,6 +664,7 @@ export class DelegationBroker {
       principals: chain.map((l) => l.subject).reverse(),
       depth: grant.depth,
       tenant: grant.tenant ?? null,
+      ...(grant.constraints ? { constraints: [{ id: grant.id, constraints: grant.constraints }] } : {}),
     };
   }
 
@@ -574,6 +712,7 @@ export class DelegationBroker {
       tenant: g.tenant,
       depth: g.depth,
       scope: g.scope,
+      ...(g.constraints ? { constraints: g.constraints } : {}),
       revoked: this.#revoked.has(g.id),
       expiresAt: g.expiresAt ? new Date(g.expiresAt).toISOString() : null,
     }));
@@ -614,10 +753,56 @@ export class DelegationBroker {
  * @returns {{chain:string[], principals:string[], depth:number, tenant:string|null}|null}
  *          the delegation context for the audit record, or null if refused
  */
-export function applyDelegation(decision, { broker, presented, agent, action, resource }) {
-  if (!presented || !broker) return null;
+export async function applyDelegation(decision, { broker, presented, agent, action, resource, call = null, required = false }) {
+  /*
+   * NO AUTHORITY AT ALL. By default a call without a delegation is governed by
+   * policy alone — an agent acting on its own behalf. `required` is the
+   * AUTHORITY-REQUIRED posture: a boundary configured to demand signed human
+   * authority for every governed call refuses one that arrives with none,
+   * rather than falling back to "policy permitted it".
+   */
+  if (!presented) {
+    if (!required) return null;
+    decision.decision = DECISION.DENY;
+    decision.verdict = "deny";
+    decision.rule = "delegation-required";
+    decision.reason =
+      "This boundary requires signed authority for every governed call, and the caller presented none.";
+    decision.remediation =
+      "Ask the principal that owns this agent for a grant scoped to this call, and present it as _meta.cirvix.delegation.";
+    return null;
+  }
+  /*
+   * AUTHORITY PRESENTED, BUT NOTHING TO CHECK IT WITH.
+   *
+   * Ignoring it would be the worst of both worlds: the caller believes it is
+   * acting under a grant, the record shows a grant was presented, and the call
+   * proceeds on policy alone. A boundary that cannot verify authority refuses
+   * rather than pretending the authority was not there.
+   */
+  if (!broker) {
+    decision.decision = DECISION.DENY;
+    decision.verdict = "deny";
+    decision.rule = "delegation-unverifiable";
+    decision.reason =
+      "The caller presented signed authority, and this boundary holds no delegation verifier to check it with.";
+    decision.remediation =
+      "Run the boundary with the delegation verifier configured (cirvix gateway/runtime do this by default).";
+    return null;
+  }
 
-  const resolved = broker.resolve(presented, agent);
+  /*
+   * TWO TRUST ANCHORS, ONE RESOLUTION.
+   *
+   * A token CHAIN (array of Ed25519 envelopes, child first) verifies with the
+   * issuer's public keys alone — that is what makes cross-instance delegation
+   * possible. Everything else is the local HMAC broker. Both funnels into the
+   * same narrowing checks and return the same shape, so the decision path
+   * below has no idea — and no need to know — which anchor produced it.
+   */
+  const resolved = Array.isArray(presented) && typeof broker.resolveChain === "function"
+    ? await broker.resolveChain(presented, agent)
+    : broker.resolve(presented, agent);
 
   if (!resolved.ok) {
     decision.decision = DECISION.DENY;
@@ -629,11 +814,102 @@ export function applyDelegation(decision, { broker, presented, agent, action, re
     return null;
   }
 
+  /*
+   * CONSTRAINTS DECLARED ON THE CHAIN ARE ENFORCED HERE.
+   *
+   * A grant's scope says which actions and resources it covers; a grant's
+   * constraints say under WHAT CIRCUMSTANCES (destination, data, tools, spend,
+   * rate, environment). Recording them without evaluating them would be the
+   * same failure as a policy rule that loads and never fires — the artifact
+   * would look restricted and the call would not be. Every link's constraints
+   * must be satisfied: authority narrows at each hop, so a leaf cannot opt out
+   * of an ancestor's restriction. An unrecognised constraint kind is a refusal
+   * for the same reason it is at verification time. Consequences are only
+   * evaluated when the caller supplies the call (Guard and Pipeline both do).
+   */
+  if (Array.isArray(resolved.constraints) && resolved.constraints.length && call) {
+    const violations = [];
+    const unknown = [];
+    for (const link of resolved.constraints) {
+      const outcome = evaluateConstraints(link.constraints, { ...call, delegating: true }, null);
+      for (const violation of outcome.violations ?? []) violations.push({ link: link.id, ...violation });
+      for (const key of outcome.unknown ?? []) unknown.push({ link: link.id, key });
+    }
+    if (unknown.length) {
+      decision.decision = DECISION.DENY;
+      decision.verdict = "deny";
+      decision.rule = "delegation-constraint-unknown";
+      decision.reason = `The delegation declares constraints this build cannot evaluate: ${unknown
+        .map((u) => `${u.key} (link ${u.link})`)
+        .join(", ")}. A restriction that cannot be checked is not a restriction.`;
+      decision.remediation = "Re-issue the delegation with constraints this build understands.";
+      return null;
+    }
+    if (violations.length) {
+      decision.decision = DECISION.DENY;
+      decision.verdict = "deny";
+      decision.rule = "delegation-constraint-violated";
+      decision.reason = `The delegation ${agent} is acting under forbids this call: ${violations
+        .map((v) => v.reason ?? v.id)
+        .join("; ")}`;
+      decision.remediation = "The call is outside what was delegated, not outside what policy allows.";
+      return null;
+    }
+  }
+
+  /*
+   * CONSUMPTION, ON THE LAST CALL THAT WOULD OTHERWISE BE FORWARDED.
+   *
+   * A grant may be bounded (singleUse, or maxUses N). The use is taken HERE,
+   * after the scope and constraint checks have passed and only for a decision
+   * that would go out — so a call refused for any other reason never burns
+   * authority, and an agent cannot exhaust its own delegation by probing a
+   * boundary. The count is durable and taken under a lock, so two concurrent
+   * requests cannot both believe they took the last one: the loser is refused
+   * with `delegation-consumed` rather than executing on authority somebody
+   * else already spent.
+   */
+  const limits = Array.isArray(resolved.useLimits) ? resolved.useLimits : [];
+  const spendable = isForwarded(decision.decision) || decision.decision === DECISION.REQUIRE_APPROVAL || decision.verdict === "hold";
+  const usage = [];
+  if (limits.length && spendable && broker.store && typeof broker.store.consume === "function") {
+    for (const limit of limits) {
+      const spent = await broker.store.consume(limit.id, {
+        maxUses: limit.maxUses,
+        agent,
+        action,
+        resource,
+        nonce: call?.nonce ?? null,
+      });
+      if (!spent.ok) {
+        decision.decision = DECISION.DENY;
+        decision.verdict = "deny";
+        decision.rule = `delegation-${spent.code ?? DELEGATION_ERROR.CONSUMED}`;
+        decision.reason =
+          `The delegation ${limit.id} allows ${spent.limit} use${spent.limit === 1 ? "" : "s"} and they are spent. ` +
+          "A bounded grant is consumed on use, and the count is durable.";
+        decision.remediation = "Ask the issuing agent for a fresh delegation.";
+        return null;
+      }
+      usage.push({ id: limit.id, uses: spent.uses, limit: spent.limit });
+    }
+  }
+
   const context = {
     chain: resolved.chain,
     principals: resolved.principals,
     depth: resolved.depth,
     tenant: resolved.tenant,
+    ...(resolved.issuerPrincipalId ? { issuer_principal: resolved.issuerPrincipalId, issuer_role: resolved.issuerRole ?? null } : {}),
+    ...(resolved.audience ? { audience: resolved.audience } : {}),
+    ...(usage.length ? { usage } : {}),
+    ...(Array.isArray(resolved.constraints) && resolved.constraints.length
+      ? { constraints: resolved.constraints.map((link) => ({ id: link.id, kinds: Object.keys(link.constraints) })) }
+      : {}),
+    // The human originator, when the chain terminates in a human-issued root
+    // (the Ed25519 anchors carry it). "Who authorized this" must reconstruct
+    // to a person, not to another agent.
+    ...(resolved.human ? { human: resolved.human } : {}),
   };
 
   /*

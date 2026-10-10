@@ -54,6 +54,10 @@ const GATEWAY_VERSION = JSON.parse(
 ).version;
 
 import { Guard, actionForTool, destinationFor, resourceForCall } from "./guard.mjs";
+import { normalizeIdentityMode } from "./identity-modes.mjs";
+import { ToolPinRegistry } from "./tool-drift.mjs";
+import { SessionTracker } from "./session.mjs";
+import { BehavioralBaseline } from "./baseline.mjs";
 import { HttpUpstream } from "./http-transport.mjs";
 import { prepareSpawn, killProcessTree } from "./windows.mjs";
 import { DECISION } from "./decisions.mjs";
@@ -296,6 +300,33 @@ export class Gateway {
     approvals = null,
     missions = null,
     mission = null,
+    identity = null,
+    /* Forwarded to the Guard: the durable revocation fabric. Absent is inert;
+       present, a revoked agent/delegation/mission is refused on this transport
+       exactly as it is on the socket, because both build the same decision
+       core (P0-C). */
+    revocation = null,
+    /* Forwarded to the Guard. Never inferred from enrolment state — an
+       unenrolled production gateway refuses callers instead of silently
+       accepting self-declared agent names. */
+    identityMode = undefined,
+    /* Forwarded to the Guard: the authority-required posture. When on, a call
+       arriving without signed human authority is refused instead of being
+       decided by policy alone, and a chain this gateway cannot verify is
+       refused rather than ignored (P0-B). */
+    requireDelegation = false,
+    /* The stages the gateway used to skip (P0-D). Each is forwarded to the
+       canonical core through the Guard; absent means the core constructs the
+       production default (a fresh session tracker/baseline for this gateway),
+       and `null` means the stage is genuinely INERT and `doctor` says so. */
+    sessionTracker = null,
+    baseline = null,
+    intent = null,
+    mode = undefined,
+    publishedPolicy = null,
+    policyVersion = null,
+    drift = null,
+    compatibility = undefined,
     requestTimeoutMs = 30_000,
     maxInflight = 1024,
   }) {
@@ -309,12 +340,19 @@ export class Gateway {
     this.approvals = approvals;
     this.missions = missions;
     this.mission = mission;
+    this.revocation = revocation;
     this.scopeFor = scopeFor;
     this.log = log;
     this.onDecision = onDecision;
     this.cwd = cwd;
     /** name → fingerprint captured at approval time. */
     this.pins = pins;
+    /* ONE answer to "is this tool's definition approved": the registry owns the
+       map, the gateway withholds from it, and the canonical core refuses
+       against it. Fingerprinting is injected so a boundary that already has
+       pins keeps the algorithm they were written with. */
+    this.pinRegistry = new ToolPinRegistry({ pins, separator: NS, fingerprint: fingerprintTool });
+    this.pins = this.pinRegistry.pins;
 
     this.upstreams = new Map();
     /**
@@ -348,10 +386,50 @@ export class Gateway {
       licence,
       meter,
       agents,
+      identity,
+      revocation,
+      requireDelegation,
+      ...(identityMode !== undefined ? { identityMode: normalizeIdentityMode(identityMode).mode } : {}),
+      /*  P0-D: THE STAGES THE GATEWAY USED TO SKIP.
+       *
+       *  This boundary ran identity, delegation and authority, and none of
+       *  session tracking, the behavioural baseline, engine mode or durable
+       *  tool drift. The local socket ran those and had no identity stage. The
+       *  fix is not to add four more checks here — it is that both surfaces now
+       *  call the canonical core, and the gateway hands it the same stage
+       *  dependencies the socket does. Each line below is a control that a
+       *  shipped surface previously advertised and did not have. */
+      sessionTracker: sessionTracker ?? new SessionTracker(),
+      baseline: baseline ?? new BehavioralBaseline(),
+      intent,
+      mode,
+      publishedPolicy,
+      policyVersion,
+      drift: drift ?? ((call) => this.pinRegistry.status({
+        server: call.server,
+        tool: call.tool,
+        definition: call.server ? this.upstreams.get(call.server)?.tools?.get(String(call.tool))?.tool : undefined,
+      })),
+      ...(compatibility !== undefined ? { compatibility } : {}),
       onDecision,
       log,
     });
     this.stats = this.guard.stats;
+  }
+
+  /**
+   * The canonical posture THIS transport enforces.
+   *
+   * The gateway builds a Guard with production defaults for the stages the CLI
+   * does not state (a fresh session tracker, a behavioural baseline, durable
+   * tool drift), so the only honest answer to "is drift enforced on the MCP
+   * path" is the one the object gives. Reported through the same
+   * `describeCanonicalPosture` the socket uses, so `doctor` can put the two
+   * surfaces side by side instead of describing one construction and calling it
+   * the product (P0-D).
+   */
+  securityPosture() {
+    return this.guard.securityPosture();
   }
 
   /** Session taint, owned by the core. */
@@ -658,6 +736,10 @@ export class Gateway {
       args: { uri, path: resource },
       agent: callerAgent,
       delegation,
+    }, {
+      callerMeta: message.params?._meta?.cirvix ?? null,
+      method: message.method,
+      params: message.params ?? {},
     });
     this.stats = this.guard.stats;
 
@@ -707,6 +789,10 @@ export class Gateway {
       server: server ?? up.name,
       args: { uri, path: fileUriToPath(uri) },
       ...callerIdentity(message.params),
+    }, {
+      callerMeta: message.params?._meta?.cirvix ?? null,
+      method: message.method,
+      params: message.params ?? {},
     });
     this.stats = this.guard.stats;
 
@@ -768,25 +854,23 @@ export class Gateway {
 
       const scope = this.scopeFor(name);
       for (const tool of result?.tools ?? []) {
-        const fingerprint = fingerprintTool(tool);
-        const key = `${name}${NS}${tool.name}`;
-        up.tools.set(tool.name, { tool, fingerprint });
+        const observed = this.pinRegistry.observe(name, tool.name, tool);
+        const key = observed.key;
+        up.tools.set(tool.name, { tool, fingerprint: observed.fingerprint });
 
         if (scope && !scope.includes(tool.name)) continue;
 
-        const pin = this.pins.get(key);
-        if (pin && pin !== fingerprint) {
-          this.log(`tool withheld — definition drift: ${key}`, { pin, fingerprint });
+        if (observed.drifted) {
+          this.log(`tool withheld — definition drift: ${key}`, { pin: observed.expected, fingerprint: observed.actual });
           this.onDecision({
             kind: "drift",
             server: name,
             tool: tool.name,
-            expected: pin,
-            actual: fingerprint,
+            expected: observed.expected,
+            actual: observed.actual,
           });
           continue;
         }
-        if (!pin) this.pins.set(key, fingerprint);
 
         tools.push({
           ...tool,
@@ -841,6 +925,10 @@ export class Gateway {
       args,
       agent: callerAgent,
       delegation,
+    }, {
+      callerMeta: message.params?._meta?.cirvix ?? null,
+      method: message.method,
+      params: message.params ?? {},
     });
     this.stats = this.guard.stats;
 

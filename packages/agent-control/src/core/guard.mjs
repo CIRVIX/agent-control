@@ -1,6 +1,23 @@
 /**
  * The decision core, and the in-process SDK built on it.
  *
+ * IDENTITY ORDERING (INV-009). `authorize()` ESTABLISHES WHO IS CALLING before
+ * it decides anything. The order inside this file is the trust model:
+ *
+ *   transport authentication (socket token / stdio peer, upstream of here)
+ *   -> cryptographic verification (credential + request signatures)
+ *   -> enrolment / status / revocation / replay / clock-skew checks
+ *   -> a trusted principal replaces every claimed name
+ *   -> request normalization
+ *   -> the authorization pipeline
+ *
+ * An unverified caller is denied by a SHORT-CIRCUIT before policy, delegation,
+ * authority, trifecta, entitlements or approvals run on its behalf. No
+ * identity-dependent stage ever evaluates a claim, and no later stage can
+ * convert a planned identity denial into ALLOW. The record carries the planned
+ * rule alongside the enforced one, so the audit trail shows what would have
+ * been decided without crediting the unverified caller with a decision.
+ *
  * The MCP gateway and `guard.wrap()` are two transports for one question: may
  * this agent make this tool call. They MUST NOT be two implementations of the
  * answer. A guard that permits what the gateway denies is worse than having no
@@ -22,19 +39,28 @@
  * tool the agent reached directly was never evaluated.
  */
 
-import { canonicalizeResource, evaluate } from "./policy.mjs";
-import { escalateForRisk, toDecision } from "./decisions.mjs";
-import { classify } from "./risk.mjs";
-import { classifyTool, extractCommand, publicToolName, extractResource, extractDestination, classifyEgress, isInsideWorkspace } from "./normalize.mjs";
-import { scan as scanSecrets, redact as redactSecrets } from "./secret-detect.mjs";
+import { canonicalizeResource } from "./policy.mjs";
+import { DECISION, MODE } from "./decisions.mjs";
+import { classifyTool, classifyEgress, isInsideWorkspace, extractResource, extractDestination, publicToolName } from "./normalize.mjs";
+import { redact as redactSecrets } from "./secret-detect.mjs";
 import { stripInjection } from "./sanitize.mjs";
-import { applyDelegation } from "./delegation.mjs";
-import { assessAuthority, applyAuthority, acquireMission, captureMissionCost, missionAllowanceRefusal, recordMissionUsage } from "./authority.mjs";
-import { applyEntitlements } from "./entitlement-gate.mjs";
-import { SessionTaint, assessTrifecta, applyTrifecta } from "./trifecta.mjs";
-import { approvalFingerprint } from "./approvals.mjs";
-import { DECISION } from "./decisions.mjs";
-import { enforceKillSwitch } from "./kill-switch.mjs";
+import { captureMissionCost } from "./authority.mjs";
+import { SessionTaint } from "./trifecta.mjs";
+import { IDENTITY_MODE, normalizeIdentityMode } from "./identity-modes.mjs";
+/* THE CANONICAL AUTHORIZATION CORE. Every stage semantics lives there; this
+   file is the MCP/SDK transport adapter over it. See core/authorize.mjs. */
+import {
+  AUTHORITY_POSTURE,
+  CANONICAL_STAGES,
+  SECURITY_PROFILE,
+  STAGE_STATUS,
+  SURFACE,
+  authorize as authorizeCanonical,
+  describeCanonicalPosture,
+  policyStamp,
+  resolveSecurityProfile,
+  stagePlan,
+} from "./authorize.mjs";
 
 /**
  * A refusal the agent can read and plan around.
@@ -147,6 +173,9 @@ export function destinationFor(resource, args) {
  */
 export class Guard {
   constructor({
+    /* The enforcement surface this adapter speaks for (P0-D). It rides every
+       canonical decision as evidence; it never selects a stage. */
+    surface = "mcp-gateway",
     rules,
     agent = "local",
     environment = "local",
@@ -164,6 +193,12 @@ export class Guard {
        mission behaves exactly as before. See core/authority.mjs. */
     missions = null,
     mission = null,
+    /* AUTHORITY-REQUIRED posture. When true, a governed call that presents no
+       signed delegation is REFUSED rather than decided by policy alone. Default
+       false keeps the historic contract for library callers; the CLI turns it
+       on with `--require-authority`. Presenting authority this boundary cannot
+       verify is a refusal in either posture. */
+    requireDelegation = false,
     /* Commercial enforcement. All three default to absent, so a Guard built
        without them behaves exactly as before — which is what keeps the SDK's
        library callers and the shared conformance fixture working unchanged.
@@ -173,6 +208,51 @@ export class Guard {
     agents = null,
     approvals = null,
     killSwitch = null,
+    /* The durable revocation fabric (core/revocation.mjs). Absent means this
+       boundary has no revocation source and revocation never refuses — the
+       same "absent is inert" contract every other optional layer keeps. It is
+       evaluated BESIDE the kill switch, not instead of it: the kill switch is
+       a process-local Map, this survives restarts and reaches other
+       processes, and a boundary armed with either must honour it. */
+    revocation = null,
+    /* Authenticated identity. Absent means the boundary runs unverified, which
+       the record states rather than implying. Supplied by the CLI/gateway once
+       the host is enrolled. See core/identity.mjs. */
+    identity = null,
+    /* How the boundary behaves when identity cannot be established. From
+       IDENTITY_MODE. NEVER inferred from enrolment state: a fresh production
+       install must not become an unauthenticated authorization endpoint just
+       because nobody has enrolled yet. Library callers default to COMPAT (the
+       historic behaviour); shipped boundaries default to PRODUCTION.
+       `null` means NO STATEMENT: the core then takes the transport's mode, or
+       COMPAT if neither layer states one. A library default that silently
+       overrode a boundary's explicit mode is the same class of bug as a
+       default that silently weakened it. */
+    identityMode = null,
+    /* P0-D — the stages that used to exist on ONE engine only, or in tests
+       only. They are accepted here now so that the gateway runs the same
+       canonical sequence as the socket. Absent is INERT, and `doctor` reports
+       it as inert; what it must never be is silently skipped. */
+    mode = MODE.ENFORCE,
+    sessionTracker = null,
+    baseline = null,
+    intent = null,
+    drift = null,
+    /* Policy identity: the fingerprint of the rules in force is computed by
+       the core; `publishedPolicy` is the operator's stamp. Present and
+       different means this runtime is enforcing a stale policy and says so.
+       Absent means there is nothing published to compare against — reported
+       as inert rather than as agreement. */
+    publishedPolicy = null,
+    policyVersion = null,
+    onStalePolicy = "deny",
+    /* What a tool-definition drift event does to a call. `deny` by default:
+       drift is an approved-definition mismatch, not a hint. */
+    onDrift = "deny",
+    /* The in-process library contract: there is no transport boundary for the
+       caller to be authenticated by, so identity is not refused. A SHIPPED
+       surface (the MCP gateway, the runtime) must not set this. */
+    compatibility = true,
   } = {}) {
     this.rules = rules ?? [];
     this.agent = agent;
@@ -182,8 +262,11 @@ export class Guard {
     this.secrets = secrets;
     this.approvals = approvals;
     this.killSwitch = killSwitch;
+    this.revocation = revocation;
+    this.identity = identity;
     /** DelegationBroker, when agent-to-agent delegation is in use. */
     this.delegation = delegation;
+    this.requireDelegation = Boolean(requireDelegation);
     /** MissionRegistry, and/or a single mission this Guard always acts under. */
     this.missions = missions;
     this.mission = mission;
@@ -199,6 +282,36 @@ export class Guard {
     this.taint = new SessionTaint();
     this.stats = { calls: 0, permitted: 0, denied: 0, held: 0, leaks: 0, latencyTotal: 0 };
     this.nextId = 1;
+    // Normalized through the setter: an unknown mode throws here, at
+    // construction, rather than being discovered by the first refused caller.
+    this.identityMode = identityMode;
+    this.surface = surface;
+    this.mode = mode;
+    this.sessionTracker = sessionTracker;
+    this.baseline = baseline;
+    this.intent = intent;
+    this.drift = drift;
+    this.publishedPolicy = publishedPolicy;
+    this.policyVersion = policyVersion;
+    this.onStalePolicy = onStalePolicy;
+    this.onDrift = onDrift;
+    this.compatibility = compatibility;
+  }
+
+  #identityMode = null;
+
+  /** The identity mode in force, normalized to a known mode value. */
+  get identityMode() {
+    return this.#identityMode ?? normalizeIdentityMode(IDENTITY_MODE.COMPAT).mode;
+  }
+
+  set identityMode(value) {
+    this.#identityMode = value === null || value === undefined ? null : normalizeIdentityMode(value).mode;
+  }
+
+  /** What this boundary STATED, or undefined when it stated nothing. */
+  get explicitIdentityMode() {
+    return this.#identityMode ?? undefined;
   }
 
   get touchedSecret() {
@@ -217,352 +330,154 @@ export class Guard {
    * and nowhere else.
    *
    * @returns {Promise<{decision:object, record:object, args:any}>}
+   */  /**
+   * Decides one call, and brokers any secret handles it carries (P0-D).
+   *
+   * THIS METHOD IS A TRANSPORT ADAPTER. It parses the MCP/SDK request, hands
+   * the trusted parts to the canonical authorization core, and renders the
+   * canonical outcome as this surface's record. It owns NO stage semantics:
+   * identity, normalization, risk, policy, delegation, authority, capability,
+   * revocation, the kill switch, the trifecta, intent, session state, the
+   * behavioural baseline, tool drift, validation, approval, credential,
+   * sanitization and evidence all live in `core/authorize.mjs`, once.
+   *
+   * What that buys, stated as the property it is: the gateway and the local
+   * socket cannot answer the same authorization question differently, and
+   * neither can silently skip a stage the other runs. The two engines used to
+   * differ by identity, intent, session tracking, baseline, mode and drift —
+   * every one of which was a control one surface advertised and did not have.
+   *
+   * `ctx` is supplied by the trusted embedder, never copied from tool
+   * arguments.
+   *
+   * @returns {Promise<{decision:object, record:object, args:any}>}
    */
-  // ctx is supplied by the trusted embedder, never copied from tool arguments.
   async authorize(input, ctx = {}) {
-    const costUsd = captureMissionCost(ctx);
     const request = input && typeof input === "object" && !Array.isArray(input) ? input : {};
-    let { tool, server = null, args, arguments: callArguments, delegation = null, agent = null, mission = null } = request;
-    args = args ?? callArguments ?? {};
-    const action = actionForTool(server, tool);
-    const resource = resourceForCall(args);
-    // A caller may act as a specific agent per call — a gateway serving several
-    // agents must not evaluate all of them under one configured name.
-    const caller = agent ?? this.agent;
+    const trusted = ctx && typeof ctx === "object" ? ctx : {};
 
-    // Measured around the decision itself, not the tool round trip — the
-    // latter is orders of magnitude larger and would flatter us dishonestly.
-    const startedAt = process.hrtime.bigint();
-
-    /*
-     * RISK AND SECRET DETECTION RUN HERE, NOT ONLY IN THE PIPELINE.
-     *
-     * They used to run only in `Pipeline`, and the gateway does not go through
-     * `Pipeline` — it goes through this method. The consequence was not a
-     * missing feature, it was a silent one: a rule saying `risk >= HIGH` or
-     * `command = "rm -rf"` loaded, validated, appeared in `cirvix policy list`,
-     * fired correctly over the local socket, and never matched a single call
-     * arriving over MCP. The two surfaces enforced different policies from the
-     * same file.
-     *
-     * That is exactly the bypass this file's header warns about, so the fix is
-     * the one the header demands: one context builder, used by both. The
-     * end-to-end MCP test now asserts it.
-     */
-    const scanned = scanSecrets(args);
-    const classified = classify({
-      action,
-      tool,
-      resource: canonicalizeResource(resource, this.cwd),
-      command: extractCommand(args),
-      destination: destinationFor(resource, args),
-      environment: this.environment,
-      insideWorkspace: this.insideWorkspace(resource),
-      touchedSecret: this.touchedSecret,
-      secretsDetected: scanned.length,
-    });
-
-    const context = {
-      environment: this.environment,
-      path: { insideWorkspace: this.insideWorkspace(resource) },
-      egress: {
-        external: this.isExternal(destinationFor(resource, args) ?? resource),
-        internal: classifyEgress(destinationFor(resource, args) ?? resource) === "internal",
-        allowlisted: false,
-        destination: destinationFor(resource, args),
-      },
-      session: { touchedSecret: this.touchedSecret },
-      mcp: { server, tool },
-      risk: classified.level,
-      tool: publicToolName(action),
-      command: extractCommand(args),
-      secrets: { detected: scanned.length },
-    };
-
-    let decision = evaluate(
-      { agent: caller, action, resource, context: { ...context, arguments: args } },
-      this.rules,
-      { cwd: this.cwd },
-    );
-
-    decision.decision = decision.decision ?? toDecision(decision.verdict);
-    decision.risk = classified.level;
-    decision.riskSignals = classified.signals.map((s) => s.id);
-
-    // The risk floor is a floor: it can escalate an unnamed decision, and it
-    // can never de-escalate one a rule made explicitly.
-    const escalated = escalateForRisk(decision, classified, { floor: this.riskFloor });
-    Object.assign(decision, escalated);
-
-    /*
-     * A CALL WITH NO TOOL NAME IS REFUSED HERE.
-     *
-     * `actionForTool(server, undefined)` yields the literal action `tool.`. A
-     * policy containing a wildcard permit — `permit *`, which the docs show —
-     * matches that string, so `guard.authorize({})` returned `permit` while
-     * `Pipeline` refused the identical input as `invalid-request`. Both cores
-     * are documented to answer the same question the same way; this was one of
-     * them answering a different one.
-     *
-     * The MCP gateway already rejects a nameless `tools/call` at its parameter
-     * check, so this is not a reachable bypass through that transport. It is
-     * reachable by an embedder using the SDK directly, and "there is no tool
-     * here" is not a call any policy can authorize.
-     */
-    const wellFormedTool = typeof tool === "string" && tool.trim().length > 0;
-    const wellFormedArgs = args == null || (typeof args === "object" && !Array.isArray(args));
-    if (!wellFormedTool || !wellFormedArgs) {
-      Object.assign(decision, {
-        decision: DECISION.DENY,
-        verdict: "deny",
-        rule: "invalid-request",
-        reason: "A tool call needs a non-empty string tool name and object arguments.",
-        enforced: true,
-      });
-    }
-
-    /*
-     * DELEGATION NARROWS HERE TOO, NOT ONLY IN THE PIPELINE.
-     *
-     * It used to narrow only in `Pipeline`, and the gateway does not go through
-     * `Pipeline` — it goes through this method. Same shape as the risk-rule
-     * bypass documented above, with a worse failure direction: delegation only
-     * ever takes authority away, so a surface that ignores it does not lose a
-     * feature, it grants everything policy allows. A worker delegated `fs.read`
-     * could write the database simply by arriving over MCP instead of the
-     * socket.
-     *
-     * `applyDelegation` is the single implementation both engines call, so
-     * there is no second copy to drift.
-     */
-    const delegationContext = applyDelegation(decision, {
-      broker: this.delegation,
-      presented: delegation,
-      agent: caller,
-      action,
-      resource: decision.resource ?? resource,
-    });
-
-    /*
-     * AUTHORITY RUNS HERE, ON THE SAME PATH AS EVERYTHING ELSE.
-     *
-     * Mission, capability, constraint and expiry are evaluated for every call,
-     * not only for the ones a caller remembers to check. Placing it beside
-     * delegation is deliberate: both answer "does this principal actually hold
-     * the authority it is exercising", both can only narrow, and both have to
-     * be on the ONE path that `guard.wrap()`, the MCP gateway and the socket
-     * all go through. The three bypasses documented above this line were all
-     * the same mistake — a check that lived on one surface and not the others —
-     * and an authority layer with that shape would be worse than none, because
-     * the console would show a boundary the runtime was not enforcing.
-     *
-     * `assessAuthority` is pure. It reads the mission and reports; it does not
-     * spend the budget. A shared mission lease protects its allowance through
-     * asynchronous approval, broker and audit work. Only a successful
-     * authorization is charged; external execution is outside this transaction.
-     * Charging a refused call would let a blocked agent exhaust its own mission,
-     * turning every constraint into a denial-of-service against the agent's work.
-     */
-    let activeMission =
-      mission ?? this.mission ?? (this.missions ? this.missions.forAgent(caller) : null);
-    if (typeof activeMission === "string") {
-      activeMission = this.missions?.get(activeMission) ?? null;
-      if (!activeMission) Object.assign(decision, { decision: DECISION.DENY, verdict: "deny", rule: "authority-mission-unavailable", reason: "The requested mission could not be resolved." });
-    }
-
-    if (activeMission?.id && this.missions?.get(activeMission.id)) activeMission = this.missions.get(activeMission.id);
-    const missionLease = acquireMission(activeMission);
-    try {
-    const allowanceRefusal = missionAllowanceRefusal(activeMission, costUsd, missionLease);
-    const authorityAssessment = assessAuthority(
+    const outcome = await authorizeCanonical(
       {
-        agent: caller,
-        action,
-        resource: decision.resource ?? resource,
-        tool,
-        server,
-        destination: destinationFor(decision.resource ?? resource, args),
-        environment: this.environment,
-        costUsd,
-        delegating: Boolean(delegation),
+        tool: request.tool,
+        server: request.server ?? null,
+        arguments: request.args ?? request.arguments ?? {},
+        /* The caller's own declared name: UNTRUSTED, and never a principal. It
+           rides to the core as a claim so the core can record it — and so the
+           core, not this adapter, decides what a claim is worth. */
+        agent: typeof request.agent === "string" && request.agent ? request.agent : null,
+        delegation: request.delegation ?? null,
+        mission: request.mission ?? null,
+        intent: request.intent ?? null,
+        request_id: typeof request.request_id === "string" && request.request_id ? request.request_id : null,
       },
-      activeMission,
-    );
-
-    const authorityContext = applyAuthority(decision, authorityAssessment);
-    if (allowanceRefusal) Object.assign(decision, allowanceRefusal, { decision: DECISION.DENY, verdict: "deny" });
-
-    /*
-     * An attempt is recorded whether or not authority is what refused it.
-     *
-     * A call policy already denied is still an agent reaching outside its
-     * boundary, and if only authority-attributed refusals were counted an
-     * agent could probe the boundary for free by choosing actions policy
-     * denies anyway. The benchmark scores attempts, not attributions.
-     */
-    if (this.missions && authorityAssessment.applicable && !authorityAssessment.authorized) {
-      this.missions.recordEscape({
-        missionId: activeMission?.id ?? null,
-        agent: caller,
-        kind: authorityAssessment.escape?.kind ?? null,
-        stage: authorityAssessment.stage,
-        code: authorityAssessment.code,
-        action,
-        resource: decision.resource ?? resource,
-        tool,
-        reason: authorityAssessment.reason,
-        blocked: decision.verdict === "deny" || decision.verdict === "hold",
-      });
-    }
-
-    /*
-     * Sequence-aware enforcement (Lethal Trifecta) in Guard.
-     * Prevents untrusted content + sensitive data read + outbound egress.
-     */
-    const trifectaCall = {
-      action,
-      resource: decision.resource ?? resource,
-      tool,
-      server,
-      destination: destinationFor(decision.resource ?? resource, args),
-      environment: this.environment,
-      egress: classifyEgress(destinationFor(decision.resource ?? resource, args) ?? resource),
-      timestamp: new Date().toISOString(),
-      sql: typeof args?.sql === "string" ? args.sql : typeof args?.query === "string" ? args.query : null,
-      secretsDetected: scanned.length,
-    };
-    const trifecta = assessTrifecta(trifectaCall, this.taint);
-    decision = applyTrifecta(decision, trifecta);
-    decision.trifecta = { complete: trifecta.complete, satisfied: trifecta.satisfied, imminent: trifecta.imminent };
-
-    /*
-     * THE COMMERCIAL GATE RUNS HERE TOO, NOT ONLY IN THE PIPELINE.
-     *
-     * Same shape as the two bypasses documented above, and the same cause: the
-     * quota and concurrent-agent limits existed only in `Pipeline`, and
-     * neither `guard.wrap()` nor the MCP gateway goes through `Pipeline`. A
-     * Free-tier user on either path was never metered, the published limits
-     * were not enforced, and the upgrade prompt the pricing depends on could
-     * not fire.
-     *
-     * `applyEntitlements` is the single implementation both cores call. With
-     * no licence and no meter it returns the decision untouched, so library
-     * callers and the shared conformance fixture are unaffected.
-     */
-    Object.assign(
-      decision,
-      applyEntitlements(decision, {
-        licence: this.licence,
-        meter: this.meter,
-        agents: this.agents,
-        agent: caller,
-      }),
-    );
-
-    const killContext = { agentId: caller, tool: publicToolName(action), rawTool: tool, session: this.runId, environment: this.environment, mcp: server };
-    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
-
-    const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-    const decisionId = `dec_${Date.now().toString(36)}${(this.nextId++).toString(36)}`;
-    decision.decisionId = decisionId;
-
-    if ((decision.verdict === "hold" || decision.decision === DECISION.REQUIRE_APPROVAL) && this.approvals) {
-      const callForFingerprint = {
-        agent: caller,
-        server,
+      {
+        surface: this.surface,
+        /* The authenticated host context: the same channel `Pipeline` uses,
+           never copied from the payload. */
+        principal: typeof trusted.agent === "string" && trusted.agent ? trusted.agent : this.agent,
+        callerMeta: trusted.callerMeta ?? null,
+        method: trusted.method ?? null,
+        params: trusted.params ?? {},
+        /* A transport that authenticated the caller already (or one that was
+           handed the result by its own transport) passes the RESULT here. */
+        identityVerification: trusted.identityVerification ?? null,
         environment: this.environment,
-        action,
-        resource: decision.resource ?? resource,
-        command: extractCommand(args),
-        delegation: delegationContext?.principals ?? null,
-        arguments: args,
-      };
-      const fingerprint = approvalFingerprint(callForFingerprint);
+        runId: this.runId,
+        source: trusted.source ?? null,
+        timestamp: trusted.timestamp,
+        tenant: trusted.tenant ?? null,
+        runtime: trusted.runtime ?? null,
+        audience: trusted.audience ?? null,
+        costUsd: captureMissionCost(trusted),
+        profile: this.#profile(),
+      },
+      this.#dependencies(),
+    );
 
-      try {
-        const grant = this.approvals.findGrant(fingerprint);
+    return { decision: outcome.decision, record: outcome.record, args: outcome.args };
+  }
 
-        if (grant) {
-          await this.approvals.consume(grant.id, decisionId);
-          decision.decision = DECISION.ALLOW;
-          decision.verdict = "permit";
-          decision.approvalId = grant.id;
-          decision.approvedBy = grant.decidedBy;
-          decision.reason = `Approved by ${grant.decidedBy}. ${decision.reason ?? ""}`.trim();
-        } else {
-          const approval = await this.approvals.request({
-            request_id: decisionId.replace(/^dec_/, "req_"),
-            agent: caller,
-            tool,
-            resource: decision.resource ?? resource,
-            risk: classified.level,
-            rule: decision.rule,
-            reason: decision.reason,
-            approvers: decision.approvers ?? [],
-            fingerprint,
-          });
-          decision.approvalId = approval.id;
-          if (approval.state === "denied") {
-            decision.decision = DECISION.DENY;
-            decision.verdict = "deny";
-            decision.reason = `Denied by ${approval.decidedBy}. ${decision.reason ?? ""}`.trim();
-          }
-        }
-      } catch (err) {
-        decision.decision = DECISION.DENY;
-        decision.verdict = "deny";
-        decision.rule = "approval-unavailable";
-        decision.reason = `This call needs human approval and the approval store is unavailable (${err.message}). Refused rather than held.`;
-        decision.remediation = "Check the approval log is writable, then retry.";
-      }
-    } else if (decision.verdict === "hold" || decision.decision === DECISION.REQUIRE_APPROVAL) {
-      decision.approvalId = decision.approvalId ?? `apr_${decisionId.slice(4)}`;
-    }
+  /** The wiring this boundary hands the canonical core. One place, visible. */
+  #dependencies() {
+    return {
+      rules: this.rules,
+      cwd: this.cwd,
+      environment: this.environment,
+      riskFloor: this.riskFloor,
+      mode: this.mode,
+      identity: this.identity,
+      /* Only what this boundary STATED — never its reading default. */
+      identityMode: this.explicitIdentityMode,
+      delegation: this.delegation,
+      requireDelegation: this.requireDelegation,
+      missions: this.missions,
+      mission: this.mission,
+      approvals: this.approvals,
+      killSwitch: this.killSwitch,
+      revocation: this.revocation,
+      licence: this.licence,
+      meter: this.meter,
+      agents: this.agents,
+      secrets: this.secrets,
+      sessionTracker: this.sessionTracker,
+      baseline: this.baseline,
+      intent: this.intent,
+      drift: this.drift,
+      audit: this.audit,
+      taint: this.taint,
+      runId: this.runId,
+      agent: this.agent,
+      publishedPolicy: this.publishedPolicy,
+      policyVersion: this.policyVersion,
+      onStalePolicy: this.onStalePolicy,
+      onDrift: this.onDrift,
+      trifectaResponse: this.trifectaResponse,
+      compatibility: this.compatibility,
+      nextDecisionSeq: () => this.nextId++,
+      buildRecord: (run, opts) => this.#record(run, opts),
+      publish: (run) => {
+        this.onDecision({ kind: "decision", ...run.record });
+        this.#absorb(run);
+      },
+    };
+  }
 
-    this.stats.calls++;
-    this.stats.latencyTotal += latencyMs;
+  #profile() {
+    /* A boundary that STATED an identity mode is not a compatibility boundary,
+       whatever the library default says — otherwise an explicitly hardened
+       runtime would be reported (and treated) as a policy-only one. */
+    return resolveSecurityProfile({
+      identityMode: this.identityMode,
+      authorityPosture: this.requireDelegation ? AUTHORITY_POSTURE.REQUIRED : AUTHORITY_POSTURE.OPTIONAL,
+      compatibility: this.explicitIdentityMode ? false : this.compatibility,
+    }).profile;
+  }
 
-    // Substitution sits between the decision and the record, so one call still
-    // produces exactly one decision. A broker refusal turns the permit into a
-    // deny carrying its own rule rather than emitting a second decision.
-    let outgoing = args;
-    let brokered = [];
-    if (this.secrets && decision.verdict === "permit") {
-      let substitution;
-      try {
-        substitution = await this.secrets.substitute(args, {
-          destination: destinationFor(decision.resource, args),
-          subject: caller,
-        });
-      } catch {
-        substitution = { ok: false, reason: "The secret broker is unavailable." };
-      }
-      if (substitution?.ok === true && substitution.value !== undefined) {
-        outgoing = substitution.value;
-        brokered = Array.isArray(substitution.substituted) ? substitution.substituted : [];
-      } else {
-        substitution = substitution?.ok === false
-          ? substitution
-          : { ok: false, reason: "The secret broker returned an invalid response." };
-        decision.verdict = "deny";
-        decision.decision = DECISION.DENY;
-        decision.rule = substitution.outcome === "revoked" ? "credential-revoked" : "secret-broker";
-        decision.reason = substitution.reason;
-        decision.remediation = substitution.outcome === "revoked"
-          ? "This credential was revoked. Request a fresh credential handle."
-          : "Request a handle scoped to this destination, or add the destination to the secret's allowlist.";
-      }
-    }
+  /** The canonical posture this boundary actually enforces (P0-D §23). */
+  securityPosture() {
+    return describeCanonicalPosture({
+      surface: this.surface,
+      profile: this.#profile(),
+      posture: this.requireDelegation ? AUTHORITY_POSTURE.REQUIRED : AUTHORITY_POSTURE.OPTIONAL,
+      deps: this.#dependencies(),
+      stamps: policyStamp(this.rules ?? [], { version: this.policyVersion, published: this.publishedPolicy }),
+    });
+  }
 
-    if (decision.decision === DECISION.SANITIZE &&
-        (decision.sanitize ?? []).some((s) => s.targets.includes("arguments"))) {
-      outgoing = redactSecrets(outgoing).value;
-    }
-
-    decision = enforceKillSwitch(decision, this.killSwitch, killContext);
-    if (decision.verdict !== "permit") outgoing = args;
-
-    const record = {
+  /**
+   * The canonical outcome, rendered as THIS surface's record.
+   *
+   * The record shape is the transport's business — `cirvix logs`, `replay` and
+   * the console read these field names, and the socket's event shape differs
+   * on purpose. The DECISION is the core's business. This function is the
+   * seam: it copies canonical evidence into transport vocabulary and adds no
+   * semantics of its own.
+   */
+  #record(run, opts = {}) {
+    const decision = run.decision ?? {};
+    const identity = run.identity ?? { verified: false, reason: "unknown" };
+    const decisionId = run.decisionId;
+    return {
       decision_id: decisionId,
       // Both spellings, deliberately. `cirvix logs`, `replay`, and the control
       // plane read `request_id`; the older records and the SDK read
@@ -570,39 +485,58 @@ export class Guard {
       request_id: decisionId.replace(/^dec_/, "req_"),
       runId: this.runId,
       run_id: this.runId,
-      agent: caller,
-      server,
-      tool,
-      action,
-      resource: decision.resource,
+      agent: run.principal,
+      server: run.call?.server ?? null,
+      tool: run.call?.raw_tool ?? null,
+      action: run.call?.action ?? null,
+      resource: decision.resource ?? null,
       verdict: decision.verdict,
       decision: decision.decision,
       rule: decision.rule,
       // `policy` is what the journal renders and what the console joins on.
       policy: decision.rule,
       reason: decision.reason,
-      risk: decision.risk,
-      risk_signals: decision.riskSignals,
-      latencyMs: Number(latencyMs.toFixed(3)),
-      latency_ms: Number(latencyMs.toFixed(3)),
-      context,
+      risk: decision.risk ?? run.risk?.level ?? null,
+      risk_signals: decision.riskSignals ?? run.risk?.signals?.map((s) => s.id) ?? [],
+      // What happened in the world, as derived by the canonical core. A
+      // `consequence` rule that fired must name the value it fired on; a
+      // journal that records only `risk` cannot explain the refusal.
+      consequence: decision.consequence ?? run.call?.consequence ?? null,
+      latencyMs: Number(run.latencyMs.toFixed(3)),
+      latency_ms: Number(run.latencyMs.toFixed(3)),
+      context: run.reportContext ?? run.context,
       considered: decision.considered?.slice(0, 200),
-      ...(decision.riskEscalated ? { risk_escalated: true } : {}),
+      ...(decision.riskEscalated || run.baselineEscalated ? { risk_escalated: true } : {}),
       ...(decision.approvalId ? { approval_id: decision.approvalId } : {}),
       ...(decision.approvedBy ? { approved_by: decision.approvedBy } : {}),
       // Who authorized this must be answerable after the fact, on every surface
       // — not only the one that happened to record it.
-      ...(delegationContext ? { delegation: delegationContext } : {}),
+      ...(run.delegation ? { delegation: run.delegation } : {}),
+      // Revocation is part of the record for the same reason delegation is:
+      // "who refused this, and what did they revoke" must be answerable after
+      // the fact, from the journal somebody else wrote.
+      ...(decision.revocation ? { revocation: decision.revocation } : {}),
       // Authority is part of the record for the same reason delegation is:
       // "who authorized this" must be answerable after the fact.
-      ...(authorityContext ? { authority: authorityContext } : {}),
+      ...(run.authorityContext ? { authority: run.authorityContext } : {}),
       ...(decision.escape ? { escape: decision.escape } : {}),
-      ...(brokered.length ? { secrets: brokered, secrets_brokered: brokered } : {}),
+      ...(run.brokered?.length ? { secrets: run.brokered, secrets_brokered: run.brokered } : {}),
       ...(decision.trifecta ? { trifecta: decision.trifecta } : {}),
+      // On every record, whatever the mode: an operator must be able to tell
+      // a proven principal from a mode that accepted a name.
+      identity: {
+        verified: identity.verified === true,
+        agentId: identity.agentId ?? null,
+        issuer: identity.issuer ?? null,
+        keyId: identity.keyId ?? null,
+        binding: identity.binding ?? null,
+        reason: identity.verified ? null : identity.reason,
+        mode: identity.mode ?? this.identityMode,
+      },
       // Findings never carry the value — see secret-detect.mjs.
-      ...(scanned.length
+      ...(run.findings?.length
         ? {
-            secrets_detected: scanned.map((f) => ({
+            secrets_detected: run.findings.map((f) => ({
               path: f.path,
               detector: f.detector,
               severity: f.severity,
@@ -611,54 +545,25 @@ export class Guard {
             })),
           }
         : {}),
+      /* Mode and untrusted claim ride EVERY record, so an operator reading the
+         journal can always tell a proven principal from a mode that accepted a
+         name — a permit must never be mistakable for an authenticated one. */
+      identity_mode: identity.mode ?? this.identityMode,
+      ...(run.claim ? { claimed_agent: run.claim } : {}),
+      ...(opts.identityRefusal && decision.planned ? { planned: decision.planned } : {}),
     };
-
-    if (this.audit) {
-      try {
-        await this.audit.append(record);
-      } catch {
-        record.audit_write_failed = true;
-        if (decision.verdict === "permit") {
-          Object.assign(decision, {
-            decision: DECISION.DENY,
-            verdict: "deny",
-            rule: "audit-unavailable",
-            reason: "The decision could not be recorded, so the call was refused.",
-            remediation: "Check the audit log path is writable, then retry.",
-          });
-          Object.assign(record, {
-            decision: decision.decision,
-            verdict: decision.verdict,
-            rule: decision.rule,
-            policy: decision.rule,
-            reason: decision.reason,
-          });
-          outgoing = args;
-        }
-      }
-    }
-    this.onDecision({ kind: "decision", ...record });
-
-    if (decision.verdict === "deny") this.stats.denied++;
-    else if (decision.verdict === "hold") this.stats.held++;
-    else {
-      this.stats.permitted++;
-      // The successful authorization is charged below, just before return.
-      this.taint.observeCall(trifectaCall, true);
-      // Any successful read of secret-shaped material taints the session. A
-      // brokered substitution deliberately does not: the agent never held the
-      // material, which is the entire point of a handle.
-      if (/secret|credential|token|password|\.env/i.test(decision.resource)) {
-        this.touchedSecret = true;
-      }
-    }
-
-    if (activeMission && decision.verdict === "permit") recordMissionUsage(activeMission, { costUsd });
-    return { decision, record, args: outgoing };
-    } finally {
-      missionLease.release();
-    }
   }
+
+  /** Counters and session taint, taken from the canonical outcome. */
+  #absorb(outcome) {
+    this.stats.calls += 1;
+    this.stats.latencyTotal += outcome.latencyMs;
+    if (outcome.decision.verdict === "deny") this.stats.denied += 1;
+    else if (outcome.decision.verdict === "hold") this.stats.held += 1;
+    else this.stats.permitted += 1;
+  }
+
+
 
   /** Scans a result for material this session resolved, and puts handles back. */
   scrub(payload, decision = {}) {
@@ -709,6 +614,31 @@ export class Guard {
     return classifyEgress(resource) === "external";
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Identity, and the sandboxed principal                                      */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * A principal value that provably matches nothing. Policy matching is exact or
+ * glob over caller-supplied strings; a name is attacker-controlled input, so a
+ * legitimate principal can never collide with this one, and any rule that ever
+ * DID match it would be a misconfiguration that shows up here rather than
+ * being silently attributed to a real agent.
+ *
+ * Defined by the canonical core (core/authorize.mjs) and re-exported here,
+ * because the identity-refusal path — including the sandboxed policy re-eval
+ * that fills the record's `planned` field — now lives there, once, instead of
+ * in each engine.
+ */
+export { SANDBOXED_PRINCIPAL } from "./authorize.mjs";
+
+export {
+  IDENTITY_MODE,
+  IDENTITY_MODES,
+  normalizeIdentityMode,
+  resolveIdentityMode,
+} from "./identity-modes.mjs";
 
 /* -------------------------------------------------------------------------- */
 /*  wrap                                                                       */

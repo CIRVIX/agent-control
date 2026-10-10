@@ -22,9 +22,34 @@
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 
-const VERSION = "0.1.0";
+function packageVersion() {
+  // The SARIF tool version must be the installed package version, not a
+  // hardcoded number — a SARIF upload advertising a release npm never
+  // published is exactly the version-drift bug this exists to prevent.
+  const candidates = [
+    new URL("../package.json", import.meta.url),
+    new URL("../../package.json", import.meta.url),
+  ];
+  for (const url of candidates) {
+    try {
+      return JSON.parse(readFileSync(url, "utf8")).version;
+    } catch {
+      /* not here — try the next candidate */
+    }
+  }
+  // A manifest should always be findable for a published package. If none of
+  // the candidates exist, fail loudly rather than silently advertising a
+  // stale hardcoded version.
+  throw new Error(
+    "sarif.mjs could not locate package.json to read the tool version. " +
+      "The old bug was a hardcoded \"0.1.0\" here; that must not return.",
+  );
+}
+
+const VERSION = packageVersion();
 
 /** SARIF has three levels; ours has three severities. They do not line up 1:1. */
 const LEVEL = { high: "error", medium: "warning", low: "note" };

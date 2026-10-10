@@ -1,6 +1,6 @@
 {
   "name": "@cirvix_ai/agent-control",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "Cirvix AgentControl \u2014 runtime governance for AI agents. Scan what is ungoverned, evaluate policy, and broker tool calls.",
   "license": "Apache-2.0",
   "homepage": "https://cirvix.com/",
@@ -72,6 +72,10 @@
     "./session": "./src/core/session.mjs",
     "./baseline": "./src/core/baseline.mjs",
     "./kill-switch": "./src/core/kill-switch.mjs",
+    "./identity": "./src/core/identity.mjs",
+    "./identity-mode": "./src/core/identity-modes.mjs",
+    "./identity-store": "./src/core/identity-store.mjs",
+    "./keys": "./src/core/keys.mjs",
     "./sandbox": "./src/core/sandbox.mjs",
     "./shadow": "./src/core/shadow.mjs",
     "./redteam": "./src/core/redteam/index.mjs",

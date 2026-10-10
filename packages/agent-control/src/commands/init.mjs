@@ -37,7 +37,7 @@ import { compile } from "../core/policy-dsl.mjs";
 import { writeToken, defaultEndpoint, tokenPath } from "../core/uds.mjs";
 import { UdsClient } from "../core/uds.mjs";
 import { bold, dim, green, red, amber, blue, cyan, gray, plural } from "../core/format.mjs";
-import { shouldAnimate } from "../core/ui/controller.mjs";
+import { launchBanner, revealLines, DEFAULT_STAGGER_MS } from "../core/ui/launch.mjs";
 import { brandHeader, panel } from "../core/ui/primitives.mjs";
 import { ConfigBackupManager, validateMcpServersMap } from "../core/config-store.mjs";
 import { detectFleet, generateFleetPlan } from "../adapters/index.mjs";
@@ -497,6 +497,9 @@ async function probeRuntime(stateDir) {
  * @param {boolean} [opts.dryRun]    preview integration plans without modifying files
  * @param {boolean|string} [opts.rollback] rollback to previous configuration
  * @param {number} [opts.pace]       animation pace; 0 disables
+ * @param {boolean} [opts.animate]   false suppresses the launch plate outright
+ * @param {object} [opts.stdout]     stream the plate and report draw to
+ * @param {object} [opts.stdin]      stream keypresses are read from
  * @returns {Promise<{result:object, output:string}>}
  */
 export async function init({
@@ -507,9 +510,32 @@ export async function init({
   dryRun = false,
   rollback = false,
   pace,
+  animate,
+  stdout = process.stdout,
+  stdin = process.stdin,
 } = {}) {
   const stateDir = join(cwd, ".cirvix");
   const policyPath = join(cwd, "cirvix.policy");
+
+  /* The plate plays *over* the setup below, not before it: launchBanner starts
+     drawing immediately and this body's own awaits let its frames interleave
+     with real filesystem work. `phaseLabel` is a closure the body updates at
+     each step, so the plate's status row names the phase that is actually
+     running instead of decorating the wait with something invented. */
+  let phaseLabel = "";
+  let summaryLabel = "";
+  const setPhase = (label) => {
+    phaseLabel = label;
+  };
+  const plate = launchBanner({
+    stdout,
+    stdin,
+    json,
+    pace,
+    force: animate,
+    phase: () => phaseLabel,
+    summary: () => summaryLabel,
+  });
 
   if (dryRun) {
     if (apply || force || rollback) {
@@ -561,6 +587,7 @@ export async function init({
   const steps = [];
 
   /* ------------------------------------------------------------ 1. runtime */
+  setPhase("installing the runtime");
   await mkdir(stateDir, { recursive: true });
   const token = await exists(tokenPath(stateDir))
     ? (await readFile(tokenPath(stateDir), "utf8")).trim()
@@ -574,6 +601,7 @@ export async function init({
   });
 
   /* -------------------------------------------------------- 2. MCP servers */
+  setPhase("looking for MCP servers");
   let fleet = await detectFleet(cwd, { stateDir });
   let runtimes = fleet.runtimes;
   const servers = fleet.mcpServers;
@@ -587,6 +615,7 @@ export async function init({
   });
 
   /* ------------------------------------------------------------- 3. agents */
+  setPhase("reading agent configurations");
   const frameworks = fleet.frameworks?.length ? fleet.frameworks : await detectFrameworks(cwd);
   const agentNames = [...runtimes.map((r) => r.label), ...frameworks.map((f) => f.label)];
   steps.push({
@@ -597,6 +626,7 @@ export async function init({
   });
 
   /* ------------------------------------------------------------- 4. policy */
+  setPhase("writing the policy");
   const policyExisted = await exists(policyPath);
   if (!policyExisted || force) {
     await writeFile(policyPath, STARTER_POLICY, "utf8");
@@ -623,6 +653,7 @@ export async function init({
   });
 
   /* ------------------------------------------------------------ 5. secrets */
+  setPhase("scanning for credentials");
   const credentials = await detectCredentials(cwd);
   steps.push({
     id: "secrets",
@@ -634,6 +665,7 @@ export async function init({
   });
 
   /* -------------------------------------------------------------- 6. audit */
+  setPhase("starting the audit log");
   const auditPath = join(stateDir, "audit.jsonl");
   if (!(await exists(auditPath))) await writeFile(auditPath, "", "utf8");
   steps.push({
@@ -644,6 +676,7 @@ export async function init({
   });
 
   /* --------------------------------------------------- 7. fleet integration */
+  setPhase("planning fleet integration");
   const fleetPlans = await generateFleetPlan(cwd, { stateDir });
   const unintegratedPlans = fleetPlans.filter((p) => {
     const rt = runtimes.find((r) => r.id === p.adapterId);
@@ -694,6 +727,7 @@ export async function init({
   }
 
   // Probe whether a runtime is actually reachable.
+  setPhase("probing the runtime");
   const runtimeProbe = await probeRuntime(stateDir);
 
   const result = {
@@ -729,23 +763,50 @@ export async function init({
     token,
   };
 
+  summaryLabel = [
+    plural(result.rules, "rule"),
+    plural(result.mcpServers, "server"),
+    plural(runtimes.length, "runtime"),
+  ].join("  ·  ");
+
   if (json) {
     const { token: _hidden, ...safe } = result;
     return { result: safe, output: JSON.stringify(safe, null, 2) };
   }
-  return {
-    result,
-    output: render(result, { runtimes, runtimeProbe, appliedCount, backupId: integrationBackup?.backupId, dryRun }),
-  };
+
+  // The plate finishes before the report lands — its resting frame is what the
+  // user is looking at when the summary starts drawing, and whether it played
+  // decides whether the report carries its own header. When it played, the
+  // report also assembles line by line: the same bytes a plain run writes,
+  // drawn rather than dumped. Returning "" here is the contract `protect`
+  // uses — the command wrote its own output, so the caller has nothing left
+  // to print.
+  const { animated } = await plate;
+  const output = render(result, { runtimes, runtimeProbe, appliedCount, backupId: integrationBackup?.backupId, dryRun, animated });
+
+  if (animated) {
+    await revealLines({
+      stdout,
+      stdin,
+      lines: output.split("\n"),
+      pace: pace ?? DEFAULT_STAGGER_MS,
+    });
+    return { result, output: "" };
+  }
+  return { result, output };
 }
 
 /* -------------------------------------------------------------------------- */
 
-function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = null, dryRun = false }) {
+function render(result, { runtimes, runtimeProbe, appliedCount = 0, backupId = null, dryRun = false, animated = false }) {
   const lines = [];
-  lines.push("");
-  lines.push(brandHeader({ width: 62 }));
-  lines.push("");
+  if (!animated) {
+    // Plain path keeps its own header. When the plate just played, printing the
+    // wordmark again would be the brand twice in two sizes on one screen.
+    lines.push("");
+    lines.push(brandHeader({ width: 62 }));
+    lines.push("");
+  }
 
   // Initialization steps — premium checkmarks, real data.
   lines.push(`  ${dim("Initializing CIRVIX runtime...")}`);

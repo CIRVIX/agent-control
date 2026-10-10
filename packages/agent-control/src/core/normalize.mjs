@@ -36,7 +36,7 @@
  * matching either form matches the same calls.
  */
 
-import { classify } from "./risk.mjs";
+import { classify, deriveConsequence } from "./risk.mjs";
 import { canonicalizeResource } from "./policy.mjs";
 import { canonicalHost, canonicalUrl } from "./canonical.mjs";
 
@@ -448,6 +448,7 @@ export function normalize(raw, ctx = {}) {
   call.risk = risk.level;
   call.risk_signals = risk.signals.map((s) => s.id);
   call.risk_reason = risk.reason;
+  call.consequence = deriveConsequence(call);
 
   return call;
 }
@@ -472,6 +473,7 @@ export function policyContext(call) {
     session: { touchedSecret: call.touchedSecret },
     mcp: { server: call.server, tool: call.raw_tool },
     risk: call.risk,
+    consequence: call.consequence ?? "none",
     tool: call.tool,
     command: call.command,
     arguments: call.arguments ?? {},

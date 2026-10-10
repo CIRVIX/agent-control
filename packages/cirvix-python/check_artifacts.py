@@ -54,9 +54,22 @@ def check(directory: Path) -> None:
             metadata = contents.get(info + "METADATA", b"")
             license_prefix = info + "licenses/"
         else:
-            fixture = root / "conformance" / "policy-conformance.json"
-            if not fixture.is_file():
-                fixture = root.parent / "conformance" / "policy-conformance.json"
+            # Three layouts, and all three are real: this repository (fixture
+            # beside the package), a sibling `packages/conformance`, and the
+            # source distribution, which force-includes it under tests/fixtures.
+            # A checker that cannot find the fixture in the artifact it just
+            # extracted is a checker an auditor cannot run.
+            fixture = None
+            for candidate in (
+                root / "conformance" / "policy-conformance.json",
+                root.parent / "conformance" / "policy-conformance.json",
+                root / "tests" / "fixtures" / "policy-conformance.json",
+            ):
+                if candidate.is_file():
+                    fixture = candidate
+                    break
+            if fixture is None:
+                raise ValueError("Shared conformance fixture not found in this layout")
             fixture_member = "tests/fixtures/policy-conformance.json"
             if (prefix + fixture_member) not in contents:
                 fixture_member = "conformance/policy-conformance.json"

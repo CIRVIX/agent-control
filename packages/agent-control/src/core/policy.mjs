@@ -417,6 +417,16 @@ export function evaluate(request, rules, options = {}) {
       rule: firstPermit.name,
       reason: firstPermit.reason ?? `Permitted by ${firstPermit.name}.`,
       explicit: true,
+      /*  OPTING IN TO THE RISK FLOOR.
+       *
+       *  `escalateForRisk` refuses to touch a decision a rule made explicitly
+       *  UNLESS the rule carries `respectRiskFloor` — and until now nothing
+       *  ever set it, so the risk floor and the behavioural baseline could not
+       *  raise a permitted call to an approval at all. A documented control
+       *  that cannot fire is worse than an absent one, so the flag now travels
+       *  from the rule that declared it (see decisions.mjs). A rule that does
+       *  not declare it keeps the old behaviour exactly. */
+      ...(firstPermit.respectRiskFloor === true ? { respectRiskFloor: true } : {}),
       considered,
       resource,
       observed,

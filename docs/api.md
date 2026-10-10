@@ -9,7 +9,7 @@ Hosted availability is unknown. Client defaults naming an API host neither estab
 ```bash
 export CIRVIX_API=https://cirvix.internal.example.com
 curl -s $CIRVIX_API/health
-# {"status":"ok","version":"0.1.0","uptime":12.4}
+# {"status":"ok","version":"0.3.0","uptime":12.4}
 ```
 
 ## Two invariants, enforced structurally
@@ -106,6 +106,7 @@ real ceiling is 2× the configured limit across the boundary.
 |---|---|---|
 | General | 600/min (`CIRVIX_RATE_LIMIT`) | API key id or session id |
 | Login, SSO, invitations | 10/min | IP |
+| Lead intake | 10/min (`CIRVIX_LEAD_RATE_LIMIT`) | IP |
 | SCIM | 600/min | SCIM token id |
 
 Successful responses carry `x-ratelimit-remaining`. A refused request still
@@ -130,6 +131,7 @@ long-lived and must not consume a request budget.
 | `POST` | `/v1/auth/sso/callback` | `{ state, code }` → session |
 | `GET` | `/v1/invitations/peek?token=` | Reads an invitation without spending it |
 | `POST` | `/v1/invitations/accept` | `{ token, password?, name? }` → session |
+| `POST` | `/v1/leads` | Public intake. `{ email, name?, company?, source?, message? }` → `{ ok, id, receivedAt }` |
 
 `/v1/auth/sso/discover` answers `200` whether or not a connection exists. A
 `404` for "no SSO here" is an oracle for "which domains use this product",
@@ -414,6 +416,34 @@ Frameworks: `soc2`, `iso27001`. **No report claims compliance** — the coverage
 vocabulary has no word for "pass", and a test enforces that. Out-of-scope
 controls are listed as out of scope rather than omitted, because an auditor who
 finds a gap you did not disclose stops trusting the parts you did.
+
+---
+
+## Lead intake
+
+The contact and demo forms on the marketing site write here.
+
+| Method | Path | Credential |
+|---|---|---|
+| `POST` | `/v1/leads` | none — public by necessity |
+| `GET` | `/v1/leads?limit=` | `CIRVIX_LEAD_TOKEN` |
+
+`POST /v1/leads` is the second unauthenticated route that writes (signup is the
+first), so its bounds are stated rather than assumed: its own per-IP budget, an
+address that must be shaped like one, bounded text fields, and an upsert on the
+address so a repeat submission answers the same `200` instead of tripping
+`UNIQUE` and reading to the visitor as a failed form. It creates no account, no
+tenant and no session, and it reaches no tenant data.
+
+`GET /v1/leads` is **operator-only, and deliberately not a permission.** Every
+entry in `PERMISSIONS` is a role inside a tenant, and a tenant is a customer —
+`owner` is the top tier of a customer account, not a word for "us". Gating this
+on a role would hand every enquiry the business has ever received, with names,
+addresses and companies, to every customer who ever signed up. The boundary is
+a separate bearer token, never issued to a tenant and never derived from a role;
+with `CIRVIX_LEAD_TOKEN` unset the route refuses everyone rather than falling
+open. The `leads` table has no `org_id` — a lead exists before any tenant does —
+so there is no tenant dimension to scope by in the first place.
 
 ---
 

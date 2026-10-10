@@ -1,4 +1,5 @@
 import { evaluate, STARTER_RULES } from "../core/policy.mjs";
+import { PREVIEW_BANNER, previewScope } from "../core/preview-scope.mjs";
 import { bold, dim, green, red, amber, blue, cyan, gray, stripAnsi } from "../core/format.mjs";
 import { boxChars, glyphs, padVisible, wordWrap, renderCard } from "../core/ui/theme.mjs";
 
@@ -151,6 +152,22 @@ export function renderAuthPreviewCard({
   innerLines.push("");
   innerLines.push(` ${bold("Rule:")}    ${decision.rule ?? dim("— no rule matched (default deny)")}`);
   innerLines.push(` ${bold("Risk:")}    ${rTone(risk)}`);
+  /* What the call would have done in the world — the axis consequence rules and
+     delegated ceilings are written against, so a person reading the decision
+     card can tell "denied a file write" from "denied moving money". */
+  if (decision.consequence) {
+    const cTone =
+      {
+        financial_transfer: amber,
+        credential_disclosure: red,
+        impersonation: red,
+        privilege_change: amber,
+        infrastructure_change: amber,
+        code_execution: amber,
+        process_advance: blue,
+      }[decision.consequence] ?? dim;
+    innerLines.push(` ${bold("Consequence:")} ${cTone(String(decision.consequence))}`);
+  }
   innerLines.push("");
   innerLines.push(` ${dim("Status:")}  ${dim(execStatus)}`);
 
@@ -203,6 +220,14 @@ export function renderAuthPreviewCard({
     lines.push(`  ${dim("Execution:")}    preview (unexecuted)`);
     lines.push(`  ${dim("Audit Log:")}    bypassed (unrecorded)`);
   }
+
+  /* PREVIEW SCOPE (P0-D): the disclosure is card CONTENT, not a footer that
+     truncates — a preview verdict cannot be quoted as the boundary's answer
+     when the card itself says which stages were never consulted. */
+  lines.push("");
+  lines.push(`  ${amber(bold("PREVIEW — NOT AN AUTHORIZATION DECISION"))}`);
+  lines.push(`  ${dim("Evaluated: policy, risk, intent. NOT evaluated:")} `);
+  lines.push(`  ${dim(previewScope().omitted.join(", "))}`);
 
   const title = `${bold("CIRVIX")} ${dim("/")} ${bold("CONSOLE PREVIEW")}`;
   const footer = `  ${cyan(g.info)} ${dim("Preview only — nothing executed, nothing recorded.")}`;
@@ -304,7 +329,14 @@ export async function consolePreview({
     rules,
     { cwd },
   );
-  if (json) return { code: 0, output: JSON.stringify({ preview: true, tool: parsed.tool, resource: parsed.resource, decision }, null, 2) };
+  /* PREVIEW MARKING (P0-D): the machine-readable output carries the full
+     scope — what a preview evaluates and, derived from the canonical stage
+     list, everything it does NOT. `preview: true` alone said too little. */
+  if (json)
+    return {
+      code: 0,
+      output: JSON.stringify({ preview: true, previewScope: previewScope(), tool: parsed.tool, resource: parsed.resource, decision }, null, 2),
+    };
 
   const output = "\n" + renderAuthPreviewCard({
     tool: parsed.tool,

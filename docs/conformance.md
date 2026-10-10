@@ -132,6 +132,19 @@ Two engines calling the same correct evaluator still diverged, repeatedly:
   concept of delegation at all. Since delegation only ever *narrows*, dropping
   it did not fail safe — a worker delegated `fs.read` got everything policy
   allowed the moment its call arrived over MCP instead of the socket.
+- **Consequence was derived outside the decision core.** `deriveConsequence` ran
+  in `normalize()`, and the canonical core builds its own call object — so
+  `consequence = …` rules, mission `maxConsequence` ceilings and delegated
+  ceilings were silently inert on Guard, Pipeline, the gateway and the socket,
+  while working for any caller that normalized the call itself. The derivation
+  now happens in the core next to risk classification, and the derived kind
+  rides the decision, the record and the evidence.
+- **The Python evaluator does not derive a consequence.** It reads the context
+  it is handed, so a rule keyed on `consequence` fires on the Node boundary and
+  is inert in Python unless the caller supplies the value. Consequence rules are
+  therefore part of the Node-only surface ([Policy →
+  Consequences](./policy.md#consequences)) rather than something the shared
+  fixture compares.
 
 Each of those passed every conformance case, because each was a wiring failure
 between correct components rather than a wrong answer from one.

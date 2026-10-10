@@ -320,29 +320,43 @@ export function launchFrames({ width = LAUNCH_WIDTH, steps = 8, glow = 7 } = {})
 /* -------------------------------------------------------------------------- */
 
 /**
- * Reserve the plate's rows before the first frame.
+ * Reserve the plate's rows before the first frame, starting on a line of its own.
  *
  * The whole sequence assumes `cursor-up-N` lands on its own first row. That is
  * false when the cursor starts within N rows of the bottom of the screen: the
  * first frame's newlines scroll the buffer, and every subsequent redraw then
- * erases N rows of *previous* output instead of its own lines. Writing the
- * block's height in newlines first makes the space exist, after which the
- * arithmetic is true wherever the plate starts.
+ * erases N rows of *previous* output instead of its own lines.
+ *
+ * Writing the block's height in newlines first makes the space exist, so the
+ * arithmetic is true wherever the plate starts. The first of those newlines is
+ * not part of the reservation: without it the plate's top border lands on the
+ * row the shell prompt is sitting on and erases it — which is exactly what it
+ * looked like on a full-screen terminal, where the prompt is at the top of an
+ * otherwise empty window and the plate was drawn flush against the edge.
  */
 function reserveRows(stream, height) {
-  stream.write("\n".repeat(height - 1) + `\u001b[${height - 1}A`);
+  stream.write("\n".repeat(height) + `\u001b[${height - 1}A`);
 }
 
-/** Redraw a fixed-height block in place. `prevHeight` 0 means "not drawn yet". */
+/** Redraw a fixed-height block in place. `prevHeight` 0 means "not drawn yet".
+ *
+ * Every escape here moves rows only; `cursor-up`/`cursor-down` never touch the
+ * column. A frame whose last row is content (the plate — its bottom rule) ends
+ * with the cursor mid-line, so without an explicit `\r` the next frame would be
+ * written starting at that column: on any normal terminal width its lines wrap,
+ * the fixed-height arithmetic breaks, and every later frame lands one row
+ * further down — the screen fills with repeated border fragments. The carriage
+ * return pins column 0 before the erase pass and before the new frame.
+ */
 function redraw(stream, text, prevHeight) {
   let out = "";
   if (prevHeight > 0) {
-    out += `\u001b[${prevHeight - 1}A`;
+    out += `\u001b[${prevHeight - 1}A\r`;
     for (let i = 0; i < prevHeight; i++) {
       out += "\u001b[2K";
       if (i < prevHeight - 1) out += "\u001b[1B";
     }
-    out += `\u001b[${prevHeight - 1}A`;
+    out += `\u001b[${prevHeight - 1}A\r`;
   }
   stream.write(out + text);
 }
@@ -531,7 +545,11 @@ export async function launchBanner({
   phase,
   summary,
 } = {}) {
-  const cols = Number(columns ?? stdout.columns ?? 0);
+  // An unknown or bogus column count — a wrapper that does not report one, or
+  // reports garbage — gets the standard fallback width rather than a NaN that
+  // poisons every downstream comparison.
+  const rawCols = Number(columns ?? stdout.columns ?? 80);
+  const cols = Number.isFinite(rawCols) && rawCols > 0 ? rawCols : 80;
   // The plate needs its own width plus margins, or the box wraps and breaks.
   // An unknown column count — a wrapper that does not report one — gets the
   // standard plate rather than a guessed narrower one.

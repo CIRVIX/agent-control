@@ -56,6 +56,9 @@ import { matchGlob } from "./policy.mjs";
 import { canonicalAction, TAXONOMY } from "./normalize.mjs";
 import { normalizeScope, scopePermits } from "./delegation.mjs";
 import { DECISION, isForwarded } from "./decisions.mjs";
+import { CONSEQUENCE, CONSEQUENCE_ORDER, consequenceAtLeast } from "./risk.mjs";
+
+export { consequenceAtLeast } from "./risk.mjs";
 
 /* -------------------------------------------------------------------------- */
 /*  Vocabulary                                                                 */
@@ -245,9 +248,34 @@ const hostOf = (resource, destination) => {
   } catch {
     /* An unparseable URL is not "no host" — treating it as absent would let a
        malformed destination skip the network constraint entirely. */
-    return " unparseable";
+    return "\u0000unparseable";
   }
 };
+
+/**
+ * The canonical kind of a `maxConsequence` bound, or null when the value names
+ * no consequence this build derives.
+ *
+ * TWO SPELLINGS, ONE MEANING. The value may be the bare kind
+ * (`maxConsequence: "data_write"`) or an object (`{ max: "data_write" }`),
+ * because missions written by hand drift between the two; and it is matched
+ * case-insensitively because the DSL lowercases the same vocabulary
+ * (`consequence >= DATA_WRITE`). Canonicalizing here — rather than at each
+ * comparison — is what makes the delegation narrowing check well-defined: two
+ * spellings of one kind must not read as a widening.
+ *
+ * NULL IS NOT "NO LIMIT". A caller that reads null as "unconstrained" would
+ * turn a typo into free authority, so the evaluator refuses instead; see
+ * CONSTRAINTS.maxConsequence. Issuance (delegation root/delegate) and
+ * lintMission consult this same function, so the same spelling is accepted or
+ * refused on every surface.
+ */
+export function maxConsequenceKind(value) {
+  const raw = typeof value === "string" ? value : value?.max;
+  if (typeof raw !== "string") return null;
+  const kind = raw.toLowerCase();
+  return CONSEQUENCE_ORDER.includes(kind) ? kind : null;
+}
 
 /** Data that must not leave, expressed the way a person would say it. */
 const PII_HINT = /customer|subscriber|patient|user[s]?[._-]?(data|table|export|dump)|pii|personal|email[s]?[._-]?(list|export)|ssn|passport|address(es)?/i;
@@ -402,6 +430,53 @@ const CONSTRAINTS = {
     return null;
   },
 
+  /**
+   * Maximum consequence this mission may effect. Above this, the call is refused.
+   *
+   * The constraint value IS the boundary — `maxConsequence: "data_write"` — so
+   * the evaluator receives the string itself. An object form `{ max: "..." }`
+   * is accepted too, because missions written by hand drift between the two.
+   */
+  maxConsequence(rule, call) {
+    const max = maxConsequenceKind(rule);
+    if (!max) {
+      /*
+       * A DECLARED BOUND WE CANNOT READ IS NOT A SATISFIED CONSTRAINT.
+       *
+       * `maxConsequence: "data_writ"` is a known key with a value no
+       * comparison can ever match, so treating it as absent would sign a
+       * boundary that restricts nothing — the misspelling widens authority
+       * silently, which is the one direction a constraint must never fail.
+       * Refusing is the same posture the delegation layer takes toward an
+       * unknown constraint KEY ("a restriction that cannot be checked is not
+       * a restriction"), and both `lintMission` and the delegation brokers
+       * refuse this value at the point it is written, so the loud failure
+       * happens where it can be fixed.
+       */
+      const written = typeof rule === "string" ? rule : rule?.max;
+      return {
+        id: "consequence.unreadable",
+        reason:
+          `This authority declares maxConsequence "${written}", which is not a consequence this build derives ` +
+          `(${CONSEQUENCE_ORDER.join(", ")}). A boundary that cannot be evaluated is not a boundary.`,
+        escape: ESCAPE.CONSTRAINT_VIOLATION,
+      };
+    }
+    const callConsequence = call.consequence ?? CONSEQUENCE.NONE;
+    // At the boundary is allowed; strictly above it is refused.
+    if (callConsequence === max) return null;
+    if (consequenceAtLeast(callConsequence, max)) {
+      return {
+        id: "consequence.exceeded",
+        reason:
+          `This call's consequence ("${callConsequence}") exceeds what this mission authorizes ` +
+          `("${max}"). The call is within policy but outside the mission's consequence boundary.`,
+        escape: ESCAPE.CONSTRAINT_VIOLATION,
+      };
+    }
+    return null;
+  },
+
   /** Where the call may run. */
   environment(rule, call) {
     const env = String(call.environment ?? "local");
@@ -423,6 +498,15 @@ const CONSTRAINTS = {
     return null;
   },
 };
+
+/**
+ * The constraint kinds this build understands.
+ *
+ * Exported so a SIGNED GRANT can refuse a constraint it does not understand,
+ * instead of carrying one that will never be evaluated: an unrecognised key in
+ * a delegation would otherwise read as a satisfied constraint forever.
+ */
+export const CONSTRAINT_KINDS = Object.freeze(Object.keys(CONSTRAINTS));
 
 /**
  * Runs every declared constraint.
@@ -649,6 +733,11 @@ export function applyAuthority(decision, assessment) {
     constraints: {
       checked: assessment.constraints?.checked ?? [],
       violated: assessment.constraints?.violations?.map((v) => v.constraint) ?? [],
+      /* Keys this build cannot evaluate are NOT reported as enforced. They are
+         inert here (the linter warns; delegation refuses them outright), so a
+         record that listed them under `checked` would claim a restriction the
+         call never had. */
+      ...(assessment.constraints?.unknown?.length ? { unknown: assessment.constraints.unknown } : {}),
     },
     ...(assessment.escape ? { escape: assessment.escape } : {}),
   };
@@ -795,18 +884,41 @@ export function lintMission(mission) {
     }
   }
 
-  for (const key of Object.keys(m.constraints ?? {})) {
-    if (!CONSTRAINTS[key]) {
-      findings.push({
-        severity: "warn",
-        code: "unknown_constraint",
-        constraint: key,
-        message:
-          `"${key}" is not a constraint this runtime evaluates, so it restricts nothing. ` +
-          `Known: ${Object.keys(CONSTRAINTS).join(", ")}.`,
-      });
+  const lintConstraintMap = (map, where) => {
+    for (const [key, value] of Object.entries(map ?? {})) {
+      if (!CONSTRAINTS[key]) {
+        findings.push({
+          severity: "warn",
+          code: "unknown_constraint",
+          ...(where ? { capability: where } : {}),
+          constraint: key,
+          message:
+            `"${key}" is not a constraint this runtime evaluates, so it restricts nothing. ` +
+            `Known: ${Object.keys(CONSTRAINTS).join(", ")}.`,
+        });
+        continue;
+      }
+      /* A KNOWN KEY WITH A VALUE NOBODY CAN READ RESTRICTS NOTHING EITHER.
+         `maxConsequence: "data_writ"` is the same mistake one level down, and
+         the enforcement layer refuses it — loud at the point it is written is
+         the only place a warning helps. */
+      if (key === "maxConsequence" && maxConsequenceKind(value) === null) {
+        const written = typeof value === "string" ? value : value?.max;
+        findings.push({
+          severity: "warn",
+          code: "unreadable_consequence",
+          ...(where ? { capability: where } : {}),
+          constraint: key,
+          message:
+            `maxConsequence "${written}" is not a consequence this runtime derives, so every call under it is refused. ` +
+            `Known: ${CONSEQUENCE_ORDER.join(", ")}.`,
+        });
+      }
     }
-  }
+  };
+
+  lintConstraintMap(m.constraints);
+  for (const cap of m.capabilities) lintConstraintMap(cap.conditions, cap.name);
 
   return { ok: findings.length === 0, findings };
 }

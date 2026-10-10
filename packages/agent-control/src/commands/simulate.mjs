@@ -9,6 +9,7 @@ import { evaluate } from "../core/policy.mjs";
 import { classify } from "../core/risk.mjs";
 import { evaluateIntent } from "../core/intent.mjs";
 import { DECISION, toDecision } from "../core/decisions.mjs";
+import { PREVIEW_BANNER, previewScope } from "../core/preview-scope.mjs";
 import { bold, dim, green, red, amber, cyan } from "../core/format.mjs";
 
 export async function simulatePolicy({
@@ -53,6 +54,11 @@ export async function simulatePolicy({
   }
 
   const result = {
+    /* PREVIEW MARKING (P0-D): this verdict evaluated policy/risk/intent ONLY.
+       A caller must not be able to quote "the simulator said allow" as the
+       boundary's answer — the machine-readable scope and the banner travel
+       with every output shape. */
+    preview: previewScope(),
     decision,
     matchedRule,
     risk: risk.level,
@@ -71,6 +77,8 @@ export async function simulatePolicy({
   const lines = [
     "",
     `  ${bold("CIRVIX POLICY SIMULATOR")}`,
+    "",
+    `  ${amber(bold(PREVIEW_BANNER))}`,
     "",
     `  ${bold("Input Request:")}`,
     `    ${dim("Agent:")}       ${cyan(agent)}`,

@@ -30,6 +30,7 @@ import { DECISION, toDecision } from "../core/decisions.mjs";
 import { normalize, policyRequest } from "../core/normalize.mjs";
 import { classify } from "../core/risk.mjs";
 import { bold, dim, green, red, amber, blue, plural } from "../core/format.mjs";
+import { PREVIEW_BANNER, previewScope } from "../core/preview-scope.mjs";
 
 /* -------------------------------------------------------------------------- */
 /*  Loading                                                                    */
@@ -163,14 +164,26 @@ export async function test({ path, cwd = process.cwd(), json = false, filter = n
     const actual = decision.decision ?? toDecision(decision.verdict);
     const expected = normalizeExpectation(t.expect);
 
+    /* A test that names `consequence` asserts what the RUNTIME DERIVES from the
+       call, not the value it wished for. The declared kind is in the case, the
+       derived kind comes out of normalize() above, and a disagreement fails the
+       test with both values named — the derivation is part of the contract, so
+       a change to it must break the tests that describe the contract. */
+    const declaredConsequence = t.call.consequence ?? null;
+    const derivedConsequence = call.consequence ?? null;
+    const consequenceMismatch = declaredConsequence !== null && declaredConsequence !== derivedConsequence;
+
     cases.push({
       name: t.name,
       line: t.line,
       expected,
       actual,
-      passed: actual === expected,
+      passed: actual === expected && !consequenceMismatch,
       rule: decision.rule,
       risk: call.risk,
+      consequence: derivedConsequence,
+      declaredConsequence,
+      consequenceMismatch,
       tool: call.tool,
       resource: call.resource,
       reason: decision.reason,
@@ -179,11 +192,13 @@ export async function test({ path, cwd = process.cwd(), json = false, filter = n
 
   const passed = cases.filter((c) => c.passed).length;
   const failed = cases.length - passed;
-  const result = { ok: failed === 0, total: cases.length, passed, failed, cases };
+  /* PREVIEW MARKING (P0-D): these cases are evaluated against policy (plus
+     risk/intent where the case declares them) — not against the boundary. */
+  const result = { ok: failed === 0, total: cases.length, passed, failed, cases, preview: previewScope() };
 
   if (json) return { result, code: failed ? 1 : 0, output: JSON.stringify(result, null, 2) };
 
-  const lines = ["", `  ${bold("CIRVIX POLICY VALIDATION")}`, "", `  ${dim(`◌ Running ${cases.length} policy tests...`)}`, "", `  ${dim(path)}`, ""];
+  const lines = ["", `  ${bold("CIRVIX POLICY VALIDATION")}`, "", `  ${amber(bold(PREVIEW_BANNER))}`, "", `  ${dim(`◌ Running ${cases.length} policy tests...`)}`, "", `  ${dim(path)}`, ""];
   for (const c of cases) {
     if (c.passed) {
       lines.push(`  ${green("✓")} ${c.name}  ${dim(`→ ${c.actual}${c.rule ? ` (${c.rule})` : ""}`)}`);
@@ -192,6 +207,11 @@ export async function test({ path, cwd = process.cwd(), json = false, filter = n
       lines.push(`      ${dim("expected")}  ${green(c.expected)}`);
       lines.push(`      ${dim("actual")}    ${red(c.actual)}${c.rule ? dim(`  by ${c.rule}`) : dim("  by default-deny")}`);
       lines.push(`      ${dim("call")}      ${c.tool} ${dim(c.resource || "")}  ${dim(`risk ${String(c.risk).toUpperCase()}`)}`);
+      if (c.consequenceMismatch) {
+        lines.push(
+          `      ${dim("consequence")} ${red(`derived ${c.consequence}`)}  ${dim("but the test declares")}  ${green(c.declaredConsequence)}`,
+        );
+      }
       lines.push(`      ${dim(c.reason ?? "")}`);
       lines.push("");
     }
@@ -273,6 +293,11 @@ export async function explain({
       environment: call.environment,
       insideWorkspace: call.insideWorkspace,
       egress: call.egress,
+      // Derived from the call by normalize(); shown because "what would happen in
+      // the world" is the question `consequence` rules and `maxConsequence`
+      // ceilings are written against, and an operator cannot debug a boundary
+      // they cannot see.
+      consequence: call.consequence ?? null,
     },
     risk: { level: risk.level, signals: risk.signals, reason: risk.reason, posture: risk.posture },
     decision: final,
@@ -301,6 +326,7 @@ export async function explain({
     "",
     `  ${dim("risk")}        ${riskTone(bold(risk.level.toUpperCase()))}  ${dim(`default posture: ${risk.posture}`)}`,
     ...risk.signals.map((s) => `    ${dim("·")} ${s.id.padEnd(28)} ${dim(s.why)}`),
+    `  ${dim("consequence")} ${bold(String(call.consequence ?? "none"))}  ${dim("derived from the call")}`,
     "",
     `  ${dim("rule")}        ${decision.rule ?? dim("— no rule matched (default deny)")}`,
     `  ${dim("reason")}      ${decision.reason}`,

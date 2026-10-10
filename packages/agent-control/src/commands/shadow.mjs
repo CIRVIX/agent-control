@@ -6,6 +6,7 @@
 
 import { ShadowEngine } from "../core/shadow.mjs";
 import { evaluate } from "../core/policy.mjs";
+import { PREVIEW_BANNER, previewScope } from "../core/preview-scope.mjs";
 import { bold, dim, green, red, amber, cyan } from "../core/format.mjs";
 
 export async function executeShadowCommand({
@@ -36,12 +37,15 @@ export async function executeShadowCommand({
   }
 
   const summary = engine.getSummary();
-  if (json) return { output: JSON.stringify(summary, null, 2), code: 0 };
+  /* PREVIEW MARKING (P0-D): shadow evaluates policy only — not the boundary. */
+  const scope = previewScope();
+  if (json) return { output: JSON.stringify({ preview: scope, ...summary }, null, 2), code: 0 };
 
   const lines = [
     "",
     `  ${bold("CIRVIX SHADOW MODE EVALUATION")}`,
     `  ${dim("Non-blocking policy observation — live actions proceed without disruption")}`,
+    `  ${amber(bold(PREVIEW_BANNER))}`,
     "",
     `  ${bold("Summary:")}`,
     `    ${dim("Total Observed:")}           ${summary.totalEvaluated}`,

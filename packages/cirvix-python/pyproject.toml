@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cirvix"
-version = "0.2.5"
+version = "0.3.0"
 description = "Runtime governance for AI agents — evaluate every tool call against policy before it executes."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,7 +40,13 @@ packages = ["cirvix"]
 # The conformance fixture ships with the source distribution so the suite that
 # proves this engine agrees with the Node one can be run by anyone auditing it,
 # not only by us.
-include = ["cirvix", "tests", "README.md", "hatch_build.py"]
+#
+# `check_artifacts.py` ships for the same reason and one more: it is IMPORTED by
+# tests/test_artifacts.py, so leaving it out produced an sdist whose own suite
+# could not run. Found by verify-python-package.py, which extracts the built
+# sdist and runs the tests from there — the artifact we were about to publish
+# failed its own audit. An inventory nobody can re-run is not evidence.
+include = ["cirvix", "tests", "README.md", "hatch_build.py", "check_artifacts.py"]
 
 [tool.hatch.build.targets.sdist.force-include]
 "../conformance/policy-conformance.json" = "tests/fixtures/policy-conformance.json"

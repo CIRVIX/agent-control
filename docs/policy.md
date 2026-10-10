@@ -164,6 +164,7 @@ which is what keeps the engine pure and identically testable in both languages.
 | `session.touchedSecret` | boolean | Whether this session has already read secret-shaped material |
 | `mcp.server` | string \| null | The upstream MCP server, when the call came through the gateway |
 | `mcp.tool` | string | The tool name, when the call came through the gateway |
+| `consequence` | string | What the call would effect in the world, derived by the Node boundary. See [Consequences](#consequences). |
 
 `session.touchedSecret` is the one to understand. It is set once a session
 successfully reads something matching `/secret|credential|token|password|\.env/i`,
@@ -174,6 +175,71 @@ somewhere" fail even when both calls are individually allowed — see
 A brokered [secret handle](./administration.md#secret-brokering) deliberately
 does **not** taint the session: the agent never held the material, which is the
 entire point of a handle.
+
+## Consequences
+
+A consequence is **what happens in the world if the call succeeds** — money
+moves, a message reaches a person, a credential is disclosed, a process
+advances. It is deliberately a different axis from `risk` (how dangerous this
+looks) and from `actions` (what the tool does to a file or a process): reading a
+local file and reading a production credential are the same action and
+different consequences.
+
+The Node boundary derives it from the call — the canonical action, the tool
+name, the destination, and the environment — never from argument *values*, which
+are attacker-controlled. The Python evaluator has no derivation layer: it can
+only read what the caller puts in the context, so a rule keyed on `consequence`
+must either run on the Node boundary or be handed the value explicitly. See
+[Conformance](./conformance.md).
+
+Twelve kinds, in significance order:
+
+| Kind | What it means |
+|---|---|
+| `none` | Nothing leaves the machine — computation, local state. |
+| `data_read` | Data is read out of the environment. |
+| `data_write` | Data changes within the environment. |
+| `data_export` | Data leaves the environment to an external destination. |
+| `communication` | A human-facing message is sent — email, Slack, SMS, push. |
+| `financial_transfer` | Money moves — payments, transfers, charges, refunds. |
+| `credential_disclosure` | Credentials or secrets are read, created, rotated, or disclosed. |
+| `privilege_change` | Who may do what changes — roles, grants, permissions. |
+| `infrastructure_change` | Infrastructure is created, destroyed, or reconfigured. |
+| `code_execution` | Code that was not present before runs. |
+| `impersonation` | The agent acts as a specific human or system identity. |
+| `process_advance` | A workflow or business process advances to a new state. |
+
+They form a lattice, not a line. Each kind from `credential_disclosure` onward
+is **dominant** and outranks the entire chain above it, but no two dominant
+kinds are comparable — being able to change privileges says nothing about being
+able to execute code. So `consequence >= data_write` matches `data_write` and
+everything that outranks it, while `consequence >= credential_disclosure`
+matches only `credential_disclosure`.
+
+Two spellings, in both formats:
+
+- **JSON** — `{ "when": [{ "path": "consequence", "op": "eq", "value": "financial_transfer" }] }`,
+  or `op: "in"` with an explicit list of kinds.
+- **DSL** — `consequence = financial_transfer` and `consequence >= data_export`.
+  The other comparisons (`>`, `<`, `<=`, `!=`, `~`, `~=`) are a compile error, and
+  an unknown kind is one too. A `>=` compiles to an `in` over the kinds that are
+  at least as significant, exactly the way `risk >= HIGH` compiles to a tail —
+  the engine keeps no ordinal logic of its own.
+
+The same lattice bounds delegated authority. A mission or a grant may declare
+`constraints: { maxConsequence: "data_write" }`, which refuses any call whose
+consequence is above the named kind; a delegation can narrow that ceiling but
+never widen it (see [Delegation](./delegation.md)).
+
+> **Derived, not declared.** A tool whose name and destination give no signal is
+> `none`, and a tool that looks financial is `financial_transfer` whether or not
+> it moves money. Consequence is a coarse filter — name the action, the resource,
+> or the destination for anything finer.
+
+A misspelled kind is never read as "no limit": policy rejects it at compile
+time, `maxConsequence` refuses it where it is written (a mission is flagged by
+`lintMission`; a delegation broker throws), and a signed grant carrying one is
+refused at verification.
 
 ## Actions
 

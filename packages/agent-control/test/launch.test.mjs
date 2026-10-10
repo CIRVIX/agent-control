@@ -31,6 +31,7 @@ import {
   withOverlay,
 } from "../src/core/ui/launch.mjs";
 import { colorDepth, setTheme } from "../src/core/theme.mjs";
+import { init } from "../src/commands/init.mjs";
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../bin/cirvix.mjs", import.meta.url));
@@ -63,6 +64,73 @@ async function waitFor(predicate, timeoutMs = 3000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return false;
+}
+
+/**
+ * A minimal terminal, so the redraw can be replayed instead of eyeballed.
+ *
+ * The plate is twelve rows rewritten in place, and that is a class of code no
+ * other kind of test can see: the escapes are all correct, right up until the
+ * cursor arithmetic is wrong, and then it silently erases the operator's output.
+ * It shipped doing exactly that — the plate's top border landed on the shell
+ * prompt's row, which is unmissable on a full-screen terminal where the prompt
+ * sits alone at the top of an empty window.
+ *
+ * `violations` counts writes to a row that existed before the plate started.
+ * Scrolling may remove those rows from the screen, but nothing may ever write
+ * *onto* one.
+ */
+function replay(bytes, { rows = 30, cols = 100, cursorRow = 0 } = {}) {
+  const marker = (r) => `row${String(r).padStart(3, "0")}`.padEnd(cols);
+  const screen = Array.from({ length: rows }, (_, r) => marker(r));
+  // A shell leaves its output above the prompt and the prompt on the cursor's
+  // own row; everything below is blank and free for the plate. A scroll may
+  // carry those lines off the top (into scrollback) but nothing may ever
+  // overwrite one — including the prompt itself.
+  const protectedRow = Array.from({ length: rows }, (_, r) => r <= cursorRow);
+  const violations = [];
+  let r = cursorRow;
+  let c = 0;
+
+  for (let i = 0; i < bytes.length; i++) {
+    const ch = bytes[i];
+    if (ch === "\u001b") {
+      const esc = /^\u001b\[([0-9;?]*)([A-Za-z])/.exec(bytes.slice(i));
+      if (!esc) continue;
+      const n = Number(esc[1]) || 1;
+      if (esc[2] === "A") r = Math.max(0, r - n);
+      else if (esc[2] === "B") r = Math.min(rows - 1, r + n);
+      else if (esc[2] === "K" && esc[1] === "2") {
+        if (protectedRow[r]) violations.push(`erased row ${r}`);
+        screen[r] = " ".repeat(cols);
+      }
+      i += esc[0].length - 1;
+      continue;
+    }
+    if (ch === "\n") {
+      if (r === rows - 1) {
+        screen.shift();
+        screen.push(" ".repeat(cols));
+        protectedRow.shift();
+        protectedRow.push(false);
+      } else {
+        r++;
+      }
+      c = 0;
+      continue;
+    }
+    if (ch === "\r") {
+      c = 0;
+      continue;
+    }
+    if (protectedRow[r]) violations.push(`wrote "${ch}" on row ${r}`);
+    const line = screen[r].split("");
+    line[c] = ch;
+    screen[r] = line.join("");
+    c = Math.min(cols - 1, c + 1);
+  }
+
+  return { screen, violations };
 }
 
 /**
@@ -338,7 +406,7 @@ test("launch: the plate reserves its rows before drawing, so it cannot scroll th
   const stdout = ttyStream();
   await withEnv(INTERACTIVE_ENV, () => playLaunch({ stdout, stdin: fakeStdin(), pace: 1 }));
 
-  const reservation = "\n".repeat(LAUNCH_HEIGHT - 1) + `\u001b[${LAUNCH_HEIGHT - 1}A`;
+  const reservation = "\n".repeat(LAUNCH_HEIGHT) + `\u001b[${LAUNCH_HEIGHT - 1}A`;
   const reservedAt = stdout.chunks.findIndex((chunk) => chunk === reservation);
   const firstFrameAt = stdout.chunks.findIndex((chunk) => chunk.includes("╭"));
 
@@ -484,6 +552,75 @@ test("launch: skipping the digest still prints every line", async () => {
   await running;
 
   assert.equal(visible(stdout.text()), lines.join("\n"), "a skip cost the user output");
+});
+
+test("launch: the plate never writes on a line that was already on screen", async () => {
+  const stdout = ttyStream();
+  await withEnv(INTERACTIVE_ENV, () => playLaunch({ stdout, stdin: fakeStdin(), pace: 1, width: LAUNCH_WIDTH }));
+  const bytes = stdout.chunks.join("");
+
+  // From a fresh prompt at the top (the full-screen case) to the bottom row,
+  // where reserving the block forces the screen to scroll.
+  for (const cursorRow of [0, 1, 5, 12, 18, 25, 28, 29]) {
+    const { screen, violations } = replay(bytes, { cursorRow });
+
+    assert.deepEqual(
+      violations.slice(0, 3),
+      [],
+      `cursorRow ${cursorRow}: the plate wrote over output that was already there`,
+    );
+
+    const top = screen.findIndex((line) => line.includes("╭"));
+    const bottom = screen.findIndex((line) => line.includes("╰"));
+    assert.notEqual(top, -1, `cursorRow ${cursorRow}: no plate was drawn`);
+    assert.equal(bottom - top, LAUNCH_HEIGHT - 1, `cursorRow ${cursorRow}: the plate is not one 12-row block`);
+  }
+});
+
+test("launch: the plate leaves the prompt's line intact", async () => {
+  // A fresh prompt sits on row 0 of an otherwise empty window — exactly what a
+  // full-screen terminal looks like. The plate starts on the next line.
+  const stdout = ttyStream();
+  await withEnv(INTERACTIVE_ENV, () => playLaunch({ stdout, stdin: fakeStdin(), pace: 1, width: LAUNCH_WIDTH }));
+
+  const { screen } = replay(stdout.chunks.join(""), { cursorRow: 0 });
+  assert.match(screen[0], /^row000/, "the shell prompt's line was overwritten");
+  assert.ok(screen[1].includes("╭"), "the plate should start on the line after the prompt");
+});
+
+test("init: the plate plays over setup on a terminal, and the report lands after it", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "cirvix-init-anim-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const stdout = ttyStream();
+  const stdin = fakeStdin();
+
+  const { result, output } = await withEnv(INTERACTIVE_ENV, () =>
+    init({ cwd, stdout, stdin, animate: true, pace: 2 }));
+
+  // Same contract `protect` uses: the command wrote its own report, so the
+  // caller has nothing left to print.
+  assert.equal(output, "", "an animated init returned its report for a second print");
+  const text = visible(stdout.text());
+  assert.match(text, /Cirvix runtime installed/);
+  assert.match(text, /Security policy initialized/);
+  assert.match(text, /CIRVIX CONFIGURATION/);
+  assert.ok(result.ok, `init reported not-ok: ${JSON.stringify(result.steps?.filter((s) => !s.ok))}`);
+  assert.ok(result.rules > 0);
+  assert.ok(stdout.text().includes("\u001b[?25h"), "cursor was left hidden");
+});
+
+test("init: without a terminal the report is returned for the caller to print", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "cirvix-init-plain-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const stdout = ttyStream({ isTTY: false });
+
+  const { result, output } = await init({ cwd, stdout, stdin: fakeStdin() });
+
+  assert.ok(output.length > 0, "the plain path returned no report");
+  assert.equal(visible(stdout.text()), "", "the plate was drawn without a terminal");
+  // No plate played, so the report carries the brand plate itself.
+  assert.match(stripAnsi(output), /AI AGENT RUNTIME GOVERNANCE/);
+  assert.ok(result.ok);
 });
 
 test("launch: --fast and --no-animation are the same home screen as the plain run", async (t) => {

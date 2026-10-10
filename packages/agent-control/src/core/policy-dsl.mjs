@@ -63,7 +63,7 @@
  */
 
 import { EFFECT } from "./decisions.mjs";
-import { RISK_ORDER, riskRank } from "./risk.mjs";
+import { RISK_ORDER, riskRank, CONSEQUENCE, CONSEQUENCE_ORDER, consequenceAtLeast } from "./risk.mjs";
 import { canonicalAction } from "./normalize.mjs";
 
 /** Block headers, and the effect each produces. */
@@ -100,6 +100,7 @@ const ATTRIBUTES = {
   touched_secret: { kind: "condition", path: "session.touchedSecret", boolean: true },
   secrets: { kind: "condition", path: "secrets.detected", numeric: true },
   server: { kind: "condition", path: "mcp.server" },
+  consequence: { kind: "consequence" },
 
   // Rule metadata rather than matching.
   name: { kind: "meta", field: "name" },
@@ -309,6 +310,10 @@ export function compile(source, { cwd = process.cwd(), origin = "policy" } = {})
           rule.when.push(riskCondition(attr));
           break;
         }
+        case "consequence": {
+          rule.when.push(consequenceCondition(attr));
+          break;
+        }
         case "condition": {
           rule.when.push(condition(spec, attr, op));
           break;
@@ -471,6 +476,56 @@ function uniqueName(base, used) {
   return name;
 }
 
+function consequenceCondition(attr) {
+  const kind = String(attr.value).toLowerCase();
+  // Validate the consequence kind for ALL operators. CONSEQUENCE_ORDER holds the
+  // lowercase written forms ("none", "data_read", "financial_transfer", ...).
+  if (!CONSEQUENCE_ORDER.includes(kind)) {
+    throw new PolicySyntaxError(
+      `Unknown consequence "${attr.value}". Expected one of: ${CONSEQUENCE_ORDER.join(", ")}.`,
+      attr.line,
+      attr.raw,
+    );
+  }
+  /*
+   * EXACTLY TWO OPERATORS, AND WHY THE OTHERS ARE REFUSED.
+   *
+   * `=` and `>=` compile to conditions whose meaning is provable: one kind, or
+   * the at-least set of one kind — and both round-trip through `toSource`
+   * without changing what they match. The remaining comparison spellings had a
+   * subtler defect than being hard to render: their candidate predicates were
+   * CONSTANT — they never consulted the candidate kind — so `consequence <=
+   * data_write` compiled to a condition matching EVERY call. On a deny rule
+   * that is a policy that denies everything while validating cleanly.
+   *
+   * A policy file that asks for `<` or `!=` can say it with `=` rules per kind
+   * or with `when` conditions; refusing here beats compiling a rule that means
+   * something else. Same posture as the engine's fail-closed default.
+   *
+   * `~` and `~=` are refused with the rest. They happen to behave as equality
+   * for a vocabulary this small (a glob can never name a kind — an unknown kind
+   * is refused above), but `~` means GLOB MATCH everywhere else in this
+   * grammar, and `risk` already refuses it. Accepting it here would teach a
+   * spelling that reads as a pattern match and silently is not one.
+   */
+  if (attr.op === "=" || attr.op === "==") {
+    return { path: "consequence", op: "eq", value: kind };
+  }
+  if (attr.op === ">=") {
+    // Compile to membership in the at-least set, the same shape    // `risk >= HIGH` compiles to — the engine itself keeps no ordinal logic.
+    const matching = CONSEQUENCE_ORDER.filter((k) => consequenceAtLeast(k, kind));
+    return { path: "consequence", op: "in", value: matching };
+  }
+  if (attr.op === ">" || attr.op === "<=" || attr.op === "<" || attr.op === "!=" || attr.op === "~" || attr.op === "~=") {
+    throw new PolicySyntaxError(
+      `"consequence" supports = and >= only. For "${attr.op} ${attr.value}", write one rule per kind, or a when-condition on the context.`,
+      attr.line,
+      attr.raw,
+    );
+  }
+  throw new PolicySyntaxError(`"consequence" does not support ${attr.op}.`, attr.line, attr.raw);
+}
+
 function invertEffect(effect) {
   return { permit: "allow", forbid: "deny", hold: "require_approval", sanitize: "sanitize", audit_only: "audit_only" }[effect] ?? effect;
 }
@@ -536,6 +591,28 @@ function compileTest(block, cwd) {
       case "server":
         call.server = attr.value;
         break;
+      case "consequence": {
+        /*
+         * AN ASSERTION, NOT A SETTING — AND IT NOW ACTUALLY ASSERTS.
+         *
+         * The consequence is derived from the call, so a test case cannot set
+         * it: the runner normalizes the call exactly as the runtime does and
+         * compares what it derives against what the test declares. Before,
+         * this line compiled to nothing at all, so `consequence =
+         * financial_transfer` on a test case could not fail however wrong the
+         * derivation became — an assertion with no assertion in it.
+         */
+        const kind = String(attr.value).toLowerCase();
+        if (!CONSEQUENCE_ORDER.includes(kind)) {
+          throw new PolicySyntaxError(
+            `Unknown consequence "${attr.value}". Expected one of: ${CONSEQUENCE_ORDER.join(", ")}.`,
+            attr.line,
+            attr.raw,
+          );
+        }
+        call.consequence = kind;
+        break;
+      }
       case "expect":
         expected = attr.value;
         break;
@@ -601,6 +678,40 @@ function sourceCondition(cond) {
   if (cond.path === "risk" && cond.op === "in" && Array.isArray(cond.value)) {
     const lowest = cond.value.map(riskRank).sort((a, b) => a - b)[0] ?? 0;
     return `risk >= ${RISK_ORDER[lowest].toUpperCase()}`;
+  }
+  if (cond.path === "consequence" && cond.op === "eq") {
+    return `consequence = ${cond.value}`;
+  }
+  if (cond.path === "consequence" && cond.op === "in" && Array.isArray(cond.value)) {
+    /*
+     * Render an in-set back ONLY in forms that recompile to the same set.
+     *
+     * The DSL produces exactly two shapes: a single kind (`=`), and a full
+     * at-least tail (`>=`). Anything else can only come from hand-authored
+     * JSON, and rendering it as several `consequence = X` lines would AND the
+     * lines together on recompile — a deny rule matching two kinds would
+     * silently come to match neither. An unrenderable rule must fail loudly:
+     * `policy explain` printing a rule that means something else is worse than
+     * refusing to print it.
+     */
+    const values = cond.value;
+    if (values.length === 1 && CONSEQUENCE_ORDER.includes(values[0])) {
+      return `consequence = ${values[0]}`;
+    }
+    const indexes = values.map((v) => CONSEQUENCE_ORDER.indexOf(v));
+    if (indexes.every((i) => i !== -1)) {
+      const lowest = Math.min(...indexes);
+      const expectedTail = CONSEQUENCE_ORDER.filter((_, i) => consequenceAtLeast(CONSEQUENCE_ORDER[i], CONSEQUENCE_ORDER[lowest]));
+      if (
+        values.length === expectedTail.length &&
+        [...values].sort().join("|") === [...expectedTail].sort().join("|")
+      ) {
+        return `consequence >= ${CONSEQUENCE_ORDER[lowest]}`;
+      }
+    }
+    throw new Error(
+      `Rule set cannot be rendered to policy source: consequence condition ${JSON.stringify(values)} is not a single kind or an at-least set. Name each kind in its own rule instead.`,
+    );
   }
   const key =
     Object.entries(ATTRIBUTES).find(([, s]) => s.kind === "condition" && s.path === cond.path)?.[0] ??

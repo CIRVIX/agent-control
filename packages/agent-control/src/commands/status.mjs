@@ -32,6 +32,9 @@ import { read as readJournal, summarize } from "../core/journal.mjs";
 import { ApprovalStore } from "../core/approvals.mjs";
 import { UdsClient, defaultEndpoint, tokenPath } from "../core/uds.mjs";
 import { MODE } from "../core/decisions.mjs";
+import { HOOK_POSTURE, readHookState, resolveHookPosture } from "../core/hook-posture.mjs";
+import { PrincipalStore } from "../core/principal.mjs";
+import { resolveAuthorityPosture } from "../core/authority-posture.mjs";
 import { bold, dim, green, red, amber, blue, cyan, gray, plural } from "../core/format.mjs";
 import { panel, separator } from "../core/ui/primitives.mjs";
 import { riskTone } from "../core/ui/theme.mjs";
@@ -80,10 +83,19 @@ async function probeRuntime(stateDir) {
 export async function status({ cwd = process.cwd(), rules = [], json = false, stateDir: dir } = {}) {
   const stateDir = dir ?? join(cwd, ".cirvix");
 
-  const [runtimes, runtime, records] = await Promise.all([
+  const [runtimes, runtime, records, hookState, authorityPosture] = await Promise.all([
     detectRuntimes(),
     probeRuntime(stateDir),
     readJournal(join(stateDir, "audit.jsonl")),
+    readHookState(stateDir),
+    /* THE AUTHORITY POSTURE, derived the same way the composition roots derive
+       it (P0-D gate item 5) — status shows policy-only as the named
+       compatibility posture it is, never as a silent default. */
+    resolveAuthorityPosture({
+      requireAuthority: Boolean(process.env.CIRVIX_REQUIRE_AUTHORITY ?? false),
+      authorityPolicy: process.env.CIRVIX_AUTHORITY_POLICY ?? null,
+      principalStore: new PrincipalStore(stateDir),
+    }).catch(() => null),
   ]);
 
   const servers = collectMcpServers(runtimes);
@@ -164,6 +176,48 @@ export async function status({ cwd = process.cwd(), rules = [], json = false, st
     vault: runtime.live?.vault ?? null,
     records: stats.records,
     topRules: stats.topRules,
+    /*  THE CLAUDE CODE HOOK'S POSTURE (P0-D exit criterion 8/9).
+     *
+     *  The hook runs before every Bash/Write/Edit call, and when it cannot reach
+     *  a decision a posture decides what happens. `cirvix status` reports the
+     *  posture the hook last ran under, and how many unevaluated calls it has
+     *  allowed — a count that is not zero is the difference between "governed"
+     *  and "governed when it could". When the hook has never run, the posture is
+     *  the one it WOULD use, resolved from the current environment. */
+    hook: hookState
+      ? {
+          observed: true,
+          posture: hookState.posture,
+          source: hookState.source ?? null,
+          explicit: hookState.explicit === true,
+          unevaluatedCalls: hookState.unevaluatedCalls ?? 0,
+          unevaluatedAllowed: hookState.unevaluatedAllowed ?? 0,
+          unevaluatedDenied: hookState.unevaluatedDenied ?? 0,
+          lastUnevaluated: hookState.lastUnevaluated ?? null,
+        }
+      : {
+          observed: false,
+          posture: resolveHookPosture({
+            fail: process.env.CIRVIX_HOOK_FAIL ?? null,
+            identityMode: process.env.CIRVIX_IDENTITY_MODE ?? null,
+          }).posture,
+          source: "not observed yet — the hook has not run against this state directory",
+          explicit: false,
+          unevaluatedCalls: 0,
+          unevaluatedAllowed: 0,
+          unevaluatedDenied: 0,
+          lastUnevaluated: null,
+        },
+    authority: authorityPosture
+      ? {
+          required: authorityPosture.required === true,
+          source: authorityPosture.source,
+          hasAuthorityModel: authorityPosture.hasAuthorityModel === true,
+          posture: authorityPosture.required
+            ? "REQUIRED — a governed call carrying no signed human authority is refused"
+            : "POLICY-ONLY (compatibility) — presented authority is verified, none is required",
+        }
+      : { required: null, source: "unresolvable", posture: "unknown" },
   };
 
   if (json) return { result, output: JSON.stringify(result, null, 2) };
@@ -195,7 +249,23 @@ function render(r) {
   const auditBadge = r.records > 0 ? green(bold("● INTEGRITY OK")) : dim("● NO RECORDS");
   const secretsBadge = r.vault ? (r.vault.held > 0 ? green(bold("● PROTECTED")) + dim(`  ${r.vault.held} held`) : green(bold("● PROTECTED"))) : green(bold("● PROTECTED"));
   const gatewayBadge = r.protected > 0 ? green(bold("● CONNECTED")) + dim(`  ${r.protected} of ${r.runtimes.length} protected`) : dim("● NOT CONNECTED");
+  /* The hook is a boundary in its own right, so its posture gets a row rather
+     than a footnote: compatibility means unevaluated tool calls are allowed. */
+  const hookBadge =
+    r.hook.posture === HOOK_POSTURE.ENFORCING
+      ? green(bold("● FAIL-CLOSED")) +
+        (r.hook.unevaluatedDenied ? dim(`  ${plural(r.hook.unevaluatedDenied, "unevaluated call")} denied`) : "")
+      : amber(bold("● FAIL-OPEN")) +
+        dim(`  ${plural(r.hook.unevaluatedAllowed, "unevaluated call")} allowed — compatibility posture`);
 
+  /* The authority posture is a row for the same reason the hook is: a
+     compatibility posture must be visible in the operator's daily command,
+     not discoverable only after an incident. */
+  const authorityBadge = r.authority?.required
+    ? green(bold("● REQUIRED")) + dim(`  via ${r.authority.source}`)
+    : r.authority?.required === false
+      ? amber(bold("● POLICY-ONLY")) + dim(`  compatibility — via ${r.authority.source}`)
+      : dim("● UNKNOWN");
   const rows = [
     ["Runtime", runtimeBadge],
     ["Mode", modeBadge],
@@ -203,7 +273,9 @@ function render(r) {
     ["Tests", r.policy.testsPassed !== null && r.policy.testsPassed < r.policy.tests ? red(testsBadge) : testsBadge],
     ["Audit", auditBadge],
     ["Secrets", secretsBadge],
+    ["Authority", authorityBadge],
     ["Gateway", gatewayBadge],
+    ["Claude Code", hookBadge],
   ];
   const width = Math.max(...rows.map(([k]) => k.length));
   for (const [k, v] of rows) lines.push(`  ${k.padEnd(width + 2)}${v}`);

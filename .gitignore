@@ -54,3 +54,17 @@ venv/
 # belongs in a public repository.
 *.log
 
+.vercel
+.env*
+
+# Next.js build output. The marketing site and dashboard in `src/` are a
+# separate tree, and `.next/` is what `next build` leaves behind: hashed client
+# chunks, route manifests, and a `standalone/` copy of the server tree. It is
+# not source, it carries build-time-inlined configuration, and — like the
+# `.e2e/` database and the credential store above — it was untracked but NOT
+# ignored, so it was one `git add -A` from being published, and it was inflating
+# every working-tree scan that walks the repository.
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo

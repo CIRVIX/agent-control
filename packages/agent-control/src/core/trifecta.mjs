@@ -47,7 +47,8 @@
  * can be established with certainty, and says so in its explanation.
  */
 
-import { RISK } from "./risk.mjs";
+import { RISK, sqlKindOf } from "./risk.mjs";
+import { isReadEscalating } from "./sql.mjs";
 import { DECISION } from "./decisions.mjs";
 
 /** The three legs, by the names used in explanations and audit records. */
@@ -103,7 +104,10 @@ export function outboundLegOf(call = {}) {
   if (/\.(write|create|update|delete|put|post|send|publish|deploy|push|upload)$/.test(action)) {
     return { at: call.timestamp, why: `Writes to ${call.resource ?? "an external system"}.`, scope: "write" };
   }
-  if (call.sql && /^\s*(insert|update|delete|drop|alter|truncate)/i.test(call.sql)) {
+  /* One classifier, not a second regex. The old pattern here missed `grant`,
+     `revoke`, `copy`, `call` and every statement whose verb sits behind a CTE,
+     so the taint leg and the risk engine disagreed about what a write was. */
+  if (isReadEscalating(sqlKindOf(call))) {
     return { at: call.timestamp, why: "Mutates a database.", scope: "write" };
   }
   return null;

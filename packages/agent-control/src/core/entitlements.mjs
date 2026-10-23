@@ -84,7 +84,13 @@ export const TIERS = {
   free: {
     id: "free",
     name: "Free",
-    decisionsPerDay: 100,
+    // Raised from 100/day to 1,000/day (2026-10): a single 20-minute
+    // Claude Code / Cursor session fires 200-500 tool calls, so 100/day
+    // bricked a developer's agent on day one. At 1,000/day Free still costs
+    // Cirvix nothing (local enforcement, zero marginal cost) while a real
+    // coding day fits inside the ceiling. Paid tiers scale 10x/10x/10x/5x so
+    // the ladder stays strictly monotonic — see the Lite comment below.
+    decisionsPerDay: 1_000,
     perSeat: false,
     agents: 1,
     seatsIncluded: 1,
@@ -108,7 +114,7 @@ export const TIERS = {
     // no persistent secrets, no replay, no approvals, no attestation, no
     // shared policy. The upgrade story stays one sentence: Starter adds
     // persistent secrets, replay and 3x the daily volume.
-    decisionsPerDay: 500,
+    decisionsPerDay: 5_000,
     perSeat: false,
     agents: 2,
     seatsIncluded: 1,
@@ -125,7 +131,7 @@ export const TIERS = {
   starter: {
     id: "starter",
     name: "Starter",
-    decisionsPerDay: 1_500,
+    decisionsPerDay: 15_000,
     perSeat: false,
     agents: 2,
     seatsIncluded: 1,
@@ -142,7 +148,7 @@ export const TIERS = {
   pro: {
     id: "pro",
     name: "Pro",
-    decisionsPerDay: 12_000,
+    decisionsPerDay: 50_000,
     perSeat: false,
     agents: 8,
     seatsIncluded: 1,
@@ -159,7 +165,7 @@ export const TIERS = {
   team: {
     id: "team",
     name: "Team",
-    decisionsPerDay: 40_000,
+    decisionsPerDay: 200_000,
     perSeat: true,
     agents: null,
     seatsIncluded: 3,

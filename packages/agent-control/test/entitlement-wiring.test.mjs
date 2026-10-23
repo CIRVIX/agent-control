@@ -3,7 +3,7 @@
  *
  * WHY THIS FILE EXISTS
  *
- * `entitlements.test.mjs` proves the arithmetic: 100 decisions on Free, an
+ * `entitlements.test.mjs` proves the arithmetic: 1,000 decisions on Free, an
  * exhausted quota denies, the numbers match the pricing page. Every one of
  * those tests passed while the Free tier was, in practice, unlimited.
  *
@@ -189,7 +189,7 @@ test("the quota notice fires once, on the transition into the limit", () => {
 
   assert.equal(out.length, 1, "a process calling past its quota must not repeat the notice");
   assert.match(out[0], /daily limit reached/i);
-  assert.match(out[0], /100/, "the notice has to name the real number they hit");
+  assert.match(out[0], /1,000/, "the notice has to name the real number they hit");
   assert.match(out[0], /cirvix upgrade/, "a prompt with no next step is a complaint");
   rmSync(cwd, { recursive: true, force: true });
 });

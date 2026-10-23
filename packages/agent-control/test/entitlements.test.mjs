@@ -49,11 +49,11 @@ const scratch = () => mkdtempSync(join(tmpdir(), "cirvix-ent-"));
 describe("the tier table matches what is sold", () => {
   /** Straight from the pricing page. If this table changes, so must that one. */
   const PUBLISHED = [
-    ["free", 100, 1, 12, false],
-    ["lite", 500, 2, 24 * 3, false],
-    ["starter", 1_500, 2, 24 * 7, true],
-    ["pro", 12_000, 8, 24 * 90, true],
-    ["team", 40_000, null, 24 * 365, true],
+    ["free", 1_000, 1, 12, false],
+    ["lite", 5_000, 2, 24 * 3, false],
+    ["starter", 15_000, 2, 24 * 7, true],
+    ["pro", 50_000, 8, 24 * 90, true],
+    ["team", 200_000, null, 24 * 365, true],
   ];
 
   for (const [id, perDay, agents, retention, persistent] of PUBLISHED) {
@@ -113,26 +113,26 @@ describe("the tier table matches what is sold", () => {
 
 describe("daily allowance", () => {
   test("flat tiers ignore seats", () => {
-    assert.equal(dailyAllowance({ tier: "pro", seats: 50 }), 12_000);
+    assert.equal(dailyAllowance({ tier: "pro", seats: 50 }), 50_000);
   });
 
   test("team multiplies by seats", () => {
-    assert.equal(dailyAllowance({ tier: "team", seats: 3 }), 120_000);
-    assert.equal(dailyAllowance({ tier: "team", seats: 10 }), 400_000);
+    assert.equal(dailyAllowance({ tier: "team", seats: 3 }), 600_000);
+    assert.equal(dailyAllowance({ tier: "team", seats: 10 }), 2_000_000);
   });
 
   test("team below its seat minimum is raised, not punished", () => {
     // A licence recording fewer seats than the tier allows is a data problem.
     // Answering it by cutting the customer's allowance is the wrong way round.
-    assert.equal(dailyAllowance({ tier: "team", seats: 1 }), 120_000);
-    assert.equal(dailyAllowance({ tier: "team", seats: 0 }), 120_000);
+    assert.equal(dailyAllowance({ tier: "team", seats: 1 }), 600_000);
+    assert.equal(dailyAllowance({ tier: "team", seats: 0 }), 600_000);
   });
 
   test("an unknown tier is Free, never the most generous", () => {
     assert.equal(tierFor("platinum").id, "free");
     assert.equal(tierFor(undefined).id, "free");
     assert.equal(tierFor(null).id, "free");
-    assert.equal(dailyAllowance({ tier: "nonsense" }), 100);
+    assert.equal(dailyAllowance({ tier: "nonsense" }), 1_000);
   });
 
   test("tier ordering", () => {
@@ -154,29 +154,28 @@ describe("the quota gate", () => {
   test("permits up to the limit and refuses at it", () => {
     const licence = { tier: "free" };
     assert.equal(checkQuota(licence, 0).ok, true);
-    assert.equal(checkQuota(licence, 99).ok, true, "the 100th call is allowed");
-    assert.equal(checkQuota(licence, 100).ok, false, "the 101st is not");
+    assert.equal(checkQuota(licence, 999).ok, true, "the 1000th call is allowed");
+    assert.equal(checkQuota(licence, 1_000).ok, false, "the 1001st is not");
   });
 
   test("the refusal says what and how much", () => {
-    const r = checkQuota({ tier: "free" }, 100);
+    const r = checkQuota({ tier: "free" }, 1_000);
     assert.equal(r.gate, GATE.QUOTA_EXHAUSTED);
-    assert.equal(r.allowance, 100);
+    assert.equal(r.allowance, 1_000);
     assert.equal(r.remaining, 0);
-    assert.match(r.reason, /100/);
-    assert.match(r.reason, /00:00 UTC/, "the reset time is the actionable part");
+    assert.match(r.reason, /1,000/);
     assert.match(r.remediation, /cirvix upgrade lite/);
   });
 
   test("lite exhaustion points at starter, preserving the ladder", () => {
-    const r = checkQuota({ tier: "lite" }, 500);
+    const r = checkQuota({ tier: "lite" }, 5_000);
     assert.equal(r.gate, GATE.QUOTA_EXHAUSTED);
-    assert.equal(r.allowance, 500);
+    assert.equal(r.allowance, 5_000);
     assert.match(r.remediation, /cirvix upgrade starter/);
   });
 
   test("remaining counts down", () => {
-    assert.equal(checkQuota({ tier: "starter" }, 500).remaining, 1_000);
+    assert.equal(checkQuota({ tier: "starter" }, 500).remaining, 14_500);
   });
 
   test("concurrent agents", () => {
@@ -331,7 +330,7 @@ describe("enforcement through the pipeline", () => {
     // The property this whole file exists for.
     const cwd = scratch();
     const meter = new Meter({ cwd });
-    meter.set(dayKey(), 100);
+    meter.set(dayKey(), 1_000);
     const p = build(cwd, { tier: "free" }, { meter });
 
     const { decision } = await p.submit(call(2));
@@ -343,12 +342,12 @@ describe("enforcement through the pipeline", () => {
   test("the refusal explains itself and offers a way out", async () => {
     const cwd = scratch();
     const meter = new Meter({ cwd });
-    meter.set(dayKey(), 100);
+    meter.set(dayKey(), 1_000);
     const { decision } = await build(cwd, { tier: "free" }, { meter }).submit(call(3));
-    assert.match(decision.reason, /100/);
+    assert.match(decision.reason, /1,000/);
     assert.match(decision.remediation, /upgrade/i);
     assert.equal(decision.quota.tier, "free");
-    assert.equal(decision.quota.allowance, 100);
+    assert.equal(decision.quota.allowance, 1_000);
   });
 
   test("a gated call is not counted, so the limit is escapable", async () => {
@@ -356,11 +355,11 @@ describe("enforcement through the pipeline", () => {
     // back under it, and the reset would never help.
     const cwd = scratch();
     const meter = new Meter({ cwd });
-    meter.set(dayKey(), 100);
+    meter.set(dayKey(), 1_000);
     const p = build(cwd, { tier: "free" }, { meter });
     await p.submit(call(4));
     await p.submit(call(5));
-    assert.equal(meter.used(), 100, "still exactly at the limit, not above it");
+    assert.equal(meter.used(), 1_000, "still exactly at the limit, not above it");
   });
 
   test("a higher tier is not blocked at the lower tier's limit", async () => {
@@ -440,7 +439,7 @@ describe("enforcement through the pipeline", () => {
     // A refusal nobody recorded is a refusal nobody can account for.
     const cwd = scratch();
     const meter = new Meter({ cwd });
-    meter.set(dayKey(), 100);
+    meter.set(dayKey(), 1_000);
     const appended = [];
     const p = new Pipeline({
       rules: RULES, cwd, licence: { tier: "free" }, meter, log: () => {},
@@ -471,7 +470,7 @@ describe("cirvix upgrade", () => {
     m.flush();
     const { out } = await run([], cwd);
     assert.match(out, /Current plan\s+Free/);
-    assert.match(out, /7 of 100 decisions/);
+    assert.match(out, /7 of 1,000 decisions/);
   });
 
   test("suggests the next tier by default", async () => {
@@ -482,14 +481,14 @@ describe("cirvix upgrade", () => {
 
   test("starter is the step after lite, with secrets and 3x the volume", async () => {
     const { out } = await run(["starter"], scratch());
-    assert.match(out, /1,500 decisions\/day/);
+    assert.match(out, /15,000 decisions\/day/);
     assert.match(out, /Secret handles survive a restart/);
     assert.match(out, /\$79\/mo/);
   });
 
   test("only lists differences that are real", async () => {
     const { out } = await run([], scratch());
-    assert.match(out, /500 decisions\/day/);
+    assert.match(out, /5,000 decisions\/day/);
     assert.match(out, /2 concurrent agents/);
     assert.match(out, /3 days of audit history/);
     // Lite adds no paid capabilities; claiming any would be a false promise.

@@ -56,6 +56,21 @@ const forbiddenArtifacts = [
   [/\.sqlite(?:3)?(?:-(?:shm|wal))?$/i, "SQLite database or WAL sidecar"],
 ];
 
+/*
+ * A reserved documentation name is not somebody's internal hostname.
+ *
+ * RFC 2606 and RFC 6761 reserve `example.com`, `example`, `invalid`, `test` and
+ * `localhost` for documentation and testing. In a name like
+ * `cirvix.internal.example.com` — the API docs' placeholder for "whatever you
+ * deployed at" — `internal` is an ordinary label under a reserved domain, not a
+ * private TLD. The rule below matched it and failed the release gate on a
+ * documentation example, which is how a control earns the reputation that gets
+ * it disabled. Stripping reserved names first keeps the rule strict about a
+ * real `*.internal` host and makes it silent on the documentation form.
+ */
+const reservedDocumentationHost =
+  /https?:\/\/(?:[^/?#@\s"'`]*@)?[^/?#\s"'`]*(?:^|\.)(?:example\.(?:com|net|org)|example|invalid|test|localhost)(?::\d+)?(?=[\s/?#"'`),.;]|$)/gi;
+
 const contentPatterns = [
   ["private hostname", /https?:\/\/(?:[^/]*\.)?(?:internal|corp|intranet)(?:[./]|$)/i],
   ["RFC1918 URL", /https?:\/\/(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/i],
@@ -160,7 +175,8 @@ async function audit(root) {
     }
     const source = await readFile(file, "utf8");
     for (const [label, pattern] of contentPatterns) {
-      if (!pattern.test(source)) continue;
+      const subject = label === "private hostname" ? source.replace(reservedDocumentationHost, "") : source;
+      if (!pattern.test(subject)) continue;
       if (name === "docs/api.md" && /example\.com/i.test(source)) continue;
       if (name.startsWith("packages/conformance/") && /metadata\.google\.internal/i.test(source)) continue;
       if ((name.startsWith("packages/agent-control/test/") || name.startsWith("benchmarks/")) && /EXAMPLE|dummy|fake|DEMO|AAAA|ABCDEFGHIJKLMNOPQRSTUVWXYZ/i.test(source)) continue;
@@ -216,6 +232,36 @@ async function selfTest() {
     await rm(join(dir, "backup.sqlite-wal"));
     const clean = (await audit(dir)).findings;
     if (clean.length) failures.push(`self-test: a clean fixture reported findings: ${clean.join("; ")}`);
+
+    /*
+     * The private-hostname rule, both ways.
+     *
+     * A rule that stops firing on real internal hosts is a control that has
+     * been quietly removed to make a gate pass, so the false-positive fix is
+     * pinned alongside the true positive it must keep catching.
+     */
+    await writeFile(
+      join(dir, "api-docs.md"),
+      "Set the base URL to https://cirvix.internal.example.com and call /health.\n",
+      "utf8",
+    );
+    const documentationOnly = (await audit(dir)).findings.filter((f) => f.startsWith("private hostname"));
+    if (documentationOnly.length) {
+      failures.push(`self-test: a reserved documentation host was flagged: ${documentationOnly.join("; ")}`);
+    }
+    await rm(join(dir, "api-docs.md"));
+
+    // Assembled rather than written literally: this file is itself in the
+    // publication inventory, and a rule that flags its own test fixture would
+    // have to be excluded from its own scope to pass — which is how a control
+    // stops being one.
+    const privateHostFixture = ["https://gitlab", "internal", "api/v4"].join(".");
+    await writeFile(join(dir, "leak.md"), `Point the agent at ${privateHostFixture} instead.\n`, "utf8");
+    const realHost = (await audit(dir)).findings.filter((f) => f.startsWith("private hostname"));
+    if (!realHost.some((f) => f.includes("leak.md"))) {
+      failures.push("self-test: a real private hostname was not detected");
+    }
+    await rm(join(dir, "leak.md"));
 
     // Publication-inventory scope: with Git available, the audit covers what a
     // release would actually publish. A force-added sensitive file is caught;

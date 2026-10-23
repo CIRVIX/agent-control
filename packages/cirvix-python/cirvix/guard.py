@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from .canonical import expand_home, fold_path
 from .policy import DECISION, VERDICT, Decision, evaluate
+from .sql import analyze_git_push, analyze_sql, is_read_escalating, is_sql_tool, looks_like_sql
 
 __all__ = [
     "CirvixDenied",
@@ -81,10 +82,21 @@ class CirvixHeld(CirvixDenied):
 
 
 _ACTION_PATTERNS = [
+    # Database actions first, and before the filesystem patterns.
+    #
+    # `query` used to be in the listing pattern, so a tool named `sql_query`
+    # normalised to **fs.list** — a database query authorized as a directory
+    # listing, which `allow-workspace-read` then permitted. `sql_query` carrying
+    # `DROP TABLE users` was ALLOWED for exactly that reason. Ordering matters
+    # too: the first match wins, and `sql_query` must reach `db.read` before any
+    # filesystem pattern can claim it.
+    (re.compile(r"(^|[._-])(query|select|find_one|find_many|fetch_rows)($|[._-])"), "db.read"),
+    (re.compile(r"(^|[._-])(insert|update|upsert|delete_row|execute_sql|mutate)($|[._-])"), "db.write"),
+    (re.compile(r"(^|[._-])(migrate|migration|schema_change)($|[._-])"), "db.migrate"),
     (re.compile(r"(^|[._-])(read|get|cat|fetch)($|[._-])"), "fs.read"),
     (re.compile(r"(^|[._-])(write|create|put|save|edit)($|[._-])"), "fs.write"),
     (re.compile(r"(^|[._-])(delete|remove|rm|unlink|drop)($|[._-])"), "fs.delete"),
-    (re.compile(r"(^|[._-])(list|ls|search|find|query|grep)($|[._-])"), "fs.list"),
+    (re.compile(r"(^|[._-])(list|ls|search|find|grep)($|[._-])"), "fs.list"),
     (re.compile(r"(^|[._-])(exec|run|shell|command|spawn)($|[._-])"), "shell.exec"),
     (re.compile(r"(^|[._-])(request|http|curl|browse|scrape)($|[._-])"), "http.request"),
     (re.compile(r"(^|[._-])(apply|deploy|rollout)($|[._-])"), "k8s.apply"),
@@ -93,6 +105,48 @@ _ACTION_PATTERNS = [
 _RESOURCE_KEYS = (
     "path", "file", "filename", "filepath", "uri", "url", "resource", "target", "query", "sql",
 )
+
+
+def _resolve_sql(args: Any, tool: str, resource: str) -> str | None:
+    """The SQL statement a call carries, or ``None``.
+
+    An argument named ``sql``/``query``/``statement`` is explicit. The resource
+    is consulted only for a tool whose name says it runs SQL, and only when the
+    resource actually looks like a statement — a table name is not a statement,
+    and treating one as a statement would turn every ordinary query into an
+    unclassifiable write.
+    """
+    if isinstance(args, Mapping):
+        for key in ("sql", "query", "statement", "query_text"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    if is_sql_tool(tool) and isinstance(resource, str) and looks_like_sql(resource):
+        return resource
+    return None
+
+
+def _git_context(args: Any) -> dict[str, Any] | None:
+    """The git classification a command carries, or ``None`` when it has none."""
+    command = None
+    if isinstance(args, Mapping):
+        for key in ("command", "cmd", "script", "shell", "exec", "run", "args"):
+            value = args.get(key)
+            if isinstance(value, str) and value:
+                command = value
+                break
+            if isinstance(value, (list, tuple)) and value and all(isinstance(x, str) for x in value):
+                command = " ".join(value)
+                break
+    parsed = analyze_git_push(command) if command else None
+    if not parsed:
+        return None
+    return {
+        "push": True,
+        "force": parsed["force"],
+        "forceWithLease": parsed["force_with_lease"],
+        "protectedRef": parsed["protected_ref"],
+    }
 
 
 def action_for_tool(server: str | None, tool: str) -> str:
@@ -185,12 +239,25 @@ class Guard:
         action = action_for_tool(server, tool)
         resource = resource_for_call(args)
 
+        # The action follows the STATEMENT, not only the tool's spelling.
+        #
+        # `sql_query` is a `db.read` by name; `sql_query` carrying `DROP TABLE
+        # users` is a write. Without this the escalation, a read rule permits
+        # the statement, and the name of the tool is the only thing that
+        # decided — which is exactly what made the defect invisible.
+        sql = _resolve_sql(args, tool, resource)
+        sql_kind = analyze_sql(sql)["kind"] if sql else None
+        if action == "db.read" and is_read_escalating(sql_kind):
+            action = "db.write"
+
         context = {
             "environment": self.environment,
             "path": {"insideWorkspace": self.inside_workspace(resource)},
             "egress": {"external": self.is_external(resource), "allowlisted": False},
             "session": {"touchedSecret": self.touched_secret},
             "mcp": {"server": server, "tool": tool},
+            "sql": {"kind": sql_kind},
+            "git": _git_context(args),
         }
 
         decision = evaluate(

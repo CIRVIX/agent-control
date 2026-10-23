@@ -36,9 +36,10 @@
  * matching either form matches the same calls.
  */
 
-import { classify, deriveConsequence } from "./risk.mjs";
+import { analyzeGitPush, classify, deriveConsequence } from "./risk.mjs";
 import { canonicalizeResource } from "./policy.mjs";
 import { canonicalHost, canonicalUrl } from "./canonical.mjs";
+import { analyzeSql, isReadEscalating, isSqlTool, looksLikeSql } from "./sql.mjs";
 
 /* -------------------------------------------------------------------------- */
 /*  Taxonomy                                                                   */
@@ -373,6 +374,44 @@ export function extractDestination(args, resource) {
 }
 
 /** The shell command a call carries, flattened from whichever shape it used. */
+/**
+ * The SQL statement a call carries, or null when it carries none.
+ *
+ * Three shapes, in order of how explicit they are: an argument literally named
+ * `sql`/`query`/`statement`, and — for a tool whose name says it runs SQL —
+ * the resource, when the resource is itself a statement rather than a table
+ * name. That last case is the one that made `sql_query` a fail-open: the tool
+ * name said "read", the statement was the resource, and nothing looked at it.
+ *
+ * Returning null rather than guessing keeps a table name from being read as a
+ * statement, which would turn every ordinary query into an unclassifiable
+ * write. The guess is only made where a tool name already says SQL.
+ */
+export function resolveSqlStatement(args, rawTool, resource) {
+  if (args && typeof args === "object") {
+    for (const key of ["sql", "query", "statement", "query_text"]) {
+      const v = args[key];
+      if (typeof v === "string" && v.trim()) return v;
+    }
+  }
+  if (isSqlTool(rawTool) && typeof resource === "string" && looksLikeSql(resource)) return resource;
+  return null;
+}
+
+/**
+ * Raises a read action when the statement it carries is not a read.
+ *
+ * A tool named `sql_query` normalizes to `db.read`. That is a statement about
+ * the tool's spelling, not about the SQL, and policy rules bind to the action:
+ * `allow: tool = database.query` permits anything sent through it. The action
+ * has to follow the statement, so a `DROP` arriving through a query-shaped
+ * tool becomes a `db.write` and can no longer satisfy a read rule.
+ */
+export function escalateSqlAction(action, sqlKind) {
+  if (action !== "db.read") return action;
+  return isReadEscalating(sqlKind) ? "db.write" : action;
+}
+
 export function extractCommand(args) {
   if (!args || typeof args !== "object") return null;
   for (const key of ["command", "cmd", "script", "shell", "exec", "run", "args"]) {
@@ -404,13 +443,25 @@ export function extractCommand(args) {
 export function normalize(raw, ctx = {}) {
   const args = raw.arguments ?? raw.args ?? {};
   const server = raw.server ?? null;
-  const { tool, action } = classifyTool(raw.tool, server);
+  const { tool: baseTool, action: baseAction } = classifyTool(raw.tool, server);
 
   const cwd = ctx.cwd ?? process.cwd();
   const rawResource = extractResource(args);
   const resource = rawResource ? canonicalizeResource(rawResource, cwd) : "";
   const destination = extractDestination(args, rawResource);
   const command = extractCommand(args);
+
+  /*
+   * The action is derived from the statement, not only from the tool's name.
+   * `sql_query` is a `db.read` by spelling; `sql_query` carrying `DROP TABLE
+   * users` is a write, and it is one here so that no read rule can permit it.
+   */
+  const sql = resolveSqlStatement(args, raw.tool, rawResource);
+  const sqlAnalysis = sql ? analyzeSql(sql) : null;
+  const action = escalateSqlAction(baseAction, sqlAnalysis?.kind ?? null);
+  // The canonical tool name follows the action, so a decision record never says
+  // "database.query" about a call that wrote.
+  const tool = action === baseAction ? baseTool : publicToolName(action);
 
   const insideWorkspace = isInsideWorkspace(cwd, resource);
   const egress = classifyEgress(destination ?? rawResource);
@@ -434,7 +485,8 @@ export function normalize(raw, ctx = {}) {
     raw_resource: rawResource,
     destination,
     command,
-    sql: typeof args.sql === "string" ? args.sql : typeof args.query === "string" ? args.query : null,
+    sql,
+    sql_kind: sqlAnalysis?.kind ?? null,
 
     // Environment the decision depends on.
     environment: ctx.environment ?? "local",
@@ -461,6 +513,7 @@ export function normalize(raw, ctx = {}) {
  * mapping is a second policy.
  */
 export function policyContext(call) {
+  const git = analyzeGitPush(call.command ?? "");
   return {
     environment: call.environment,
     path: { insideWorkspace: call.insideWorkspace },
@@ -478,6 +531,10 @@ export function policyContext(call) {
     command: call.command,
     arguments: call.arguments ?? {},
     secrets: { detected: call.secretsDetected },
+    sql: { kind: call.sql_kind ?? null },
+    git: git
+      ? { push: true, force: git.force, forceWithLease: git.forceWithLease, protectedRef: git.protectedRef }
+      : null,
   };
 }
 

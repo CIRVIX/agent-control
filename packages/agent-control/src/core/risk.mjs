@@ -33,7 +33,11 @@
  * is what applies when no rule matches at all — it is a floor, not an override.
  * A policy that explicitly permits a CRITICAL call wins, because the operator
  * who wrote that rule knew something this table cannot.
- *//** @typedef {"low"|"medium"|"high"|"critical"} RiskLevel */
+ */
+
+import { SQL_KIND, analyzeSql, isReadEscalating } from "./sql.mjs";
+
+/** @typedef {"low"|"medium"|"high"|"critical"} RiskLevel */
 export const RISK = {
   LOW: "low",
   MEDIUM: "medium",
@@ -168,27 +172,262 @@ export const DEFAULT_POSTURE = {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Paths whose contents are credentials. Matched against the canonicalized
- * resource, so `~/x/../.aws/credentials` and an absolute path are one thing.
+ * Credential material, matched against a single path segment (a basename).
+ *
+ * Matching per segment rather than against the whole string is the fix for a
+ * fail-open that a corpus run found: `cat .env` was ALLOWED. The old patterns
+ * required a path separator or start-of-string before `.env`, so an absolute
+ * path matched and the identical relative path on a *shell command line* —
+ * where it is preceded by a space — did not. It then fell through to the
+ * known-safe command allowlist, which recognised `cat <one token>` as a safe
+ * read and lowered the call to LOW.
+ *
+ * Excluding `.env.example` and its siblings is deliberate and narrow: those
+ * files are templates that ship in repositories, and a runtime that denies
+ * reading them teaches people to switch it off before the rule that matters
+ * ever fires.
  */
-const CREDENTIAL_PATHS = [
-  /(^|[/\\])\.env(\.|$)/i,
+const CREDENTIAL_BASENAME = [
+  /^\.env(\.(?!example$|sample$|template$|dist$|dummy$)[A-Za-z0-9_.-]+)?$/i,
+  /^credentials$/i,
+  /^\.npmrc$/i,
+  /^\.netrc$/i,
+  /^\.pgpass$/i,
+  /^\.git-credentials$/i,
+  /^\.terraformrc$/i,
+  /^\.htpasswd$/i,
+  /^\.s3cfg$/i,
+  /^terraform\.tfstate$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)$/i,
+  /^service[-_]?account.*\.json$/i,
+  /\.(pem|pfx|p12|key|keystore|jks)$/i,
+];
+
+/** Multi-segment credential locations, matched against the whole reference. */
+const CREDENTIAL_PATH_FRAGMENT = [
   /(^|[/\\])\.aws([/\\]|$)/i,
   /(^|[/\\])\.ssh([/\\]|$)/i,
-  /(^|[/\\])\.kube([/\\]config)?$/i,
-  /(^|[/\\])\.npmrc$/i,
-  /(^|[/\\])\.netrc$/i,
-  /(^|[/\\])\.docker[/\\]config\.json$/i,
   /(^|[/\\])\.gnupg([/\\]|$)/i,
-  /(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$/i,
-  /(^|[/\\])credentials$/i,
-  /(^|[/\\])\.pgpass$/i,
-  /(^|[/\\])service[-_]?account.*\.json$/i,
-  /\.(pem|pfx|p12|key|keystore|jks)$/i,
-  /(^|[/\\])\.git-credentials$/i,
-  /(^|[/\\])\.terraformrc$/i,
-  /(^|[/\\])terraform\.tfstate$/i,
+  /(^|[/\\])\.kube[/\\]config$/i,
+  /(^|[/\\])\.docker[/\\]config\.json$/i,
+  /(^|[/\\])\.config[/\\]gcloud([/\\]|$)/i,
+  /(^|[/\\])\.terraform\.d([/\\]|$)/i,
 ];
+
+/**
+ * The tokens a shell command might reference a file by.
+ *
+ * Quotes, redirections, `VAR=value` assignments, and `--flag=value` all have
+ * to yield the bare path, because the whole point is that the same file is
+ * reachable through `cat`, `head`, `sed`, `grep`, `cp`, `xargs` and a redirected
+ * `read` alike. Both the full token and its basename are returned.
+ */
+function credentialTokens(text) {
+  const out = new Set();
+  /*
+   * `=` and `@` are separators, not part of a name: `--file=.env` and curl's
+   * `-d @.env` both name the file with a sigil in front of it, and a token
+   * split that keeps the sigil sees `@.env` and matches nothing. A curl body
+   * read is one of the ordinary ways a secret leaves a machine, so it has to
+   * resolve to the same filename as `cat .env` does.
+   */
+  for (const chunk of String(text).split(/[\s;|&()<>"'`=@]+/)) {
+    for (const piece of chunk.split("=")) {
+      const cleaned = piece
+        .replace(/^[=@]+/, "")
+        .replace(/[,;:]+$/, "")
+        .replace(/[/\\]+$/, "")
+        .replace(/\\/g, "/");
+      if (!cleaned) continue;
+      out.add(cleaned);
+      const slash = cleaned.lastIndexOf("/");
+      if (slash !== -1) out.add(cleaned.slice(slash + 1));
+    }
+  }
+  return [...out];
+}
+
+/**
+ * True when a resource path or a shell command refers to credential material.
+ *
+ * The command case is why this is not a regex over the raw string: the file
+ * name arrives as an argument among others, and there is no separator in front
+ * of it that a path-shaped pattern can rely on.
+ */
+export function referencesCredentialFile(text) {
+  if (typeof text !== "string" || !text) return false;
+  if (CREDENTIAL_PATH_FRAGMENT.some((re) => re.test(text))) return true;
+  return credentialTokens(text).some((token) => CREDENTIAL_BASENAME.some((re) => re.test(token)));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Git                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** Branches whose history other people are already building on. */
+const PROTECTED_REF = /^(refs\/heads\/)?(main|master|trunk|production|prod|release)$|^release\//i;
+
+/**
+ * Splits a command line into tokens.
+ *
+ * Quotes are STRIPPED, not treated as grouping. That is deliberate: the shape
+ * this has to see through is `sh -c "git push --force origin main"` and
+ * `bash -lc '… && git push -f'`, where the git invocation is one quoted
+ * argument. Honouring quotes made the whole inner command a single token, and
+ * a single token is not a git subcommand — so the wrapped form scored HIGH
+ * while the bare form scored CRITICAL, which is a distinction with no security
+ * meaning. Splitting inside quotes can over-report (`echo "git push --force"`)
+ * and does not under-report, which is the direction to be wrong in.
+ */
+function shellTokens(command) {
+  return String(command)
+    .split(/\s+/)
+    .map((token) => token.replace(/["']/g, ""))
+    .filter(Boolean);
+}
+
+/**
+ * Decides, from the actual argument tokens, whether a command is a git push
+ * and how it forces.
+ *
+ * The three things a substring search gets wrong, and this does not:
+ *
+ *   - `-f`. It is the same flag as `--force` and the old pattern only looked
+ *     for the long spelling, so the dangerous form was the one that got held
+ *     for a rubber stamp instead of refused. Combined short flags (`-uf`) and
+ *     the `+refspec` push syntax (`git push origin +main`) force too.
+ *   - `--force-with-lease`. It *starts with* `--force`, so a `--force` pattern
+ *     matched it. It is a conditional overwrite — it refuses if somebody else
+ *     pushed since your last fetch — which makes it safer than `--force`, not
+ *     identical to it. It is still an overwrite of shared history, so it is
+ *     held for a human, not silently allowed.
+ *   - Flag ordering and subcommand position. `git -C repo push -f`, `git
+ *     --no-pager push --force`, and a quoted remote all have the force flag
+ *     somewhere other than immediately after `push`.
+ *
+ * @returns {{isPush:boolean, force:boolean, forceWithLease:boolean,
+ *            forceIfIncludes:boolean, protectedRef:boolean, remote:string|null,
+ *            refspecs:string[]}|null} null when this is not a git invocation.
+ */
+export function analyzeGitPush(command) {
+  if (typeof command !== "string" || !command) return null;
+  const tokens = shellTokens(command);
+
+  /*
+   * Every git invocation in the command is examined, not just the first.
+   * `git status && git push --force` and `cd x && git push -f` both name the
+   * dangerous call second, and a classifier that stops at the first `git`
+   * reports nothing about either.
+   */
+  const found = [];
+  for (let index = 0; index < tokens.length; index++) {
+    // `git`, `/usr/bin/git`, and the Windows `git.exe`.
+    if (/(^|[/\\])git(\.exe)?$/i.test(tokens[index])) {
+      const parsed = parseGitPushAt(tokens, index);
+      if (parsed) found.push(parsed);
+    }
+  }
+  if (!found.length) return null;
+  if (found.length === 1) return found[0];
+
+  // Merge: a force in any invocation is a force in the command.
+  return {
+    ...found[0],
+    force: found.some((f) => f.force),
+    forceWithLease: found.some((f) => f.forceWithLease),
+    forceIfIncludes: found.some((f) => f.forceIfIncludes),
+    protectedRef: found.some((f) => f.protectedRef),
+    refspecs: found.flatMap((f) => f.refspecs),
+  };
+}
+
+/** Parses one `git … push …` starting at `start`. Null when it is not a push. */
+function parseGitPushAt(tokens, start) {
+  // Options between `git` and the subcommand. `-C <path>` and `-c <k=v>` take
+  // a separate value and must not be mistaken for the subcommand.
+  let i = start + 1;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (token === "-C" || token === "-c") {
+      i += 2;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      i++;
+      continue;
+    }
+    break;
+  }
+
+  const subcommand = (tokens[i] ?? "").toLowerCase();
+  if (subcommand !== "push") return null;
+
+  const rest = tokens.slice(i + 1);
+  let force = false;
+  let forceWithLease = false;
+  let forceIfIncludes = false;
+  let remote = null;
+  const refspecs = [];
+
+  for (const token of rest) {
+    const lower = token.toLowerCase();
+
+    if (lower === "--force-with-lease" || lower.startsWith("--force-with-lease=")) {
+      forceWithLease = true;
+      continue;
+    }
+    if (lower === "--force-if-includes") {
+      forceIfIncludes = true;
+      continue;
+    }
+    if (lower === "--force") {
+      force = true;
+      continue;
+    }
+    // A single-dash cluster such as `-f`, `-uf`, or `-fu`. `-o` takes a value
+    // and is the one short push flag whose operand can be the letter f, so a
+    // cluster that opens with it is not read as force.
+    if (/^-[A-Za-z]+$/.test(token) && !token.startsWith("-o")) {
+      if (token.includes("f")) force = true;
+      continue;
+    }
+    if (token.startsWith("-")) continue; // --set-upstream, --tags, --dry-run, …
+
+    if (remote === null) {
+      remote = token;
+      continue;
+    }
+    refspecs.push(token);
+  }
+
+  // `git push origin +main` forces through the refspec, with no flag at all.
+  if (refspecs.some((r) => r.startsWith("+"))) force = true;
+
+  const protectedRef = refspecs.some((r) => {
+    const dst = r.includes(":") ? r.slice(r.indexOf(":") + 1) : r;
+    return PROTECTED_REF.test(dst.replace(/^\+/, ""));
+  });
+
+  return { isPush: true, force, forceWithLease, forceIfIncludes, protectedRef, remote, refspecs };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  SQL                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The classification of the SQL this call carries, or null.
+ *
+ * Prefers the kind the normalizer already worked out, and falls back to
+ * classifying the statement here so a call assembled by hand — the canonical
+ * core in `authorize.mjs`, a test fixture, the SDK — is governed identically.
+ */
+export function sqlKindOf(c) {
+  if (c?.sqlKind) return c.sqlKind;
+  const text = c?.sql;
+  if (typeof text === "string" && text.trim()) return analyzeSql(text).kind;
+  return null;
+}
 
 /**
  * Cloud instance-metadata endpoints — the SSRF target that turns a web-fetch
@@ -215,7 +454,12 @@ const DESTRUCTIVE_COMMANDS = [
   /\bshred\b/i,
   /:\(\)\s*\{\s*:\|:&\s*\}\s*;:/, // fork bomb
   /\bchmod\s+-R\s+777\b/i,
-  /\bgit\s+push\s+.*--force/i,
+  /*
+   * Git force-push is deliberately NOT a pattern here. It is decided by
+   * `analyzeGitPush`, because a regex cannot tell `--force` from
+   * `--force-with-lease` (the second starts with the first) and cannot see the
+   * short form `-f` at all. See the `destructive-command` rule below.
+   */
   /\bgit\s+reset\s+--hard/i,
   /\bdrop\s+(table|database|schema)\b/i,
   /\btruncate\s+table\b/i,
@@ -301,6 +545,16 @@ export function isKnownSafeCommand(command) {
   const trimmed = command.trim();
   if (SHELL_METACHARACTERS.test(trimmed)) return false;
   if (trimmed.length > 200) return false;
+  /*
+   * A command whose operand is a credential file is never "known safe".
+   *
+   * `cat .env` matches an allowlist entry shaped `cat <one token>`, and that is
+   * how the canonical credential read came back ALLOWED: the allowlist lowered
+   * it below the level at which any credential rule could act. An allowlist
+   * that can be pointed at a secret file is not an allowlist for inspection, it
+   * is a file-exfiltration primitive.
+   */
+  if (referencesCredentialFile(trimmed)) return false;
   return KNOWN_SAFE_COMMANDS.some((re) => re.test(trimmed));
 }
 
@@ -351,9 +605,7 @@ export const RISK_RULES = [
      * shell was merely HIGH, which is a hole an agent finds by accident on its
      * first retry. Found by the adversarial corpus.
      */
-    when: (c) =>
-      CREDENTIAL_PATHS.some((re) => re.test(c.resource ?? "")) ||
-      CREDENTIAL_PATHS.some((re) => re.test(c.command ?? "")),
+    when: (c) => referencesCredentialFile(c.resource ?? "") || referencesCredentialFile(c.command ?? ""),
   },
   {
     id: "cloud-metadata-request",
@@ -381,7 +633,15 @@ export const RISK_RULES = [
     id: "destructive-command",
     level: RISK.CRITICAL,
     why: "Command matches a pattern that destroys data or history rather than changing it.",
-    when: (c) => DESTRUCTIVE_COMMANDS.some((re) => re.test(c.command ?? "")),
+    when: (c) =>
+      DESTRUCTIVE_COMMANDS.some((re) => re.test(c.command ?? "")) ||
+      analyzeGitPush(c.command ?? "")?.force === true,
+  },
+  {
+    id: "destructive-sql",
+    level: RISK.CRITICAL,
+    why: "The statement destroys or redefines data, schema, or authority rather than reading it.",
+    when: (c) => sqlKindOf(c) === SQL_KIND.DESTRUCTIVE,
   },
   {
     id: "remote-code-execution",
@@ -398,6 +658,12 @@ export const RISK_RULES = [
 
   /* -------------------------------------------------------------------- HIGH */
   {
+    id: "git-force-with-lease",
+    level: RISK.HIGH,
+    why: "Overwrites a remote ref, conditionally: it refuses if somebody else has pushed since your last fetch. Safer than an unconditional force-push, still an overwrite of shared history, so it is held for a human rather than refused.",
+    when: (c) => analyzeGitPush(c.command ?? "")?.forceWithLease === true,
+  },
+  {
     id: "shell-execution",
     level: RISK.HIGH,
     why: "Arbitrary command execution. Whatever the policy says about individual tools, a shell can reach past all of them.",
@@ -410,10 +676,17 @@ export const RISK_RULES = [
     id: "database-write",
     level: RISK.HIGH,
     why: "Mutates persistent state that other systems read. Usually recoverable, never for free.",
-    when: (c) =>
-      c.action === "db.write" ||
-      c.action === "db.migrate" ||
-      /\b(insert|update|delete|upsert|merge|alter|create)\s+/i.test(c.sql ?? ""),
+    when: (c) => {
+      if (c.action === "db.write" || c.action === "db.migrate") return true;
+      /*
+       * The statement is classified structurally, and anything that is not
+       * provably a read counts here. `unknown` is included deliberately: a
+       * statement the classifier cannot read is a statement whose effect is
+       * not established, and treating that as a read is the fail-open this
+       * rule exists to close.
+       */
+      return isReadEscalating(sqlKindOf(c));
+    },
   },
   {
     id: "external-egress",
@@ -516,13 +789,13 @@ function hostOf(value) {
  *
  * @returns {{level: RiskLevel, rank: number, posture: string, signals: Array<{id:string,level:RiskLevel,why:string}>, reason: string}}
  */
-export function classify(call = {}) {
-  const c = {
+export function classify(call = {}) {  const c = {
     action: call.action ?? null,
     tool: call.tool ?? null,
     resource: call.resource ?? "",
     command: commandOf(call),
     sql: call.sql ?? call.arguments?.sql ?? call.arguments?.query ?? null,
+    sqlKind: call.sql_kind ?? call.sqlKind ?? null,
     destination: call.destination ?? null,
     environment: call.environment ?? call.context?.environment ?? "local",
     egress: call.egress ?? egressOf(call),

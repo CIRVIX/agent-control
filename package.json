@@ -19,6 +19,11 @@
     "packages/agent-control"
   ],
   "scripts": {
+    "build": "next build",
+    "start": "next start",
+    "dev": "next dev",
+    "typecheck": "tsc --noEmit",
+    "verify:claims": "node tools/check-claims.mjs",
     "test": "npm test --workspace @cirvix_ai/agent-control",
     "verify:adversarial": "npm run verify:adversarial --workspace @cirvix_ai/agent-control",
     "verify:version": "node tools/check-version.mjs",

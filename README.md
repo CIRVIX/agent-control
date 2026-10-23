@@ -51,12 +51,12 @@ Requires Node 20+ or Python 3.9+.
 
 ## Free forever
 
-The free tier is the whole engine, running locally: **100 policy decisions a
+The free tier is the whole engine, running locally: **1,000 policy decisions a
 day, one governed agent, ephemeral secrets that clear on restart, and an audit
 log that stays on your machine for the life of the deployment.** No account, no
 card, no expiring trial. When you outgrow single-agent use — shared policy
 distribution, team vault, SSO, hosted retention — that is the
-[hosted control plane](https://www.cirvix.com/pricing.html)
+[hosted control plane](https://www.cirvix.com/pricing)
 (Starter / Pro / Team / Enterprise; annual billing is two months free).
 
 ## See it stop a real attack

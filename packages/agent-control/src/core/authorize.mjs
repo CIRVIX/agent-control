@@ -63,13 +63,17 @@ import { classify, deriveConsequence } from "./risk.mjs";
 import {
   classifyEgress,
   classifyTool,
+  escalateSqlAction,
   extractCommand,
   extractDestination,
   extractResource,
   isInsideWorkspace,
   policyRequest,
+  publicToolName,
   requestId as makeRequestId,
+  resolveSqlStatement,
 } from "./normalize.mjs";
+import { analyzeSql } from "./sql.mjs";
 import { scan as scanSecrets, redact as redactSecrets } from "./secret-detect.mjs";
 import { applyDelegation } from "./delegation.mjs";
 import {
@@ -947,10 +951,22 @@ class AuthorizationRun {
     const environment = this.ctx.environment ?? this.deps.environment ?? "local";
     const tool = this.request.tool;
     const args = this.request.arguments ?? this.request.args ?? {};
-    const { action } = classifyTool(tool, this.request.server ?? null);
+    const { tool: baseTool, action: baseAction } = classifyTool(tool, this.request.server ?? null);
     const rawResource = extractResource(args);
     const resource = rawResource ? canonicalizeResource(rawResource, cwd) : "";
     const destination = extractDestination(args, rawResource);
+
+    /*
+     * The same statement-derived escalation the transport normalizer applies.
+     * The canonical core builds its call by hand, so without this a `DROP`
+     * sent over the wire would keep the read action that a `db.read` rule
+     * permits, while the same call through a normalizer was refused. A control
+     * that fires on one code path and not another is the failure the canonical
+     * core exists to prevent.
+     */
+    const sql = resolveSqlStatement(args, tool, rawResource);
+    const sqlAnalysis = sql ? analyzeSql(sql) : null;
+    const action = escalateSqlAction(baseAction, sqlAnalysis?.kind ?? null);
 
     this.call = {
       request_id: this.requestId,
@@ -958,7 +974,7 @@ class AuthorizationRun {
       agent: this.principal,
       source: this.ctx.source ?? null,
       timestamp: this.ctx.timestamp ?? new Date(this.now()).toISOString(),
-      tool: this.classifiedTool,
+      tool: action === baseAction ? baseTool : publicToolName(action),
       raw_tool: String(tool ?? ""),
       action,
       server: this.request.server ?? null,
@@ -967,7 +983,8 @@ class AuthorizationRun {
       raw_resource: rawResource,
       destination,
       command: extractCommand(args),
-      sql: typeof args?.sql === "string" ? args.sql : typeof args?.query === "string" ? args.query : null,
+      sql,
+      sql_kind: sqlAnalysis?.kind ?? null,
       environment,
       insideWorkspace: isInsideWorkspace(cwd, resource),
       egress: classifyEgress(destination ?? rawResource),

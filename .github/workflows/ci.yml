@@ -28,8 +28,8 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Canonical version check
         run: npm run verify:version
-      - name: Claim consistency (site vs shipped code)
-        run: npm run verify:claims
+      # The marketing-site application source is maintained separately; this
+      # repository contains the Node and Python packages, not the site app.
       - name: Node tests
         run: npm test
       - name: Python tests
@@ -54,23 +54,3 @@ jobs:
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz -o /tmp/gl.tgz
           mkdir -p /tmp/gl && tar -xzf /tmp/gl.tgz -C /tmp/gl
           /tmp/gl/gitleaks detect --source . --redact
-
-  site-build:
-    # The marketing site had no CI at all, which is how a checkout button could
-    # ship on a page whose own FAQ says checkout does not exist. This job proves
-    # the site compiles and that its published claims match the shipped package.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - name: Install workspace
-        run: npm ci --ignore-scripts
-      - name: Claim consistency
-        run: npm run verify:claims
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Production build
-        run: npm run build

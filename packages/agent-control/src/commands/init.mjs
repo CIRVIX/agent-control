@@ -120,6 +120,60 @@ deny:
   reason = "SSH private keys are never readable by an agent."
 
 deny:
+  name = deny-gnupg
+  tool = filesystem.read
+  path = **/.gnupg/**
+  reason = "GPG private keys and keyrings are never readable by an agent."
+
+deny:
+  name = deny-kube-config
+  tool = filesystem.read
+  path = **/.kube/**
+  reason = "Kubernetes credentials and cluster configurations are never readable by an agent."
+
+deny:
+  name = deny-docker-config
+  tool = filesystem.read
+  path = **/.docker/**
+  reason = "Container registry credentials are never readable by an agent."
+
+deny:
+  name = deny-npmrc
+  tool = filesystem.read
+  path = **/.npmrc
+  reason = "Package registry auth tokens are never readable by an agent."
+
+deny:
+  name = deny-netrc
+  tool = filesystem.read
+  path = **/.netrc
+  reason = "Stored network credentials are never readable by an agent."
+
+deny:
+  name = deny-cloud-sdk-config
+  tool = filesystem.read
+  path = **/.config/gcloud/**
+  reason = "Cloud SDK credentials are never readable by an agent."
+
+deny:
+  name = deny-azure-config
+  tool = filesystem.read
+  path = **/.azure/**
+  reason = "Azure CLI credentials are never readable by an agent."
+
+deny:
+  name = deny-private-keys
+  tool = filesystem.read
+  path = **/*.key
+  reason = "Private key files are never readable by an agent."
+
+deny:
+  name = deny-pkcs12-certificates
+  tool = filesystem.read
+  path = **/*.p12
+  reason = "PKCS#12 bundles are never readable by an agent."
+
+deny:
   name = deny-cloud-metadata
   network.destination = 169.254.169.254
   reason = "The cloud instance-metadata endpoint returns live role credentials to anything that can reach it."
@@ -178,6 +232,32 @@ deny:
   command = "curl"
   risk >= CRITICAL
   reason = "Downloading code and executing it in one step means nothing inspects it in between."
+
+# The blanket rule above already refuses an unconditional force-push, because
+# the risk engine scores --force, -f and a +refspec CRITICAL. It is named
+# separately because the reason is the useful part: an unconditional force-push
+# discards commits other people may already have. The conditional form,
+# --force-with-lease, is HIGH rather than CRITICAL — it refuses when somebody
+# else has pushed since your last fetch — and is held just below instead of
+# being refused here.
+deny:
+  name = deny-history-rewrite
+  tool = shell.exec
+  command = "git push"
+  risk >= CRITICAL
+  reason = "An unconditional force-push discards commits other people may already have. Recoverable only if somebody still has the objects."
+  remediation = "If the rewrite is intended, use git push --force-with-lease — it refuses when somebody else has pushed since your last fetch."
+
+# A statement that drops, truncates, or redefines schema or authority. The
+# action is database.write rather than database.query because the tool's
+# spelling is not evidence about the statement: a sql_query tool carrying
+# DROP TABLE users is a write, and this rule is what makes that visible.
+deny:
+  name = deny-destructive-sql
+  tool = database.write
+  risk >= CRITICAL
+  reason = "A statement that drops, truncates, or redefines schema or authority is refused outright rather than held. A DROP is recoverable only from a backup, and a GRANT is not recoverable at all."
+  remediation = "Run the statement against a scratch database, or add an explicit allow rule naming this exact statement."
 
 deny:
   name = deny-workspace-escape
@@ -315,6 +395,13 @@ require_approval:
   tool = database.write
   approvers = platform-oncall
   reason = "Mutates persistent state that other systems read."
+
+require_approval:
+  name = approve-force-with-lease
+  tool = shell.exec
+  command = "git push --force-with-lease"
+  approvers = developer
+  reason = "A conditional overwrite of a shared ref: it refuses if somebody else has pushed since your last fetch. Safer than --force, which is why it is held rather than refused — but it still rewrites history other people may be building on."
 
 require_approval:
   name = approve-high-risk-shell

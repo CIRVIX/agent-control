@@ -605,12 +605,26 @@ STARTER_RULES: list[dict[str, Any]] = [
         "resources": [
             "**/.aws/**",
             "**/.ssh/**",
+            "**/.gnupg/**",
+            "**/.kube/**",
             "**/.kube/config",
             "**/.npmrc",
             "**/.netrc",
+            "**/.docker/**",
             "**/.docker/config.json",
+            "**/.config/gcloud/**",
+            "**/.gcloud/**",
+            "**/.azure/**",
+            "**/*.key",
+            "**/*.p12",
+            "**/*.pfx",
+            "**/*.pkcs12",
+            "**/id_rsa",
+            "**/id_ed25519",
+            "**/id_ecdsa",
+            "**/id_dsa",
         ],
-        "reason": "Cloud, SSH, and registry credentials are never readable by an agent.",
+        "reason": "Cloud, SSH, GPG, registry, and private key credentials are never readable by an agent.",
         "remediation": "Use a scoped secret handle instead of the credential file.",
     },
     {
@@ -622,6 +636,45 @@ STARTER_RULES: list[dict[str, Any]] = [
         "reason": (
             "The resolved path is outside the workspace root. Traversal and symlinks are "
             "resolved before this check."
+        ),
+    },
+    {
+        # A statement that drops, truncates, or redefines schema or authority.
+        #
+        # The condition reads the STRUCTURAL classification of the SQL, not a
+        # substring of it, so `DROP TABLE users` arriving through a tool named
+        # `sql_query` is caught even though the tool's name says "read".
+        "name": "deny-destructive-sql",
+        "effect": EFFECT.FORBID,
+        "actions": ["*"],
+        "resources": ["*"],
+        "when": [{"path": "sql.kind", "op": "eq", "value": "destructive"}],
+        "reason": (
+            "A statement that drops, truncates, or redefines schema or authority is refused "
+            "outright rather than held. A DROP is recoverable only from a backup, and a GRANT "
+            "is not recoverable at all."
+        ),
+        "remediation": (
+            "Run the statement against a scratch database, or add an explicit allow rule "
+            "naming this exact statement."
+        ),
+    },
+    {
+        # `--force-with-lease` is a conditional overwrite: it refuses when
+        # somebody else has pushed since your last fetch. Safer than `--force`
+        # — which is not authorized by these rules at all, so it lands on
+        # default-deny — but it still rewrites shared history, so it is held
+        # rather than allowed.
+        "name": "require-approval-force-with-lease",
+        "effect": EFFECT.HOLD,
+        "actions": ["shell.exec"],
+        "resources": ["*"],
+        "when": [{"path": "git.forceWithLease", "op": "eq", "value": True}],
+        "approvers": ["developer"],
+        "reason": (
+            "A conditional overwrite of a shared ref. Safer than an unconditional force-push, "
+            "which is why it is held rather than refused — but it still rewrites history other "
+            "people may be building on."
         ),
     },
     {

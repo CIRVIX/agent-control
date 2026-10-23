@@ -19,6 +19,85 @@ deny:
   reason = "Writes outside the workspace root are outside what this run was scoped to change."
 
 deny:
+  name = deny-dotenv
+  tool = filesystem.read
+  path = **/.env
+  reason = "Reading .env is the shortest path from a prompt injection to a live credential."
+  remediation = "Request the value as a handle: secrets.get(\"NAME\")"
+
+deny:
+  name = deny-dotenv-variants
+  tool = filesystem.read
+  path = **/.env.*
+  reason = ".env.production and friends hold sensitive credentials."
+
+deny:
+  name = deny-aws
+  tool = filesystem.read
+  path = **/.aws/**
+  reason = "Cloud credentials are never readable by an agent."
+
+deny:
+  name = deny-ssh
+  tool = filesystem.read
+  path = **/.ssh/**
+  reason = "An SSH private key is authentication to every host that trusts it."
+
+deny:
+  name = deny-gnupg
+  tool = filesystem.read
+  path = **/.gnupg/**
+  reason = "GPG private keys sign releases and decrypt archives."
+
+deny:
+  name = deny-kube-config
+  tool = filesystem.read
+  path = **/.kube/**
+  reason = "A kubeconfig is cluster-admin to whatever it points at."
+
+deny:
+  name = deny-npmrc
+  tool = filesystem.read
+  path = **/.npmrc
+  reason = "An npm token can publish a package the whole company installs."
+
+deny:
+  name = deny-netrc
+  tool = filesystem.read
+  path = **/.netrc
+  reason = ".netrc holds plaintext credentials for every host it lists."
+
+deny:
+  name = deny-docker-config
+  tool = filesystem.read
+  path = **/.docker/**
+  reason = "Registry credentials let an attacker publish an image your cluster pulls."
+
+deny:
+  name = deny-cloud-sdk-config
+  tool = filesystem.read
+  path = **/.config/gcloud/**
+  reason = "Cloud SDK credentials are never readable by an agent."
+
+deny:
+  name = deny-azure-config
+  tool = filesystem.read
+  path = **/.azure/**
+  reason = "Azure CLI credentials are never readable by an agent."
+
+deny:
+  name = deny-private-keys
+  tool = filesystem.read
+  path = **/*.key
+  reason = "Private key files are never readable by an agent."
+
+deny:
+  name = deny-pkcs12
+  tool = filesystem.read
+  path = **/*.p12
+  reason = "A PKCS#12 bundle contains a private key."
+
+deny:
   name = deny-workspace-escape-delete
   tool = filesystem.delete
   workspace = false
@@ -30,11 +109,31 @@ deny:
   command = "rm -rf"
   reason = "Recursive force-delete destroys state rather than changing it."
 
+# The condition used to be `command = "git push --force"`, which was wrong in
+# both directions. A substring match for `--force` also matched
+# `--force-with-lease` — the *safer* form — and the short spelling `-f`,
+# which is the same flag, matched nothing at all. So the dangerous command was
+# held for a rubber stamp and the conditional one was refused outright.
+#
+# `command = "git push"` now only narrows this rule to git pushes. Whether the
+# push is an *unconditional* force-push is the risk engine's decision, and
+# `risk >= CRITICAL` means exactly that: `--force`, `-f`, and a `+refspec` are
+# CRITICAL, while `--force-with-lease` is HIGH and held by
+# `approve-force-with-lease` below.
 deny:
   name = deny-history-rewrite
   tool = shell.exec
-  command = "git push --force"
-  reason = "Force-push discards commits other people may already have. Recoverable only if somebody still has the objects."
+  command = "git push"
+  risk >= CRITICAL
+  reason = "An unconditional force-push discards commits other people may already have. Recoverable only if somebody still has the objects."
+  remediation = "If the rewrite is intended, use `git push --force-with-lease` — it refuses when somebody else has pushed since your last fetch."
+
+deny:
+  name = deny-destructive-sql
+  tool = database.write
+  risk >= CRITICAL
+  reason = "A statement that drops, truncates, or redefines schema or authority is refused outright rather than held. A DROP is recoverable only from a backup, and a GRANT is not recoverable at all."
+  remediation = "Run the statement against a scratch database, or add an explicit allow rule naming this exact statement."
 
 deny:
   name = deny-hard-reset
@@ -55,6 +154,13 @@ require_approval:
   tool = package.install
   approvers = developer
   reason = "Installs third-party code that may run install-time scripts with your permissions."
+
+require_approval:
+  name = approve-force-with-lease
+  tool = shell.exec
+  command = "git push --force-with-lease"
+  approvers = developer
+  reason = "A conditional overwrite of a shared ref: it refuses if somebody else has pushed since your last fetch. Safer than `--force`, which is why it is held rather than refused — but it still rewrites history other people may be building on."
 
 require_approval:
   name = approve-high-risk-shell
@@ -175,6 +281,26 @@ test "force push":
   command = git push --force origin main
   expect deny
 
+test "force push through the short flag is the same command":
+  tool = shell.exec
+  command = git push -f origin main
+  expect deny
+
+test "a leased force push waits for a human instead of being refused":
+  tool = shell.exec
+  command = git push --force-with-lease origin main
+  expect require_approval
+
+test "an ordinary push still only needs a human":
+  tool = shell.exec
+  command = git push origin main
+  expect require_approval
+
+test "a destructive statement cannot pose as a read":
+  tool = sql_query
+  url = DROP TABLE users
+  expect deny
+
 test "an unrecognised shell command waits for a human":
   tool = shell.exec
   command = ./scripts/whatever.sh
@@ -187,3 +313,28 @@ test "a database write waits for a human":
 test "a database read is fine":
   tool = database.query
   expect allow
+
+test "reading an aws credential file":
+  tool = filesystem.read
+  path = ~/.aws/credentials
+  expect deny
+
+test "reading a gnupg keyring":
+  tool = filesystem.read
+  path = ~/.gnupg/secring.gpg
+  expect deny
+
+test "reading npmrc":
+  tool = filesystem.read
+  path = ~/.npmrc
+  expect deny
+
+test "reading docker config":
+  tool = filesystem.read
+  path = ~/.docker/config.json
+  expect deny
+
+test "reading a private key":
+  tool = filesystem.read
+  path = ~/.ssh/id_rsa
+  expect deny

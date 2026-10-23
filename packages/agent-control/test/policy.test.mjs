@@ -229,13 +229,59 @@ test("starter rules deny reading .env.production", () => {
   assert.match(d.remediation, /secrets\.get/);
 });
 
-test("starter rules permit an ordinary workspace read", () => {
-  const d = evaluate(
-    { agent: "pr-triage", action: "fs.read", resource: "/repo/src/index.ts", context: ctx() },
-    STARTER_RULES,
-    { cwd: "/repo" },
-  );
-  assert.equal(d.verdict, "permit");
+test("starter rules deny credential-bearing paths (gnupg, docker, kube, npmrc, netrc, cloud, private keys)", () => {
+  const credentialPaths = [
+    "/repo/.npmrc",
+    "/home/user/.npmrc",
+    "/home/user/.netrc",
+    "/home/user/.gnupg/secring.gpg",
+    "/home/user/.gnupg/pubring.kbx",
+    "/home/user/.docker/config.json",
+    "/home/user/.docker/daemon.json",
+    "/home/user/.kube/config",
+    "/home/user/.kube/credentials",
+    "/home/user/.config/gcloud/credentials.db",
+    "/home/user/.gcloud/application_default_credentials.json",
+    "/home/user/.azure/credentials",
+    "/repo/keys/server.key",
+    "/repo/certs/client.p12",
+    "/repo/certs/cert.pfx",
+    "/repo/certs/vault.pkcs12",
+    "/home/user/.ssh/id_rsa",
+    "/home/user/.ssh/id_ed25519",
+    "/home/user/.ssh/id_ecdsa",
+    "/home/user/.ssh/id_dsa",
+    "/repo/sub/../../.npmrc",
+  ];
+
+  for (const cred of credentialPaths) {
+    const d = evaluate(
+      { agent: "pr-triage", action: "fs.read", resource: cred, context: ctx() },
+      STARTER_RULES,
+      { cwd: "/repo" },
+    );
+    assert.equal(d.verdict, "deny", `Expected deny for ${cred}, got ${d.verdict}`);
+    assert.equal(d.rule, "deny-credential-files");
+  }
+});
+
+test("starter rules preserve legitimate non-sensitive workspace access", () => {
+  const benignFiles = [
+    "/repo/src/index.ts",
+    "/repo/package.json",
+    "/repo/tsconfig.json",
+    "/repo/README.md",
+    "/repo/public/styles.css",
+  ];
+
+  for (const benign of benignFiles) {
+    const d = evaluate(
+      { agent: "pr-triage", action: "fs.read", resource: benign, context: ctx() },
+      STARTER_RULES,
+      { cwd: "/repo" },
+    );
+    assert.equal(d.verdict, "permit", `Expected permit for ${benign}, got ${d.verdict}`);
+  }
 });
 
 test("starter rules deny reading outside the workspace", () => {

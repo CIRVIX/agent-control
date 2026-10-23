@@ -144,6 +144,14 @@ scope, inline secrets in config, and duplication across runtimes.
 `~/.netrc`, `~/.config/gcloud/credentials.db`, and `.env` files in the
 workspace.
 
+### Reading the heuristic signals
+
+The current probes recognize runtime/client configuration for Claude Code, Cursor, Windsurf, Cline, Roo Code, OpenAI Codex CLI, Gemini CLI, VS Code (MCP), and generic MCP clients; selected framework dependency declarations; MCP entries matching broad-path, inline-environment-key, or duplicate-entry heuristics; and selected credential paths plus eligible workspace-root `.env*` files with secret-shaped, non-placeholder values. Inline environment signals report key names, not values. These are local configuration and path signals, not source-code or behavior tests.
+
+The finding names are not proof of live behavior: `runtime-ungoverned` reflects a configuration/adapter check, not live routing; `credential-readable` means a selected path or `.env` signal matched, not that a running agent can read it; and `framework-uninstrumented` means a dependency declaration matched, not that source code lacks a wrapper. A clean result such as `runtimes none detected` or `No ungoverned surfaces found on this machine.` means only that this run found no match among supported probes. The scan itself opens no network connection; `npx` may fetch the package. JSON includes paths and configured MCP command/argument metadata, and `--deep` prints command lines, so review before sharing.
+
+After inventory, run [`cirvix check`](#cirvix-check) for a hypothetical policy decision, then continue to [First Node wrapper proof](./quickstart.md#first-node-wrapper-proof) for the verified executable allow/deny example through the returned wrapper. That demo covers calls made through that wrapper; it does not demonstrate live routing from an arbitrary agent.
+
 ### Finding codes
 
 | Code | Severity | Raised when |

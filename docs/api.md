@@ -9,7 +9,7 @@ Hosted availability is unknown. Client defaults naming an API host neither estab
 ```bash
 export CIRVIX_API=https://cirvix.internal.example.com
 curl -s $CIRVIX_API/health
-# {"status":"ok","version":"0.3.0","uptime":12.4}
+# {"status":"ok","version":"0.3.1","uptime":12.4}
 ```
 
 ## Two invariants, enforced structurally
